@@ -204,10 +204,31 @@
       "touchdown_bank": "Touchdown Bank",
       "touchdown_heading": "Touchdown Heading",
       "no_touchdown_yet": "noch keine Landung erfasst",
-      "not_wired": "von diesem Flugzeug nicht geliefert"
+      "not_wired": "von diesem Flugzeug nicht geliefert",
+      "light_landing": "Landing",
+      "light_taxi": "Taxi",
+      "light_beacon": "Beacon",
+      "light_strobe": "Strobe",
+      "light_nav": "Nav",
+      "light_logo": "Logo",
+      "ap_master": "Master",
+      "ap_heading": "HDG",
+      "ap_altitude": "ALT",
+      "ap_nav": "NAV",
+      "ap_approach": "APR",
+      "parking_brake": "Park-Bremse",
+      "stall_warning": "Stall",
+      "overspeed_warning": "Overspeed"
+    },
+    "groups": {
+      "lights": "Beleuchtung",
+      "autopilot": "Autopilot",
+      "aircraft": "Flugzeug",
+      "engines": "Triebwerke"
     },
     "sections": {
       "mass_fuel": "Masse & Kraftstoff",
+      "switches": "Schalter & Anzeigen",
       "touchdown": "Letzter Touchdown (vom Sim erfasst)"
     }
   },

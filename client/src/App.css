@@ -1106,6 +1106,96 @@ button:disabled {
   font-style: italic;
 }
 
+/* ----- Switch State Panel (Settings → Debug) ----- */
+
+.switch-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.switch-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.switch-group__label {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.switch-group__pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.switch-grid__count {
+  font-family: "SF Mono", "Cascadia Code", "Source Code Pro", Menlo, Consolas,
+    monospace;
+  font-feature-settings: "tnum" 1;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.switch-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  border: 1px solid transparent;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.switch-pill__dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: currentColor;
+  flex: 0 0 auto;
+}
+
+.switch-pill--on {
+  background: color-mix(in srgb, #22c55e 20%, transparent);
+  color: #22c55e;
+  border-color: color-mix(in srgb, #22c55e 35%, transparent);
+}
+
+.switch-pill--off {
+  background: transparent;
+  color: var(--text-muted);
+  border-color: var(--border);
+}
+
+.switch-pill--off .switch-pill__dot {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px currentColor;
+}
+
+.switch-pill--unknown {
+  background: transparent;
+  color: var(--text-muted);
+  border-color: var(--border);
+  border-style: dashed;
+  opacity: 0.6;
+}
+
+.switch-pill--unknown .switch-pill__dot {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px currentColor;
+}
+
 /* ===== Login form ===== */
 
 .login {

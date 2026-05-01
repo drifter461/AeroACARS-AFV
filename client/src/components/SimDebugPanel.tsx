@@ -91,10 +91,102 @@ export function SimDebugPanel({ status }: Props) {
         <>
           <SnapshotGrid snap={snapshot} locale={i18n.language} />
           <MassFuelGrid snap={snapshot} locale={i18n.language} />
+          <SwitchStatePanel snap={snapshot} />
           <TouchdownGrid snap={snapshot} locale={i18n.language} />
         </>
       )}
     </section>
+  );
+}
+
+/**
+ * Switch & light state, rendered as colored pills grouped by
+ * subsystem. Lets a pilot flip a switch in the cockpit and immediately
+ * see whether the change reaches our pipeline — useful both for
+ * end-user debugging ("why isn't my landing light registering?") and
+ * for development work on aircraft profiles, since you can verify at
+ * a glance which SimVar/LVar mapping is working.
+ *
+ * `null` values are rendered with a muted dash to distinguish "we
+ * don't read this for the active aircraft" from "we read it and it's
+ * off".
+ */
+function SwitchStatePanel({ snap }: { snap: SimSnapshot }) {
+  const { t } = useTranslation();
+  return (
+    <>
+      <h3 className="sim-panel__section">{t("sim.sections.switches")}</h3>
+      <div className="switch-grid">
+        <SwitchGroup label={t("sim.groups.lights")}>
+          <Pill label={t("sim.fields.light_landing")} value={snap.light_landing} />
+          <Pill label={t("sim.fields.light_taxi")} value={snap.light_taxi} />
+          <Pill label={t("sim.fields.light_beacon")} value={snap.light_beacon} />
+          <Pill label={t("sim.fields.light_strobe")} value={snap.light_strobe} />
+          <Pill label={t("sim.fields.light_nav")} value={snap.light_nav} />
+          <Pill label={t("sim.fields.light_logo")} value={snap.light_logo} />
+        </SwitchGroup>
+        <SwitchGroup label={t("sim.groups.autopilot")}>
+          <Pill label={t("sim.fields.ap_master")} value={snap.autopilot_master} />
+          <Pill label={t("sim.fields.ap_heading")} value={snap.autopilot_heading} />
+          <Pill label={t("sim.fields.ap_altitude")} value={snap.autopilot_altitude} />
+          <Pill label={t("sim.fields.ap_nav")} value={snap.autopilot_nav} />
+          <Pill label={t("sim.fields.ap_approach")} value={snap.autopilot_approach} />
+        </SwitchGroup>
+        <SwitchGroup label={t("sim.groups.aircraft")}>
+          <Pill label={t("sim.fields.parking_brake")} value={snap.parking_brake} />
+          <Pill label={t("sim.fields.stall_warning")} value={snap.stall_warning} />
+          <Pill label={t("sim.fields.overspeed_warning")} value={snap.overspeed_warning} />
+        </SwitchGroup>
+        <SwitchGroup label={t("sim.groups.engines")}>
+          <span className="switch-grid__count">
+            {snap.engines_running} / 4
+          </span>
+        </SwitchGroup>
+      </div>
+    </>
+  );
+}
+
+/**
+ * One switch state. Three visual states:
+ *  - on:  filled colored pill
+ *  - off: hollow outlined pill
+ *  - null/unknown: muted dash (we don't have a wiring for this on
+ *                  the current aircraft profile)
+ */
+function Pill({
+  label,
+  value,
+}: {
+  label: string;
+  value: boolean | null | undefined;
+}) {
+  if (value === null || value === undefined) {
+    return (
+      <span className="switch-pill switch-pill--unknown">
+        <span className="switch-pill__dot" /> {label}
+      </span>
+    );
+  }
+  return (
+    <span className={`switch-pill switch-pill--${value ? "on" : "off"}`}>
+      <span className="switch-pill__dot" /> {label}
+    </span>
+  );
+}
+
+function SwitchGroup({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="switch-group">
+      <h4 className="switch-group__label">{label}</h4>
+      <div className="switch-group__pills">{children}</div>
+    </div>
   );
 }
 

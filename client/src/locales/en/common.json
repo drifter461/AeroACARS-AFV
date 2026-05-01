@@ -204,10 +204,31 @@
       "touchdown_bank": "Touchdown bank",
       "touchdown_heading": "Touchdown heading",
       "no_touchdown_yet": "no touchdown recorded yet",
-      "not_wired": "not wired by this aircraft"
+      "not_wired": "not wired by this aircraft",
+      "light_landing": "Landing",
+      "light_taxi": "Taxi",
+      "light_beacon": "Beacon",
+      "light_strobe": "Strobe",
+      "light_nav": "Nav",
+      "light_logo": "Logo",
+      "ap_master": "Master",
+      "ap_heading": "HDG",
+      "ap_altitude": "ALT",
+      "ap_nav": "NAV",
+      "ap_approach": "APR",
+      "parking_brake": "Park brake",
+      "stall_warning": "Stall",
+      "overspeed_warning": "Overspeed"
+    },
+    "groups": {
+      "lights": "Lights",
+      "autopilot": "Autopilot",
+      "aircraft": "Aircraft",
+      "engines": "Engines"
     },
     "sections": {
       "mass_fuel": "Mass & Fuel",
+      "switches": "Switches & Indicators",
       "touchdown": "Last Touchdown (sim-latched)"
     }
   },

@@ -132,6 +132,20 @@ export interface SimSnapshot {
   /** Gross weight (`TOTAL WEIGHT` SimVar). null when the aircraft addon
    *  doesn't wire it (e.g. Fenix). Already in kg. */
   total_weight_kg: number | null;
+  /** Exterior lights — null when the active aircraft profile doesn't
+   *  wire the underlying SimVar/LVar. */
+  light_landing: boolean | null;
+  light_beacon: boolean | null;
+  light_strobe: boolean | null;
+  light_taxi: boolean | null;
+  light_nav: boolean | null;
+  light_logo: boolean | null;
+  /** Autopilot state — same null semantics as lights. */
+  autopilot_master: boolean | null;
+  autopilot_heading: boolean | null;
+  autopilot_altitude: boolean | null;
+  autopilot_nav: boolean | null;
+  autopilot_approach: boolean | null;
   /** Latched touchdown sample — populated by SimConnect at the moment
    *  the gear hits the ground. null until the first touchdown. */
   touchdown_vs_fpm: number | null;
