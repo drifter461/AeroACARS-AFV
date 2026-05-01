@@ -26,6 +26,7 @@ interface Props {
 export function CockpitView({
   activeFlight,
   setActiveFlight,
+  simSnapshot,
   onSwitchToBriefing,
 }: Props) {
   const { t } = useTranslation();
@@ -60,6 +61,7 @@ export function CockpitView({
       {!activeFlight.was_just_resumed && (
         <ActiveFlightPanel
           info={activeFlight}
+          simSnapshot={simSnapshot}
           onEnded={() => setActiveFlight(null)}
         />
       )}

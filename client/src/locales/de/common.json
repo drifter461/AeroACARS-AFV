@@ -19,6 +19,13 @@
     "empty_hint": "Wechseln Sie ins Briefing, um einen gebuchten Flug zu starten oder einen offenen PIREP zu adoptieren.",
     "go_briefing": "Zum Briefing"
   },
+  "tapes": {
+    "ias": "IAS",
+    "gs": "GS",
+    "altitude": "Höhe",
+    "vs": "V/S",
+    "heading": "Kurs"
+  },
   "phase_timeline": {
     "title": "Flug-Phasen",
     "nodes": {

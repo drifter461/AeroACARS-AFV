@@ -19,6 +19,13 @@
     "empty_hint": "Head to Briefing to start a booked flight or adopt an in-progress PIREP.",
     "go_briefing": "Open briefing"
   },
+  "tapes": {
+    "ias": "IAS",
+    "gs": "GS",
+    "altitude": "Altitude",
+    "vs": "V/S",
+    "heading": "Heading"
+  },
   "phase_timeline": {
     "title": "Flight phases",
     "nodes": {

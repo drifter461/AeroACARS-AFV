@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTranslation } from "react-i18next";
-import type { ActiveFlightInfo, FlightPhase } from "../types";
+import type { ActiveFlightInfo, FlightPhase, SimSnapshot } from "../types";
+import { LiveTapes } from "./LiveTapes";
 import { ManualFileDialog } from "./ManualFileDialog";
 import { PhaseTimeline } from "./PhaseTimeline";
 import { WeatherBriefing } from "./WeatherBriefing";
@@ -9,6 +10,8 @@ import { WeatherBriefing } from "./WeatherBriefing";
 interface Props {
   /** Active-flight info, owned by Dashboard. Pure display. */
   info: ActiveFlightInfo | null;
+  /** Live sim telemetry — fed into the live-tapes strip. */
+  simSnapshot?: SimSnapshot | null;
   /** Notify parent when the flight ends so it can refresh bids etc. */
   onEnded?: () => void;
 }
@@ -31,7 +34,7 @@ function fmtDistance(nm: number, locale: string): string {
   )} nmi`;
 }
 
-export function ActiveFlightPanel({ info, onEnded }: Props) {
+export function ActiveFlightPanel({ info, simSnapshot, onEnded }: Props) {
   const { t, i18n } = useTranslation();
   const [busy, setBusy] = useState<"end" | "cancel" | "forget" | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -206,6 +209,8 @@ export function ActiveFlightPanel({ info, onEnded }: Props) {
       </header>
 
       <PhaseTimeline phase={info.phase as FlightPhase} />
+
+      <LiveTapes snapshot={simSnapshot ?? null} />
 
       <dl className="active-flight__stats">
         <div className="active-flight__stat">

@@ -207,6 +207,97 @@ button:disabled {
   color: var(--warning);
 }
 
+/* ===== Live tapes (Cockpit) — IAS, GS, altitude, V/S, heading ===== */
+
+.live-tapes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px;
+  padding: 12px 0 4px;
+}
+
+.live-tapes--idle .live-tape {
+  opacity: 0.55;
+}
+
+.live-tape {
+  background: color-mix(in srgb, var(--surface-2) 60%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  border-radius: 10px;
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  position: relative;
+  overflow: hidden;
+}
+
+.live-tape__label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-muted);
+}
+
+.live-tape__value {
+  font-size: 22px;
+  font-weight: 700;
+  font-family: "SF Mono", "Cascadia Code", "Source Code Pro", Menlo, Consolas,
+    monospace;
+  color: var(--text);
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  line-height: 1.1;
+}
+
+.live-tape__prefix {
+  font-size: 16px;
+  margin-right: 2px;
+}
+
+.live-tape__unit {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
+  margin-left: 2px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.live-tape__sub {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-family: "SF Mono", "Cascadia Code", "Source Code Pro", Menlo, Consolas,
+    monospace;
+  margin-top: 2px;
+}
+
+/* V/S colour-coding — climb green, descent amber, level neutral. */
+.live-tape--up {
+  background: color-mix(in srgb, var(--success, #22c55e) 14%, var(--surface-2));
+  border-color: color-mix(in srgb, var(--success, #22c55e) 40%, var(--border));
+}
+.live-tape--up .live-tape__value,
+.live-tape--up .live-tape__prefix {
+  color: var(--success, #22c55e);
+}
+
+.live-tape--down {
+  background: color-mix(in srgb, var(--warning, orange) 14%, var(--surface-2));
+  border-color: color-mix(in srgb, var(--warning, orange) 40%, var(--border));
+}
+.live-tape--down .live-tape__value,
+.live-tape--down .live-tape__prefix {
+  color: var(--warning, orange);
+}
+
+.live-tape--level .live-tape__prefix,
+.live-tape--idle .live-tape__prefix {
+  color: var(--text-muted);
+}
+
 /* ===== Phase timeline (Cockpit) — animated SVG plane on a track ===== */
 
 .phase-timeline {
