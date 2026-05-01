@@ -572,6 +572,19 @@ struct FlightStats {
     /// derived from `flaps_position * 5` and rounded). One log per real
     /// detent change rather than every 0.001 of jitter.
     last_logged_flaps_detent: Option<u8>,
+    /// Gear command position discretised — 0 = up, 1 = down. The
+    /// 0..1 SimVar value is rounded so a moving gear-handle doesn't
+    /// flood the log mid-cycle.
+    last_logged_gear_down: Option<bool>,
+    /// Speed-brake handle deployed (>5%) — distinct from "armed".
+    last_logged_spoilers_deployed: Option<bool>,
+    last_logged_spoilers_armed: Option<bool>,
+    last_logged_apu_running: Option<bool>,
+    last_logged_battery_master: Option<bool>,
+    last_logged_avionics_master: Option<bool>,
+    last_logged_pitot_heat: Option<bool>,
+    last_logged_engine_anti_ice: Option<bool>,
+    last_logged_wing_anti_ice: Option<bool>,
 }
 
 /// Categorised assessment of a touchdown. Computed from peak descent
@@ -3692,6 +3705,146 @@ fn detect_telemetry_changes(app: &AppHandle, flight: &ActiveFlight, snap: &SimSn
             );
         }
         stats.last_logged_overspeed = Some(snap.overspeed_warning);
+    }
+
+    // ---- Gear handle (UP / DOWN — discretised so a moving handle
+    //      doesn't fire mid-cycle entries).
+    let gear_down = snap.gear_position >= 0.5;
+    if stats.last_logged_gear_down != Some(gear_down) {
+        if let Some(prev) = stats.last_logged_gear_down {
+            if prev != gear_down {
+                log_activity_handle(
+                    app,
+                    ActivityLevel::Info,
+                    format!("Gear {}", if gear_down { "DOWN" } else { "UP" }),
+                    Some(format!(
+                        "AGL {:.0} ft, IAS {:.0} kt",
+                        snap.altitude_agl_ft, snap.indicated_airspeed_kt
+                    )),
+                );
+            }
+        }
+        stats.last_logged_gear_down = Some(gear_down);
+    }
+
+    // ---- Spoilers / speed brake.
+    // We split into two events: armed (auto-deploy on touchdown) and
+    // deployed (handle physically pulled back ≥5% — pilot using it
+    // as speed brake or after touchdown).
+    if let Some(armed) = snap.spoilers_armed {
+        if stats.last_logged_spoilers_armed != Some(armed) {
+            if let Some(prev) = stats.last_logged_spoilers_armed {
+                if prev != armed {
+                    log_activity_handle(
+                        app,
+                        ActivityLevel::Info,
+                        format!("Speed brake {}", if armed { "ARMED" } else { "DISARMED" }),
+                        None,
+                    );
+                }
+            }
+            stats.last_logged_spoilers_armed = Some(armed);
+        }
+    }
+    if let Some(pos) = snap.spoilers_handle_position {
+        let deployed = pos > 0.05;
+        if stats.last_logged_spoilers_deployed != Some(deployed) {
+            if let Some(prev) = stats.last_logged_spoilers_deployed {
+                if prev != deployed {
+                    log_activity_handle(
+                        app,
+                        ActivityLevel::Info,
+                        format!(
+                            "Spoilers {}",
+                            if deployed { "DEPLOYED" } else { "RETRACTED" }
+                        ),
+                        if deployed {
+                            Some(format!("Handle {:.0}%", pos * 100.0))
+                        } else {
+                            None
+                        },
+                    );
+                }
+            }
+            stats.last_logged_spoilers_deployed = Some(deployed);
+        }
+    }
+
+    // ---- APU. Bool-only "running" — combine the master-switch state
+    //      with the RPM threshold so we log "APU started" only once
+    //      the unit is actually up, not the moment the switch flips.
+    if let Some(switch) = snap.apu_switch {
+        let running = switch && snap.apu_pct_rpm.unwrap_or(0.0) >= 95.0;
+        if stats.last_logged_apu_running != Some(running) {
+            if let Some(prev) = stats.last_logged_apu_running {
+                if prev != running {
+                    log_activity_handle(
+                        app,
+                        ActivityLevel::Info,
+                        format!("APU {}", if running { "started" } else { "shutdown" }),
+                        None,
+                    );
+                }
+            }
+            stats.last_logged_apu_running = Some(running);
+        }
+    }
+
+    // ---- Electrical / pneumatic systems.
+    log_bool_change(
+        app,
+        snap.battery_master,
+        &mut stats.last_logged_battery_master,
+        "Battery master",
+    );
+    log_bool_change(
+        app,
+        snap.avionics_master,
+        &mut stats.last_logged_avionics_master,
+        "Avionics master",
+    );
+    log_bool_change(
+        app,
+        snap.pitot_heat,
+        &mut stats.last_logged_pitot_heat,
+        "Pitot heat",
+    );
+    log_bool_change(
+        app,
+        snap.engine_anti_ice,
+        &mut stats.last_logged_engine_anti_ice,
+        "Engine anti-ice",
+    );
+    log_bool_change(
+        app,
+        snap.wing_anti_ice,
+        &mut stats.last_logged_wing_anti_ice,
+        "Wing anti-ice",
+    );
+}
+
+/// Helper for bool-only telemetry change logging — checks Option,
+/// initialises silently on first read, and emits an activity-log line
+/// on every subsequent transition.
+fn log_bool_change(
+    app: &AppHandle,
+    snap_value: Option<bool>,
+    last_logged: &mut Option<bool>,
+    label: &str,
+) {
+    let Some(v) = snap_value else { return };
+    if *last_logged != Some(v) {
+        if let Some(prev) = *last_logged {
+            if prev != v {
+                log_activity_handle(
+                    app,
+                    ActivityLevel::Info,
+                    format!("{label} {}", if v { "ON" } else { "OFF" }),
+                    None,
+                );
+            }
+        }
+        *last_logged = Some(v);
     }
 }
 

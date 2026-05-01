@@ -634,6 +634,13 @@ pub fn parse(bytes: &[u8], simulator: Simulator) -> SimSnapshot {
     telemetry_to_snapshot(t, simulator)
 }
 
+/// Map 0.0 → None, anything > 0 → Some. Used for SimVars where a
+/// genuine zero is meaningless (frequencies, percentages) so we can
+/// tell "this addon doesn't wire it" from "it's actually zero".
+fn positive_or_none(v: f32) -> Option<f32> {
+    if v > 0.0 { Some(v) } else { None }
+}
+
 fn read_f64(bytes: &[u8], off: usize) -> Option<f64> {
     bytes.get(off..off + 8).map(|s| {
         let mut buf = [0u8; 8];
@@ -826,15 +833,19 @@ fn telemetry_to_snapshot(t: Telemetry, simulator: Simulator) -> SimSnapshot {
         aircraft_registration: Some(t.atc_id).filter(|s| !s.is_empty()),
         simulator,
         sim_version: None,
-        // Avionics: standard SimVars work for all aircraft except
-        // Fenix, which doesn't wire COM/NAV at all (we'd otherwise
-        // read garbage memory just like with the old crate). Force
-        // None for that profile.
+        // Avionics: standard SimVars. Under the legacy Rust crate we
+        // had to force None for Fenix because the memory layout shifted
+        // and we'd read QNH-bleed garbage (e.g. "COM1 1024 MHz"). Raw
+        // FFI parses each field at a fixed offset so the noise is gone
+        // — emit whatever the SimVar reports. The activity-log change
+        // detector skips entries that don't actually change, so an
+        // aircraft that genuinely doesn't wire these just leaves them
+        // at their default (0 → no log entries) without spamming.
         transponder_code,
-        com1_mhz: if is_fenix { None } else { Some(t.com1_mhz as f32) },
-        com2_mhz: if is_fenix { None } else { Some(t.com2_mhz as f32) },
-        nav1_mhz: if is_fenix { None } else { Some(t.nav1_mhz as f32) },
-        nav2_mhz: if is_fenix { None } else { Some(t.nav2_mhz as f32) },
+        com1_mhz: positive_or_none(t.com1_mhz as f32),
+        com2_mhz: positive_or_none(t.com2_mhz as f32),
+        nav1_mhz: positive_or_none(t.nav1_mhz as f32),
+        nav2_mhz: positive_or_none(t.nav2_mhz as f32),
         light_landing: Some(t.light_landing),
         light_beacon: Some(light_beacon),
         light_strobe: Some(light_strobe),

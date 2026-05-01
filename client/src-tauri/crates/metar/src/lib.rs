@@ -112,7 +112,38 @@ const STATUTE_MILE_M: f32 = 1609.344;
 /// Returns `MetarError::NotFound` if upstream has no current report
 /// (stale stations, military fields). Times out after ~10 s — we
 /// don't want a flaky weather server to hang the takeoff banner.
+///
+/// The aviationweather.gov endpoint is occasionally flaky (intermittent
+/// 5xx, timeouts, dropped connections). To avoid showing the user a red
+/// error banner for every transient hiccup we retry on those classes
+/// of failures up to 2 extra times with a short backoff. NotFound and
+/// Parse failures are *not* retried — those are deterministic answers.
 pub async fn fetch_metar(icao: &str) -> Result<MetarSnapshot, MetarError> {
+    let mut last_err = None;
+    for attempt in 0..3 {
+        match fetch_metar_once(icao).await {
+            Ok(m) => return Ok(m),
+            Err(e) => {
+                let retryable = matches!(
+                    &e,
+                    MetarError::Network(_) | MetarError::Status(_)
+                );
+                last_err = Some(e);
+                if !retryable || attempt == 2 {
+                    break;
+                }
+                // 250 ms, 750 ms backoff — keeps total wait under 1 s
+                // even if both retries fire, so the takeoff banner
+                // doesn't visibly hang.
+                let delay = std::time::Duration::from_millis(250 * (1 + 2 * attempt as u64));
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
+    Err(last_err.expect("at least one attempt"))
+}
+
+async fn fetch_metar_once(icao: &str) -> Result<MetarSnapshot, MetarError> {
     let icao = icao.trim().to_uppercase();
     let url = format!(
         "https://aviationweather.gov/api/data/metar?ids={icao}&format=json&hours=2"

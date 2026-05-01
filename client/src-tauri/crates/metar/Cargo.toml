@@ -13,6 +13,9 @@ serde_json.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+# Used by `tokio::time::sleep` in the fetch retry loop — only the time
+# feature is required, no runtime / I/O.
+tokio = { workspace = true, features = ["time"] }
 
 [lints]
 workspace = true
