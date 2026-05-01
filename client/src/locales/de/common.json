@@ -244,6 +244,22 @@
       "touchdown": "Letzter Touchdown (vom Sim erfasst)"
     }
   },
+  "mass_panel": {
+    "title": "Masse",
+    "dow": "DOW",
+    "payload": "Zuladung",
+    "zfw": "ZFW",
+    "fob": "FOB",
+    "gross_weight": "Bruttogewicht"
+  },
+  "flight_info": {
+    "title": "Flug",
+    "wind": "Wind",
+    "qnh": "QNH",
+    "oat": "OAT",
+    "tat": "TAT",
+    "mach": "Mach"
+  },
   "diff": {
     "title": "Schalter-Detektor (Snapshot-Diff)",
     "hint": "Snapshot A nehmen → Schalter im Cockpit umlegen → Snapshot B nehmen. Die Tabelle zeigt nur die Felder, die sich geändert haben.",

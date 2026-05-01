@@ -1238,6 +1238,67 @@ button:disabled {
   color: var(--text-muted);
 }
 
+/* ----- Mass + Flight info panels (Cockpit tab) ----- */
+
+.mass-panel,
+.flight-info-panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-top: 10px;
+}
+
+.mass-panel__title,
+.flight-info-panel__title {
+  margin: 0 0 8px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+
+.mass-panel__grid,
+.flight-info-panel__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.mass-panel__cell,
+.flight-info-panel__cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.mass-panel__cell dt,
+.flight-info-panel__cell dt {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.mass-panel__cell dd,
+.flight-info-panel__cell dd {
+  margin: 0;
+  font-family: "SF Mono", "Cascadia Code", "Source Code Pro", Menlo, Consolas,
+    monospace;
+  font-feature-settings: "tnum" 1;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.mass-panel__cell--primary dd {
+  color: var(--accent, #5eead4);
+  font-size: 16px;
+  font-weight: 600;
+}
+
 /* ----- SimVar / LVar Inspector (Settings → Debug) ----- */
 
 .inspector-add {

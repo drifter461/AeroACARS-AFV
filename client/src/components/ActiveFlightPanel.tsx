@@ -2,8 +2,10 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTranslation } from "react-i18next";
 import type { ActiveFlightInfo, FlightPhase, SimSnapshot } from "../types";
+import { FlightInfoPanel } from "./FlightInfoPanel";
 import { LiveTapes } from "./LiveTapes";
 import { ManualFileDialog } from "./ManualFileDialog";
+import { MassPanel } from "./MassPanel";
 import { PhaseTimeline } from "./PhaseTimeline";
 import { RouteMap } from "./RouteMap";
 import { WeatherBriefing } from "./WeatherBriefing";
@@ -221,6 +223,9 @@ export function ActiveFlightPanel({ info, simSnapshot, onEnded }: Props) {
       />
 
       <LiveTapes snapshot={simSnapshot ?? null} />
+
+      <MassPanel snapshot={simSnapshot ?? null} />
+      <FlightInfoPanel snapshot={simSnapshot ?? null} />
 
       <dl className="active-flight__stats">
         <div className="active-flight__stat">

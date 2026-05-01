@@ -178,6 +178,11 @@ export interface SimSnapshot {
   wind_speed_kt: number | null;
   qnh_hpa: number | null;
   outside_air_temp_c: number | null;
+  total_air_temp_c: number | null;
+  mach: number | null;
+  /** Aircraft empty weight in kg. `null` on Asobo default airliners
+   *  (their OEW is bogus — verified ~1422 kg for the A320neo). */
+  empty_weight_kg: number | null;
   aircraft_title: string | null;
   aircraft_icao: string | null;
   aircraft_registration: string | null;

@@ -87,6 +87,11 @@ pub const TELEMETRY_FIELDS: &[TelemetryField] = &[
     F::f64("AMBIENT WIND VELOCITY", "knots"),
     F::f64("KOHLSMAN SETTING MB", "millibars"),
     F::f64("AMBIENT TEMPERATURE", "celsius"),
+    /// Total Air Temperature — what an aircraft thermometer measures
+    /// (TAT > OAT in flight due to compression heating).
+    F::f64("TOTAL AIR TEMPERATURE", "celsius"),
+    /// Mach number — current aircraft Mach. 0..1 transonic, >1 supersonic.
+    F::f64("AIRSPEED MACH", "mach"),
     // ---- Avionics (Phase 5 / SU2-safe standard SimVars) ----
     // All wired by Asobo's simulation core regardless of aircraft;
     // Fenix is the documented exception — it bypasses the standard
@@ -241,6 +246,8 @@ pub struct Telemetry {
     pub wind_speed_kt: f64,
     pub qnh_hpa: f64,
     pub oat_c: f64,
+    pub tat_c: f64,
+    pub mach: f64,
 
     pub transponder_bcd: f64,
     pub com1_mhz: f64,
@@ -558,6 +565,8 @@ impl Telemetry {
         pull_f64!(t.wind_speed_kt);
         pull_f64!(t.qnh_hpa);
         pull_f64!(t.oat_c);
+        pull_f64!(t.tat_c);
+        pull_f64!(t.mach);
 
         pull_f64!(t.transponder_bcd);
         pull_f64!(t.com1_mhz);
@@ -799,6 +808,19 @@ fn telemetry_to_snapshot(t: Telemetry, simulator: Simulator) -> SimSnapshot {
         wind_speed_kt: Some(t.wind_speed_kt as f32),
         qnh_hpa: Some(t.qnh_hpa as f32),
         outside_air_temp_c: Some(t.oat_c as f32),
+        total_air_temp_c: Some(t.tat_c as f32),
+        mach: Some(t.mach as f32),
+        // Reject implausibly small EMPTY WEIGHT values (the Asobo
+        // A320neo default reports ~1422 kg, way under any plausible
+        // OEW). Smallest realistic transport-cat empty weight is the
+        // Beech King Air at ~3.5 t / 7700 lb; anything under that is
+        // either a GA aircraft (still plausible) or addon CFG bug.
+        // We err on showing the value and let the pilot judge — but
+        // if it's literally 0, drop it.
+        empty_weight_kg: {
+            let kg = (t.empty_weight_lb * KG_PER_LB) as f32;
+            if kg > 0.0 { Some(kg) } else { None }
+        },
         aircraft_title: Some(t.title).filter(|s| !s.is_empty()),
         aircraft_icao: Some(t.atc_model).filter(|s| !s.is_empty()),
         aircraft_registration: Some(t.atc_id).filter(|s| !s.is_empty()),

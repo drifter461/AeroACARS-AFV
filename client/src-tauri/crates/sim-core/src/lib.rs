@@ -79,6 +79,14 @@ pub struct SimSnapshot {
     pub wind_speed_kt: Option<f32>,
     pub qnh_hpa: Option<f32>,
     pub outside_air_temp_c: Option<f32>,
+    /// Total Air Temperature — corrected for compression heating.
+    pub total_air_temp_c: Option<f32>,
+    /// Current Mach number.
+    pub mach: Option<f32>,
+    /// Aircraft empty weight in kg, sourced from `EMPTY WEIGHT`.
+    /// `None` when the value looks bogus (Asobo's default airliners
+    /// return ~1400 kg here — clearly not a real OEW).
+    pub empty_weight_kg: Option<f32>,
 
     // Identity
     pub aircraft_title: Option<String>,
