@@ -2002,15 +2002,26 @@ input:disabled {
 .bid-card {
   display: flex;
   flex-direction: column;
-  background: var(--surface);
+  background: linear-gradient(
+    180deg,
+    var(--surface) 0%,
+    color-mix(in srgb, var(--accent) 4%, var(--surface)) 100%
+  );
   border: 1px solid var(--border);
   border-radius: 14px;
   overflow: hidden;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease,
+    transform 0.18s ease;
 }
 
 .bid-card:hover {
-  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+  transform: translateY(-1px);
+  box-shadow: 0 4px 16px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.bid-card:hover .bid-card__plane {
+  transform: translateX(8px) rotate(-2deg);
 }
 
 .bid-card--selected {
@@ -2047,17 +2058,19 @@ input:disabled {
 .bid-card__logo {
   /* Sized to comfortably hold both wide logos (Lufthansa wordmark) and
      square logos (UPS shield). White background so black-on-transparent
-     SVGs stay readable in dark mode. */
-  width: 72px;
-  height: 48px;
-  border-radius: 8px;
+     SVGs stay readable in dark mode. Bumped up from 72×48 → 96×64 for
+     the redesigned briefing tab. */
+  width: 96px;
+  height: 64px;
+  border-radius: 10px;
   background: #ffffff;
   display: flex;
   align-items: center;
   justify-content: center;
   overflow: hidden;
   flex-shrink: 0;
-  padding: 4px;
+  padding: 6px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
 }
 
 .bid-card__logo img {
@@ -2076,7 +2089,7 @@ input:disabled {
   );
   color: white;
   font-weight: 700;
-  font-size: 22px;
+  font-size: 28px;
   letter-spacing: 0.05em;
   padding: 0;
 }
@@ -2097,8 +2110,8 @@ input:disabled {
 }
 
 .bid-card__callsign {
-  font-weight: 600;
-  font-size: 15px;
+  font-weight: 700;
+  font-size: 18px;
   letter-spacing: 0.01em;
 }
 
@@ -2128,10 +2141,10 @@ input:disabled {
 .bid-card__icao {
   font-family: "SF Mono", "Cascadia Code", "Source Code Pro", Menlo, Consolas,
     monospace;
-  font-size: 18px;
-  font-weight: 700;
+  font-size: 22px;
+  font-weight: 800;
   color: var(--text);
-  letter-spacing: 0.02em;
+  letter-spacing: 0.04em;
 }
 
 .bid-card__airport-name {
@@ -2167,8 +2180,9 @@ input:disabled {
   z-index: 1;
   background: var(--surface);
   padding: 0 8px;
-  font-size: 18px;
+  font-size: 20px;
   color: var(--accent);
+  transition: transform 0.4s cubic-bezier(0.22, 1, 0.36, 1);
   transform: rotate(0deg);
 }
 
