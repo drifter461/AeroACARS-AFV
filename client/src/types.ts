@@ -206,6 +206,12 @@ export interface ActiveFlightInfo {
   landing_rate_fpm: number | null;
   landing_g_force: number | null;
   was_just_resumed: boolean;
+  /** Stand the aircraft pushed back from (MSFS ATC PARKING NAME). */
+  dep_gate: string | null;
+  /** Stand the pilot parked at after arrival. */
+  arr_gate: string | null;
+  /** Approach runway from `ATC RUNWAY SELECTED` at Final. */
+  approach_runway: string | null;
 }
 
 export interface AirportInfo {

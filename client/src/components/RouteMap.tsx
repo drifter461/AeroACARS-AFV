@@ -13,6 +13,10 @@ interface Props {
   arrIcao: string;
   currentLat?: number | null;
   currentLon?: number | null;
+  /** Optional gate label under the departure ICAO (e.g. "GATE A 12"). */
+  dptGate?: string | null;
+  /** Optional gate label under the arrival ICAO. */
+  arrGate?: string | null;
 }
 
 /**
@@ -30,7 +34,14 @@ interface Props {
  * short/medium-haul; a true Mercator great circle is a follow-up if
  * VAs need accurate transatlantic shapes.
  */
-export function RouteMap({ dptIcao, arrIcao, currentLat, currentLon }: Props) {
+export function RouteMap({
+  dptIcao,
+  arrIcao,
+  currentLat,
+  currentLon,
+  dptGate,
+  arrGate,
+}: Props) {
   const [dpt, setDpt] = useState<AirportInfo | null>(null);
   const [arr, setArr] = useState<AirportInfo | null>(null);
 
@@ -85,11 +96,13 @@ export function RouteMap({ dptIcao, arrIcao, currentLat, currentLon }: Props) {
 
         <div className="route-map__pin route-map__pin--dpt">
           <span className="route-map__icao">{dpt.icao}</span>
+          {dptGate && <span className="route-map__gate">{dptGate}</span>}
           <span className="route-map__dot" />
         </div>
 
         <div className="route-map__pin route-map__pin--arr">
           <span className="route-map__icao">{arr.icao}</span>
+          {arrGate && <span className="route-map__gate">{arrGate}</span>}
           <span className="route-map__dot" />
         </div>
 

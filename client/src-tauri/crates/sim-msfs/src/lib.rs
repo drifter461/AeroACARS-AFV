@@ -452,6 +452,14 @@ mod adapter {
             // Aircraft profile — detected once above so the LVar overrides
             // and the snapshot field agree.
             aircraft_profile: profile,
+            // ATC parking + runway. MSFS leaves these as empty strings
+            // once the aircraft moves off the stand or no runway is
+            // currently selected — convert to None so downstream code
+            // can treat absence cleanly.
+            parking_name: Some(t.atc_parking_name.clone()).filter(|s| !s.is_empty()),
+            parking_number: Some(t.atc_parking_number.clone()).filter(|s| !s.is_empty()),
+            selected_runway: Some(t.atc_runway_selected.clone())
+                .filter(|s| !s.is_empty()),
         }
     }
 

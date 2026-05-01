@@ -344,6 +344,12 @@ struct PersistedFlightStats {
     landing_score: Option<LandingScore>,
     #[serde(default)]
     landing_score_announced: bool,
+    #[serde(default)]
+    dep_gate: Option<String>,
+    #[serde(default)]
+    arr_gate: Option<String>,
+    #[serde(default)]
+    approach_runway: Option<String>,
 }
 
 impl PersistedFlightStats {
@@ -374,6 +380,9 @@ impl PersistedFlightStats {
             bounce_count: stats.bounce_count,
             landing_score: stats.landing_score,
             landing_score_announced: stats.landing_score_announced,
+            dep_gate: stats.dep_gate.clone(),
+            arr_gate: stats.arr_gate.clone(),
+            approach_runway: stats.approach_runway.clone(),
         }
     }
 
@@ -410,6 +419,9 @@ impl PersistedFlightStats {
         stats.bounce_count = self.bounce_count;
         stats.landing_score = self.landing_score;
         stats.landing_score_announced = self.landing_score_announced;
+        stats.dep_gate = self.dep_gate;
+        stats.arr_gate = self.arr_gate;
+        stats.approach_runway = self.approach_runway;
     }
 }
 
@@ -486,6 +498,18 @@ struct FlightStats {
     // ---- Fuel tracking ----
     block_fuel_kg: Option<f32>,
     last_fuel_kg: Option<f32>,
+
+    // ---- Gates / runway (from MSFS ATC SimVars) ----
+    /// Parking stand the pilot pushed back from. Captured the first
+    /// time `step_flight` sees a non-empty `parking_name` while still
+    /// in Boarding. Survives across the whole flight.
+    dep_gate: Option<String>,
+    /// Stand the pilot ended up parked at after arrival. Captured at
+    /// the Boarding-of-block transition (`BlocksOn`).
+    arr_gate: Option<String>,
+    /// `ATC RUNWAY SELECTED` snapshotted at touchdown. Useful for VAs
+    /// that grade "did the pilot land on the right runway".
+    approach_runway: Option<String>,
 
     // ---- Edge detector for activity log (Phase H.3) ----
     /// Last value we logged to the activity feed. Used to detect when the
@@ -670,6 +694,13 @@ pub struct ActiveFlightInfo {
     /// status after an automatic resume (disk or remote). Lets the dashboard
     /// surface a one-time banner with a 10-second cancel window.
     was_just_resumed: bool,
+    /// Departure stand from MSFS `ATC PARKING NAME` (snapshotted at
+    /// the start of the flight). Empty until captured.
+    dep_gate: Option<String>,
+    /// Arrival stand from MSFS `ATC PARKING NAME` after BlocksOn.
+    arr_gate: Option<String>,
+    /// `ATC RUNWAY SELECTED` snapshotted while on Final.
+    approach_runway: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1216,6 +1247,9 @@ fn flight_info(flight: &ActiveFlight) -> ActiveFlightInfo {
         landing_rate_fpm: stats.landing_rate_fpm,
         landing_g_force: stats.landing_g_force,
         was_just_resumed,
+        dep_gate: stats.dep_gate.clone(),
+        arr_gate: stats.arr_gate.clone(),
+        approach_runway: stats.approach_runway.clone(),
     }
 }
 
@@ -2626,6 +2660,19 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
     let was_on_ground = stats.was_on_ground.unwrap_or(snap.on_ground);
     let was_brake = stats.was_parking_brake.unwrap_or(snap.parking_brake);
 
+    // Capture the departure gate as soon as MSFS gives us a parking
+    // name — that means the aircraft is still on the named stand and
+    // hasn't pushed back yet. Set once and stay.
+    if stats.dep_gate.is_none() {
+        if let Some(name) = snap.parking_name.as_ref().filter(|s| !s.is_empty()) {
+            let label = match snap.parking_number.as_ref() {
+                Some(num) if !num.is_empty() => format!("{name} {num}"),
+                _ => name.clone(),
+            };
+            stats.dep_gate = Some(label);
+        }
+    }
+
     // Match on a local Copy so the rest of the body is free to mutate `stats`.
     match prev_phase {
         FlightPhase::Boarding => {
@@ -2677,6 +2724,12 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
             }
         }
         FlightPhase::Final => {
+            // Approach runway: snapshot whatever ATC currently has us
+            // cleared for. May still change before touchdown, so we
+            // refresh until wheels are down.
+            if let Some(rw) = snap.selected_runway.as_ref().filter(|s| !s.is_empty()) {
+                stats.approach_runway = Some(rw.clone());
+            }
             if !was_on_ground && snap.on_ground {
                 next_phase = FlightPhase::Landing;
                 stats.landing_at = Some(now);
@@ -2740,6 +2793,19 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
             if snap.parking_brake && snap.groundspeed_kt < 1.0 && snap.on_ground {
                 next_phase = FlightPhase::BlocksOn;
                 stats.block_on_at = Some(now);
+                // Capture the arrival stand the moment we settle at
+                // the gate. MSFS only fills `parking_name` while the
+                // aircraft is on a named stand, so this is the right
+                // moment.
+                if let Some(name) =
+                    snap.parking_name.as_ref().filter(|s| !s.is_empty())
+                {
+                    let label = match snap.parking_number.as_ref() {
+                        Some(num) if !num.is_empty() => format!("{name} {num}"),
+                        _ => name.clone(),
+                    };
+                    stats.arr_gate = Some(label);
+                }
             }
         }
         FlightPhase::BlocksOn
@@ -2844,6 +2910,17 @@ fn build_pirep_fields(
     }
     if let Some(raw) = stats.arr_metar_raw.as_ref().filter(|s| !s.is_empty()) {
         f.insert("Arrival METAR".into(), raw.clone());
+    }
+
+    // ATC-derived gates and approach runway (from MSFS SimVars).
+    if let Some(g) = stats.dep_gate.as_ref().filter(|s| !s.is_empty()) {
+        f.insert("Departure Gate".into(), g.clone());
+    }
+    if let Some(g) = stats.arr_gate.as_ref().filter(|s| !s.is_empty()) {
+        f.insert("Arrival Gate".into(), g.clone());
+    }
+    if let Some(rw) = stats.approach_runway.as_ref().filter(|s| !s.is_empty()) {
+        f.insert("Approach Runway".into(), rw.clone());
     }
 
     // Computed durations.
@@ -3475,6 +3552,15 @@ fn build_position_log(snap: &SimSnapshot) -> Option<String> {
             "wind_kt": snap.wind_speed_kt,
             "qnh_hpa": snap.qnh_hpa,
             "oat_c": snap.outside_air_temp_c,
+        },
+        // ATC ground-handling info — current parking stand the aircraft
+        // is on (only filled while still on a named stand, blank during
+        // taxi / cruise / approach) and the ATC-cleared runway. Gives
+        // the live-map "where on the ramp / approach" for free.
+        "atc": {
+            "parking_name": snap.parking_name,
+            "parking_number": snap.parking_number,
+            "runway": snap.selected_runway,
         },
         // Aircraft profile that produced this row. Lets the VA admin filter
         // PIREPs by add-on (FBW vs Fenix vs PMDG) when reviewing data and

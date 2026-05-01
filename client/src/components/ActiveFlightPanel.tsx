@@ -216,6 +216,8 @@ export function ActiveFlightPanel({ info, simSnapshot, onEnded }: Props) {
         arrIcao={info.arr_airport}
         currentLat={simSnapshot?.lat ?? null}
         currentLon={simSnapshot?.lon ?? null}
+        dptGate={info.dep_gate}
+        arrGate={info.arr_gate}
       />
 
       <LiveTapes snapshot={simSnapshot ?? null} />

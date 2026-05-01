@@ -98,6 +98,19 @@ pub struct SimSnapshot {
     /// Total fuel-flow across all running engines, kg/h.
     pub fuel_flow_kg_per_h: Option<f32>,
 
+    // ---- ATC / Gate info (from MSFS ATC system) ----
+    /// Stand identifier from `ATC PARKING NAME` (e.g. "GATE_HEAVY").
+    /// Only filled while the aircraft sits on a named stand; goes
+    /// empty after pushback. The recorder snapshots it at flight
+    /// start (departure gate) and on BlocksOn (arrival gate).
+    pub parking_name: Option<String>,
+    /// Stand number suffix (e.g. "12", "A 8") to combine with the name.
+    pub parking_number: Option<String>,
+    /// `ATC RUNWAY SELECTED` — the runway the MSFS ATC system
+    /// currently has the aircraft cleared for. Useful to record the
+    /// approach runway at touchdown.
+    pub selected_runway: Option<String>,
+
     // ---- Aircraft profile (Phase H.4) ----
     /// Detected aircraft profile. Drives which set of variables (default
     /// MSFS SimVars vs add-on-specific LVars) the adapter reads from.
