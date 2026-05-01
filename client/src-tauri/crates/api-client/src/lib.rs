@@ -373,6 +373,11 @@ pub struct FileBody {
     /// Final passenger / cargo loads per fare class.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fares: Option<Vec<FareEntry>>,
+    /// Custom PIREP fields keyed by name. The VA admin configures the fields
+    /// in their phpVMS / ACARS module; we send everything we can compute.
+    /// Spec §24.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fields: Option<std::collections::HashMap<String, String>>,
 }
 
 /// Minimal fare entry for filing — phpVMS uses `id` to look up the fare class
@@ -402,6 +407,30 @@ pub struct UpdateBody {
 #[derive(Debug, Clone, Deserialize)]
 pub struct PirepCreated {
     pub id: String,
+}
+
+/// Lightweight PIREP record returned by `GET /api/user/pireps`. Used to find
+/// an existing in-progress flight so we can resume it instead of doing a
+/// fresh prefile (which would fail with aircraft-not-available because the
+/// existing PIREP holds the aircraft "in use").
+#[derive(Debug, Clone, Deserialize)]
+pub struct PirepSummary {
+    pub id: String,
+    #[serde(default)]
+    pub airline_id: Option<i64>,
+    #[serde(default)]
+    pub flight_number: Option<String>,
+    #[serde(default)]
+    pub aircraft_id: Option<i64>,
+    /// phpVMS PirepState: 0=IN_PROGRESS, 1=PENDING, 2=ACCEPTED, 3=CANCELLED, …
+    #[serde(default)]
+    pub state: Option<i32>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub dpt_airport_id: Option<String>,
+    #[serde(default)]
+    pub arr_airport_id: Option<String>,
 }
 
 /// Subset of `GET /api/fleet/aircraft/{id}` we use for diagnostic purposes,
@@ -519,6 +548,13 @@ impl Client {
     /// `GET /api/user/bids`
     pub async fn get_bids(&self) -> Result<Vec<Bid>, ApiError> {
         self.get_data("/api/user/bids").await
+    }
+
+    /// `GET /api/user/pireps` — pilot's PIREPs (any state). Used during
+    /// flight_start to find an existing in-progress PIREP we should resume
+    /// rather than colliding with a fresh prefile.
+    pub async fn get_user_pireps(&self) -> Result<Vec<PirepSummary>, ApiError> {
+        self.get_data("/api/user/pireps").await
     }
 
     /// `GET /api/airports/{icao}` — single airport lookup with coordinates.

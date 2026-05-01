@@ -137,6 +137,9 @@ export function ActiveFlightPanel({ onEnded }: Props) {
             {t("active_flight.title")}
           </span>
           <h2 className="active-flight__callsign">{info.flight_number}</h2>
+          <span className="active-flight__phase">
+            {t(`active_flight.phase.${info.phase}`, { defaultValue: info.phase })}
+          </span>
         </div>
         <div className="active-flight__route">
           <span className="active-flight__icao">{info.dpt_airport}</span>

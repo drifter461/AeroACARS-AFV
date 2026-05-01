@@ -17,7 +17,7 @@ use api_client::{
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sim_core::{SimKind, SimSnapshot};
+use sim_core::{FlightPhase, SimKind, SimSnapshot};
 use tauri::{AppHandle, Manager};
 use tracing_subscriber::EnvFilter;
 
@@ -130,10 +130,53 @@ struct PersistedFlight {
 
 #[derive(Default)]
 struct FlightStats {
+    // Position tracking.
     last_lat: Option<f64>,
     last_lon: Option<f64>,
     distance_nm: f64,
     position_count: u32,
+
+    // ---- Phase-FSM state ----
+    /// Current flight phase. Starts at Boarding when flight_start fires.
+    phase: FlightPhase,
+    /// Recent transitions for the flight log.
+    transitions: Vec<(DateTime<Utc>, FlightPhase)>,
+    /// Snapshot of the previous tick — used to detect on_ground / parking
+    /// brake transitions cleanly.
+    was_on_ground: Option<bool>,
+    was_parking_brake: Option<bool>,
+
+    // ---- Block / takeoff / landing timestamps (real-time UTC) ----
+    block_off_at: Option<DateTime<Utc>>,
+    takeoff_at: Option<DateTime<Utc>>,
+    landing_at: Option<DateTime<Utc>>,
+    block_on_at: Option<DateTime<Utc>>,
+
+    // ---- Capture at takeoff ----
+    takeoff_weight_kg: Option<f64>,
+    takeoff_fuel_kg: Option<f32>,
+
+    // ---- Capture at touchdown ----
+    landing_rate_fpm: Option<f32>,
+    landing_g_force: Option<f32>,
+    landing_pitch_deg: Option<f32>,
+    landing_speed_kt: Option<f32>,
+    landing_weight_kg: Option<f64>,
+    landing_heading_deg: Option<f32>,
+    landing_fuel_kg: Option<f32>,
+
+    // ---- Fuel tracking ----
+    block_fuel_kg: Option<f32>,
+    last_fuel_kg: Option<f32>,
+}
+
+impl FlightStats {
+    fn new() -> Self {
+        Self {
+            phase: FlightPhase::Boarding,
+            ..Self::default()
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -146,6 +189,16 @@ pub struct ActiveFlightInfo {
     arr_airport: String,
     distance_nm: f64,
     position_count: u32,
+    /// snake_case name of the current `FlightPhase` (e.g. "boarding", "climb").
+    phase: String,
+    /// ISO-8601 timestamps captured at major flight events. Each is `null`
+    /// until the corresponding transition fires.
+    block_off_at: Option<String>,
+    takeoff_at: Option<String>,
+    landing_at: Option<String>,
+    block_on_at: Option<String>,
+    landing_rate_fpm: Option<f32>,
+    landing_g_force: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -458,6 +511,34 @@ fn flight_info(flight: &ActiveFlight) -> ActiveFlightInfo {
         arr_airport: flight.arr_airport.clone(),
         distance_nm: stats.distance_nm,
         position_count: stats.position_count,
+        phase: phase_to_snake(stats.phase).to_string(),
+        block_off_at: stats.block_off_at.map(|t| t.to_rfc3339()),
+        takeoff_at: stats.takeoff_at.map(|t| t.to_rfc3339()),
+        landing_at: stats.landing_at.map(|t| t.to_rfc3339()),
+        block_on_at: stats.block_on_at.map(|t| t.to_rfc3339()),
+        landing_rate_fpm: stats.landing_rate_fpm,
+        landing_g_force: stats.landing_g_force,
+    }
+}
+
+fn phase_to_snake(phase: FlightPhase) -> &'static str {
+    match phase {
+        FlightPhase::Preflight => "preflight",
+        FlightPhase::Boarding => "boarding",
+        FlightPhase::Pushback => "pushback",
+        FlightPhase::TaxiOut => "taxi_out",
+        FlightPhase::TakeoffRoll => "takeoff_roll",
+        FlightPhase::Takeoff => "takeoff",
+        FlightPhase::Climb => "climb",
+        FlightPhase::Cruise => "cruise",
+        FlightPhase::Descent => "descent",
+        FlightPhase::Approach => "approach",
+        FlightPhase::Final => "final",
+        FlightPhase::Landing => "landing",
+        FlightPhase::TaxiIn => "taxi_in",
+        FlightPhase::BlocksOn => "blocks_on",
+        FlightPhase::Arrived => "arrived",
+        FlightPhase::PirepSubmitted => "pirep_submitted",
     }
 }
 
@@ -618,13 +699,40 @@ async fn flight_start(
         notes: None,
     };
 
+    // Before trying a fresh prefile, see if the user already has an in-progress
+    // PIREP for this flight. This handles the "client crashed / persistence
+    // file gone, but phpVMS still has the active PIREP" case — we adopt the
+    // existing PIREP instead of trying to create a new one (which would fail
+    // with aircraft-not-available because the aircraft is already "in use" by
+    // the orphaned PIREP).
+    let existing = match client.get_user_pireps().await {
+        Ok(list) => list,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not list user PIREPs to check for resume");
+            Vec::new()
+        }
+    };
+    let adoptable = existing.into_iter().find(|p| {
+        // phpVMS PirepState IN_PROGRESS = 0.
+        p.state == Some(0)
+            && p.flight_number.as_deref() == Some(body.flight_number.as_str())
+            && (p.airline_id.is_none() || p.airline_id == Some(airline_id))
+    });
+    if let Some(p) = &adoptable {
+        tracing::info!(pirep_id = %p.id, "adopting existing in-progress PIREP");
+    }
+
     tracing::info!(
         airline_id,
         aircraft_id,
         flight_number = body.flight_number.as_str(),
+        adopting = adoptable.is_some(),
         "prefiling PIREP"
     );
-    let pirep = match client.prefile_pirep(&body).await {
+    let pirep = if let Some(adopt) = adoptable {
+        api_client::PirepCreated { id: adopt.id }
+    } else {
+    match client.prefile_pirep(&body).await {
         Ok(p) => p,
         Err(ApiError::Server { status: 400, body: err_body })
             if err_body.contains("aircraft-not-available") =>
@@ -677,6 +785,7 @@ async fn flight_start(
             ));
         }
         Err(e) => return Err(e.into()),
+        }
     };
 
     // Advance the PIREP status to BOARDING and ensure state is IN_PROGRESS so
@@ -723,7 +832,7 @@ async fn flight_start(
         dpt_airport: bid.flight.dpt_airport_id.clone(),
         arr_airport: bid.flight.arr_airport_id.clone(),
         fares,
-        stats: Mutex::new(FlightStats::default()),
+        stats: Mutex::new(FlightStats::new()),
         stop: AtomicBool::new(false),
     });
 
@@ -757,41 +866,52 @@ async fn flight_end(
 
     let client = current_client(&state)?;
 
-    let (distance_nm, _position_count) = {
+    // Snapshot all stats inside a single short-lived guard to avoid holding
+    // the Mutex across an `await`.
+    let body = {
         let stats = flight.stats.lock().expect("flight stats");
-        (stats.distance_nm, stats.position_count)
-    };
-    let elapsed_minutes = (Utc::now() - flight.started_at).num_minutes() as i32;
+        let elapsed_minutes = (Utc::now() - flight.started_at).num_minutes() as i32;
 
-    // Translate captured fares (id, count) into the FileBody shape phpVMS wants.
-    let fares = if flight.fares.is_empty() {
-        None
-    } else {
-        Some(
-            flight
-                .fares
-                .iter()
-                .map(|(id, count)| FareEntry {
-                    id: *id,
-                    count: *count,
-                })
-                .collect(),
-        )
-    };
+        let fares = if flight.fares.is_empty() {
+            None
+        } else {
+            Some(
+                flight
+                    .fares
+                    .iter()
+                    .map(|(id, count)| FareEntry {
+                        id: *id,
+                        count: *count,
+                    })
+                    .collect(),
+            )
+        };
 
-    let body = FileBody {
-        flight_time: Some(elapsed_minutes.max(0)),
-        fuel_used: None,
-        distance: Some(distance_nm),
-        source_name: Some(format!("CloudeAcars/{}", env!("CARGO_PKG_VERSION"))),
-        notes: None,
-        fares,
+        let fuel_used = match (stats.block_fuel_kg, stats.last_fuel_kg) {
+            (Some(b), Some(c)) if b > c => Some((b - c) as f64),
+            _ => None,
+        };
+        let distance_nm = stats.distance_nm;
+        let fields = build_pirep_fields(&flight, &stats);
+        let notes = build_pirep_notes(&flight, &stats);
+
+        FileBody {
+            flight_time: Some(elapsed_minutes.max(0)),
+            fuel_used,
+            distance: Some(distance_nm),
+            source_name: Some(format!("CloudeAcars/{}", env!("CARGO_PKG_VERSION"))),
+            notes: Some(notes),
+            fares,
+            fields: Some(fields),
+        }
     };
     tracing::info!(
         pirep_id = %flight.pirep_id,
-        elapsed_minutes,
-        distance_nm,
+        flight_time = body.flight_time.unwrap_or(0),
+        distance = body.distance.unwrap_or(0.0),
+        fuel_used = body.fuel_used.unwrap_or(0.0),
         fare_classes = flight.fares.len(),
+        custom_fields = body.fields.as_ref().map(|f| f.len()).unwrap_or(0),
         "filing PIREP"
     );
     let result = client.file_pirep(&flight.pirep_id, &body).await;
@@ -874,8 +994,8 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                 continue;
             };
 
-            // Update running stats first (so the UI sees them even if the post fails).
-            update_stats(&flight, &snap);
+            // Update running stats AND step the flight-phase FSM.
+            let phase_change = step_flight(&flight, &snap);
             let position = snapshot_to_position(&snap);
 
             match client
@@ -900,6 +1020,32 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                     );
                 }
             }
+
+            // On phase change, push the new status to phpVMS so the
+            // live-map and PIREP detail page reflect the current phase.
+            if let Some(new_phase) = phase_change {
+                if let Some(status) = phase_to_status(new_phase) {
+                    tracing::info!(
+                        pirep_id = %flight.pirep_id,
+                        ?new_phase,
+                        status,
+                        "flight phase transition"
+                    );
+                    let body = UpdateBody {
+                        state: None,
+                        status: Some(status.to_string()),
+                        notes: None,
+                    };
+                    if let Err(e) = client.update_pirep(&flight.pirep_id, &body).await {
+                        tracing::warn!(
+                            pirep_id = %flight.pirep_id,
+                            ?new_phase,
+                            error = %e,
+                            "could not push phase status update"
+                        );
+                    }
+                }
+            }
         }
         tracing::info!(pirep_id = %flight.pirep_id, "position streamer stopped");
     });
@@ -917,8 +1063,12 @@ fn current_snapshot(_app: &AppHandle) -> Option<SimSnapshot> {
     None
 }
 
-fn update_stats(flight: &ActiveFlight, snap: &SimSnapshot) {
+/// Update running stats AND step the flight-phase FSM. Returns the new phase
+/// when a transition fires, otherwise `None`.
+fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase> {
     let mut stats = flight.stats.lock().expect("flight stats");
+
+    // Distance accounting.
     if let (Some(prev_lat), Some(prev_lon)) = (stats.last_lat, stats.last_lon) {
         let d_m = ::geo::distance_m(prev_lat, prev_lon, snap.lat, snap.lon);
         if d_m > DISTANCE_EPSILON_M {
@@ -928,6 +1078,273 @@ fn update_stats(flight: &ActiveFlight, snap: &SimSnapshot) {
     stats.last_lat = Some(snap.lat);
     stats.last_lon = Some(snap.lon);
     stats.position_count = stats.position_count.saturating_add(1);
+    stats.last_fuel_kg = Some(snap.fuel_total_kg);
+
+    // Capture block fuel on the very first snapshot.
+    if stats.block_fuel_kg.is_none() {
+        stats.block_fuel_kg = Some(snap.fuel_total_kg);
+    }
+
+    let now = Utc::now();
+    let prev_phase = stats.phase;
+    let mut next_phase = prev_phase;
+    let was_on_ground = stats.was_on_ground.unwrap_or(snap.on_ground);
+    let was_brake = stats.was_parking_brake.unwrap_or(snap.parking_brake);
+
+    // Match on a local Copy so the rest of the body is free to mutate `stats`.
+    match prev_phase {
+        FlightPhase::Boarding => {
+            if was_brake && !snap.parking_brake && snap.on_ground {
+                next_phase = FlightPhase::Pushback;
+                stats.block_off_at = Some(now);
+            }
+        }
+        FlightPhase::Pushback => {
+            if snap.groundspeed_kt > 5.0 && snap.on_ground {
+                next_phase = FlightPhase::TaxiOut;
+            }
+        }
+        FlightPhase::TaxiOut => {
+            if snap.groundspeed_kt > 40.0 && snap.on_ground {
+                next_phase = FlightPhase::TakeoffRoll;
+            }
+        }
+        FlightPhase::TakeoffRoll => {
+            if was_on_ground && !snap.on_ground {
+                next_phase = FlightPhase::Takeoff;
+                stats.takeoff_at = Some(now);
+                stats.takeoff_fuel_kg = Some(snap.fuel_total_kg);
+                let zfw = snap.zfw_kg.unwrap_or(0.0);
+                let weight = zfw as f64 + snap.fuel_total_kg as f64;
+                if weight > 0.0 {
+                    stats.takeoff_weight_kg = Some(weight);
+                }
+            }
+        }
+        FlightPhase::Takeoff => {
+            if snap.altitude_agl_ft > 500.0 {
+                next_phase = FlightPhase::Climb;
+            }
+        }
+        FlightPhase::Climb | FlightPhase::Cruise => {
+            if snap.vertical_speed_fpm < -300.0 {
+                next_phase = FlightPhase::Descent;
+            }
+        }
+        FlightPhase::Descent => {
+            if snap.altitude_agl_ft < 5000.0 {
+                next_phase = FlightPhase::Approach;
+            }
+        }
+        FlightPhase::Approach => {
+            if snap.altitude_agl_ft < 1500.0 {
+                next_phase = FlightPhase::Final;
+            }
+        }
+        FlightPhase::Final => {
+            if !was_on_ground && snap.on_ground {
+                next_phase = FlightPhase::Landing;
+                stats.landing_at = Some(now);
+                stats.landing_rate_fpm = Some(snap.vertical_speed_fpm);
+                stats.landing_g_force = Some(snap.g_force);
+                stats.landing_pitch_deg = Some(snap.pitch_deg);
+                stats.landing_speed_kt = Some(snap.indicated_airspeed_kt);
+                stats.landing_heading_deg = Some(snap.heading_deg_magnetic);
+                stats.landing_fuel_kg = Some(snap.fuel_total_kg);
+                let zfw = snap.zfw_kg.unwrap_or(0.0);
+                let weight = zfw as f64 + snap.fuel_total_kg as f64;
+                if weight > 0.0 {
+                    stats.landing_weight_kg = Some(weight);
+                }
+            }
+        }
+        FlightPhase::Landing => {
+            if snap.groundspeed_kt < 30.0 && snap.on_ground {
+                next_phase = FlightPhase::TaxiIn;
+            }
+        }
+        FlightPhase::TaxiIn => {
+            if snap.parking_brake && snap.groundspeed_kt < 1.0 && snap.on_ground {
+                next_phase = FlightPhase::BlocksOn;
+                stats.block_on_at = Some(now);
+            }
+        }
+        FlightPhase::BlocksOn
+        | FlightPhase::Arrived
+        | FlightPhase::PirepSubmitted
+        | FlightPhase::Preflight => {}
+    }
+
+    stats.was_on_ground = Some(snap.on_ground);
+    stats.was_parking_brake = Some(snap.parking_brake);
+
+    if next_phase != prev_phase {
+        stats.phase = next_phase;
+        stats.transitions.push((now, next_phase));
+        Some(next_phase)
+    } else {
+        None
+    }
+}
+
+/// Build the custom-fields map sent in `POST /api/pireps/{id}/file`. Field
+/// names follow the de-facto vmsACARS convention so VAs that already configured
+/// fields for vmsACARS see them populate without any work.
+fn build_pirep_fields(
+    flight: &ActiveFlight,
+    stats: &FlightStats,
+) -> HashMap<String, String> {
+    let mut f: HashMap<String, String> = HashMap::new();
+
+    f.insert(
+        "Source".into(),
+        format!("CloudeAcars/{}", env!("CARGO_PKG_VERSION")),
+    );
+    f.insert("Departure Airport".into(), flight.dpt_airport.clone());
+    f.insert("Arrival Airport".into(), flight.arr_airport.clone());
+
+    if let Some(t) = stats.block_off_at {
+        f.insert("Blocks Off Time".into(), t.to_rfc3339());
+    }
+    if let Some(t) = stats.takeoff_at {
+        f.insert("Takeoff Time".into(), t.to_rfc3339());
+    }
+    if let Some(t) = stats.landing_at {
+        f.insert("Landing Time".into(), t.to_rfc3339());
+    }
+    if let Some(t) = stats.block_on_at {
+        f.insert("Blocks On Time".into(), t.to_rfc3339());
+    }
+
+    if let Some(w) = stats.takeoff_weight_kg {
+        f.insert("Takeoff Weight".into(), format!("{:.0} kg", w));
+    }
+    if let Some(rate) = stats.landing_rate_fpm {
+        // Negative on touchdown — preserve sign so VAs see e.g. -221 fpm.
+        f.insert("Landing Rate".into(), format!("{:.0} fpm", rate));
+    }
+    if let Some(g) = stats.landing_g_force {
+        f.insert("Landing G-Force".into(), format!("{:.2} G", g));
+    }
+    if let Some(p) = stats.landing_pitch_deg {
+        f.insert("Landing Pitch".into(), format!("{:.1}°", p));
+    }
+    if let Some(s) = stats.landing_speed_kt {
+        f.insert("Landing Speed".into(), format!("{:.0} kt", s));
+    }
+    if let Some(h) = stats.landing_heading_deg {
+        f.insert("Landing Heading".into(), format!("{:03.0}°", h));
+    }
+    if let Some(w) = stats.landing_weight_kg {
+        f.insert("Landing Weight".into(), format!("{:.0} kg", w));
+    }
+    if let Some(fuel) = stats.landing_fuel_kg {
+        f.insert("Landing Fuel".into(), format!("{:.0} kg", fuel));
+    }
+    if let Some(b) = stats.block_fuel_kg {
+        f.insert("Block Fuel".into(), format!("{:.0} kg", b));
+    }
+    if let (Some(b), Some(c)) = (stats.block_fuel_kg, stats.last_fuel_kg) {
+        if b > c {
+            f.insert("Fuel Used".into(), format!("{:.0} kg", b - c));
+        }
+    }
+
+    // Computed durations.
+    if let (Some(off), Some(on)) = (stats.block_off_at, stats.block_on_at) {
+        f.insert(
+            "Total Block Time".into(),
+            humanize_duration_minutes((on - off).num_minutes()),
+        );
+    }
+    if let (Some(takeoff), Some(landing)) = (stats.takeoff_at, stats.landing_at) {
+        f.insert(
+            "Total Flight Time".into(),
+            humanize_duration_minutes((landing - takeoff).num_minutes()),
+        );
+    }
+    if let (Some(land), Some(blocks_on)) = (stats.landing_at, stats.block_on_at) {
+        f.insert(
+            "Taxi In Time".into(),
+            humanize_duration_minutes((blocks_on - land).num_minutes()),
+        );
+    }
+
+    f
+}
+
+fn humanize_duration_minutes(minutes: i64) -> String {
+    let m = minutes.max(0);
+    let h = m / 60;
+    let r = m % 60;
+    if h == 0 {
+        format!("{}m", r)
+    } else {
+        format!("{}h {:02}m", h, r)
+    }
+}
+
+/// Build the human-readable summary that goes into the PIREP `notes` field —
+/// a concise multi-line text that's always visible regardless of how the VA
+/// configured custom fields.
+fn build_pirep_notes(flight: &ActiveFlight, stats: &FlightStats) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "{} {} → {}",
+        flight.flight_number, flight.dpt_airport, flight.arr_airport
+    ));
+    if let Some(t) = stats.block_off_at {
+        lines.push(format!("Blocks off: {}", t.to_rfc3339()));
+    }
+    if let Some(t) = stats.takeoff_at {
+        lines.push(format!("Takeoff: {}", t.to_rfc3339()));
+    }
+    if let Some(t) = stats.landing_at {
+        lines.push(format!("Landing: {}", t.to_rfc3339()));
+    }
+    if let Some(t) = stats.block_on_at {
+        lines.push(format!("Blocks on: {}", t.to_rfc3339()));
+    }
+    if let Some(rate) = stats.landing_rate_fpm {
+        lines.push(format!(
+            "Touchdown: {:.0} fpm, {:.2} G, {:.1}° pitch, {:.0} kt",
+            rate,
+            stats.landing_g_force.unwrap_or(0.0),
+            stats.landing_pitch_deg.unwrap_or(0.0),
+            stats.landing_speed_kt.unwrap_or(0.0),
+        ));
+    }
+    if let (Some(b), Some(c)) = (stats.block_fuel_kg, stats.last_fuel_kg) {
+        if b > c {
+            lines.push(format!("Fuel: {:.0} kg block / {:.0} kg used", b, b - c));
+        }
+    }
+    lines.push(format!(
+        "CloudeAcars {} ({} positions, {:.1} nm)",
+        env!("CARGO_PKG_VERSION"),
+        stats.position_count,
+        stats.distance_nm
+    ));
+    lines.join("\n")
+}
+
+/// Map our internal `FlightPhase` to the phpVMS PirepStatus code we POST in
+/// `update_pirep`. Some phases collapse to the same code (e.g. Climb and
+/// Cruise both report ENR).
+fn phase_to_status(phase: FlightPhase) -> Option<&'static str> {
+    match phase {
+        FlightPhase::Preflight | FlightPhase::Boarding => Some("BST"),
+        FlightPhase::Pushback => Some("OFB"),
+        FlightPhase::TaxiOut => Some("TXI"),
+        FlightPhase::TakeoffRoll => Some("TKO"),
+        FlightPhase::Takeoff => Some("TOF"),
+        FlightPhase::Climb | FlightPhase::Cruise => Some("ENR"),
+        FlightPhase::Descent => Some("TEN"),
+        FlightPhase::Approach | FlightPhase::Final => Some("APP"),
+        FlightPhase::Landing | FlightPhase::TaxiIn => Some("LAN"),
+        FlightPhase::BlocksOn | FlightPhase::Arrived => Some("ARR"),
+        FlightPhase::PirepSubmitted => None,
+    }
 }
 
 fn snapshot_to_position(snap: &SimSnapshot) -> PositionEntry {
@@ -1142,7 +1559,7 @@ fn try_resume_flight(app: &AppHandle, state: &tauri::State<'_, AppState>, client
         dpt_airport: persisted.dpt_airport.clone(),
         arr_airport: persisted.arr_airport.clone(),
         fares: persisted.fares.clone(),
-        stats: Mutex::new(FlightStats::default()),
+        stats: Mutex::new(FlightStats::new()),
         stop: AtomicBool::new(false),
     });
 

@@ -157,6 +157,24 @@ export interface SimStatus {
   available: boolean;
 }
 
+export type FlightPhase =
+  | "preflight"
+  | "boarding"
+  | "pushback"
+  | "taxi_out"
+  | "takeoff_roll"
+  | "takeoff"
+  | "climb"
+  | "cruise"
+  | "descent"
+  | "approach"
+  | "final"
+  | "landing"
+  | "taxi_in"
+  | "blocks_on"
+  | "arrived"
+  | "pirep_submitted";
+
 export interface ActiveFlightInfo {
   pirep_id: string;
   bid_id: number;
@@ -166,6 +184,13 @@ export interface ActiveFlightInfo {
   arr_airport: string;
   distance_nm: number;
   position_count: number;
+  phase: FlightPhase;
+  block_off_at: string | null;
+  takeoff_at: string | null;
+  landing_at: string | null;
+  block_on_at: string | null;
+  landing_rate_fpm: number | null;
+  landing_g_force: number | null;
 }
 
 export interface AirportInfo {

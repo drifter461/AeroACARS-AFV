@@ -120,8 +120,9 @@ impl SimKind {
 }
 
 /// Flight phases as required by spec §9.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum FlightPhase {
+    #[default]
     Preflight,
     Boarding,
     Pushback,
