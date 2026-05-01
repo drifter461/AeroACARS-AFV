@@ -171,7 +171,35 @@
     "forget": "Lokal vergessen",
     "forgetting": "Vergesse…",
     "forget_hint": "Lokalen Flug-Status verwerfen ohne phpVMS zu kontaktieren — z. B. wenn der PIREP serverseitig schon weg ist.",
-    "confirm_forget": "Lokalen Flug-Status verwerfen? phpVMS wird NICHT kontaktiert. Nur nutzen, wenn ‚Flug verwerfen‘ fehlschlägt."
+    "confirm_forget": "Lokalen Flug-Status verwerfen? phpVMS wird NICHT kontaktiert. Nur nutzen, wenn ‚Flug verwerfen‘ fehlschlägt.",
+    "validation": {
+      "title": "PIREP kann so nicht eingereicht werden",
+      "intro": "Folgende Pflichtdaten fehlen oder sind unplausibel — phpVMS würde einen unbrauchbaren Flug speichern:",
+      "fields": {
+        "flight_time": "Flugzeit zu kurz (mindestens 1 Minute)",
+        "distance": "Keine Strecke zurückgelegt (mindestens 1 nm)",
+        "position_count": "Zu wenige Positions-Datenpunkte (mindestens 5)",
+        "fuel": "Treibstoff-Daten fehlen (Block- oder Restwert nicht erfasst)",
+        "not_arrived": "Flugzeug nicht am Ziel geparkt — keine Triebwerks-/Parkbremse-Sequenz erkannt",
+        "no_bid": "Keine Buchung verknüpft — ohne Bid darf der PIREP nicht als reiner ACARS-Bericht eingereicht werden"
+      },
+      "options_title": "Wie weiter?",
+      "option_manual": "Manuell einreichen",
+      "option_manual_hint": "Sendet den PIREP mit Quelle „manuell“ — Admin reviewt. Sie können einen Grund und ggf. einen Divert-Airport angeben.",
+      "option_cancel": "Flug abbrechen",
+      "option_cancel_hint": "Verwirft den PIREP komplett auf phpVMS.",
+      "option_back": "Zurück (nichts tun)",
+      "manual_form_title": "Manueller PIREP",
+      "manual_form_intro": "Der PIREP wird als manueller Bericht mit der Markierung „CloudeAcars (manual)“ eingereicht und vom VA-Admin gereviewt.",
+      "divert_label": "Divert-Airport (ICAO, optional)",
+      "divert_hint": "Falls Sie auf einem anderen Flughafen als geplant ({{planned}}) gelandet sind.",
+      "reason_label": "Grund / Anmerkung (Pflicht bei Divert)",
+      "reason_placeholder": "z. B. Wetter EDDF, Ausweich nach EDDV — oder: Resume hat Tankdaten verloren",
+      "submit_manual": "Manuell einreichen",
+      "submitting_manual": "Reiche ein…",
+      "manual_failed": "Manuelle Einreichung fehlgeschlagen",
+      "reason_required_for_divert": "Bei einem Divert ist der Grund Pflicht."
+    }
   },
   "bids": {
     "title": "Meine gebuchten Flüge",

@@ -129,10 +129,20 @@ export function Dashboard({
         onCancelled={() => setActiveFlight(null)}
       />
 
-      <ActiveFlightPanel
-        info={activeFlight}
-        onEnded={() => setActiveFlight(null)}
-      />
+      {/*
+       * Hide the active-flight panel while the resume banner is still up —
+       * both read the same activeFlight prop, so otherwise the user sees the
+       * resume countdown AND the live-stats panel for the same flight side
+       * by side. `was_just_resumed` flips to false once the banner is
+       * dismissed (confirmed or countdown elapsed), so the panel surfaces
+       * cleanly afterwards.
+       */}
+      {!activeFlight?.was_just_resumed && (
+        <ActiveFlightPanel
+          info={activeFlight}
+          onEnded={() => setActiveFlight(null)}
+        />
+      )}
 
       <BidsList
         baseUrl={session.base_url}

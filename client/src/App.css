@@ -762,6 +762,167 @@ input:disabled {
   border-color: color-mix(in srgb, var(--danger) 50%, var(--border));
 }
 
+/* ===== Manual-file dialog (PIREP validation failure) ===== */
+
+.manual-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  backdrop-filter: blur(2px);
+  z-index: 1100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: resume-fade-in 0.15s ease-out;
+}
+
+.manual-dialog {
+  background: var(--surface);
+  border: 2px solid var(--danger);
+  border-radius: 14px;
+  padding: 24px 28px;
+  min-width: 480px;
+  max-width: 560px;
+  box-shadow:
+    0 20px 60px rgba(0, 0, 0, 0.5),
+    0 0 0 4px color-mix(in srgb, var(--danger) 18%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  animation: resume-slide-in 0.2s ease-out;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.manual-dialog__title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--danger);
+  letter-spacing: -0.01em;
+}
+
+.manual-dialog__intro {
+  margin: 0;
+  font-size: 14px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.manual-dialog__missing {
+  margin: 0;
+  padding-left: 20px;
+  font-size: 13px;
+  color: var(--text);
+  list-style: "⚠ ";
+}
+
+.manual-dialog__missing li {
+  padding: 4px 0;
+}
+
+.manual-dialog__subtitle {
+  margin: 8px 0 0;
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+.manual-dialog__options {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  align-items: center;
+}
+
+.manual-dialog__hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.4;
+  padding: 0 4px 8px;
+}
+
+.manual-dialog__danger {
+  appearance: none;
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--danger) 60%, var(--border));
+  color: var(--danger);
+  font-size: 14px;
+  padding: 10px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.manual-dialog__danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+}
+
+.manual-dialog__secondary {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 13px;
+  padding: 8px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.manual-dialog__secondary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--text-muted) 10%, transparent);
+}
+
+.manual-dialog__field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.manual-dialog__field > span {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.manual-dialog__field > small {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.manual-dialog__field input,
+.manual-dialog__field textarea {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  color: var(--text);
+  font-size: 14px;
+  font-family: inherit;
+  resize: vertical;
+}
+
+.manual-dialog__field input:focus,
+.manual-dialog__field textarea:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.manual-dialog__error {
+  margin: 0;
+  padding: 8px 12px;
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 50%, var(--border));
+  border-radius: 6px;
+  color: var(--danger);
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+
 /* ===== Resume banner (legacy inline — kept for non-modal uses) ===== */
 
 .resume-banner {

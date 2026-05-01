@@ -171,7 +171,35 @@
     "forget": "Forget locally",
     "forgetting": "Forgetting…",
     "forget_hint": "Drop local flight state without contacting phpVMS — useful if the PIREP is already gone server-side.",
-    "confirm_forget": "Drop local flight state? phpVMS will NOT be contacted. Only use this if 'Discard flight' fails."
+    "confirm_forget": "Drop local flight state? phpVMS will NOT be contacted. Only use this if 'Discard flight' fails.",
+    "validation": {
+      "title": "PIREP can't be filed yet",
+      "intro": "The following required data is missing or implausible — filing now would store a broken flight on phpVMS:",
+      "fields": {
+        "flight_time": "Flight time too short (at least 1 minute required)",
+        "distance": "No distance flown (at least 1 nm required)",
+        "position_count": "Too few position datapoints (at least 5 required)",
+        "fuel": "Fuel data missing (block or remaining fuel not captured)",
+        "not_arrived": "Aircraft is not parked at the destination — engines-shutdown / parking-brake sequence not detected",
+        "no_bid": "No booking attached — without a bid the PIREP can't be filed as a pure ACARS report"
+      },
+      "options_title": "What do you want to do?",
+      "option_manual": "File manually",
+      "option_manual_hint": "Submits the PIREP with source 'manual' — VA admin will review. You can add a reason and a divert airport.",
+      "option_cancel": "Cancel flight",
+      "option_cancel_hint": "Discards the PIREP entirely on phpVMS.",
+      "option_back": "Back (do nothing)",
+      "manual_form_title": "Manual PIREP",
+      "manual_form_intro": "The PIREP will be filed as a manual report tagged 'CloudeAcars (manual)' and reviewed by the VA admin.",
+      "divert_label": "Divert airport (ICAO, optional)",
+      "divert_hint": "If you landed somewhere other than the planned arrival ({{planned}}).",
+      "reason_label": "Reason / note (required for diverts)",
+      "reason_placeholder": "e.g. Weather at EDDF, diverted to EDDV — or: resume lost the fuel data",
+      "submit_manual": "File manually",
+      "submitting_manual": "Filing…",
+      "manual_failed": "Manual filing failed",
+      "reason_required_for_divert": "Reason is required when diverting."
+    }
   },
   "bids": {
     "title": "My booked flights",

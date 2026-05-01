@@ -615,6 +615,29 @@ impl Client {
         Ok(())
     }
 
+    /// DELETE and ignore the response body (status-check only).
+    async fn delete_void(&self, path: &str) -> Result<(), ApiError> {
+        let url = self.endpoint(path)?;
+        let response = self
+            .http
+            .delete(url)
+            .header("X-API-Key", &self.conn.api_key)
+            .header(header::ACCEPT, "application/json")
+            .send()
+            .await
+            .map_err(ApiError::from)?;
+        let _ = check_status(response, path).await?;
+        Ok(())
+    }
+
+    /// `DELETE /api/user/bids/{bid_id}` — drop a bid after its PIREP was filed
+    /// (or to give it back). phpVMS does NOT auto-consume bids when the PIREP
+    /// is filed unless we explicitly remove them.
+    pub async fn delete_bid(&self, bid_id: i64) -> Result<(), ApiError> {
+        let path = format!("/api/user/bids/{bid_id}");
+        self.delete_void(&path).await
+    }
+
     /// `POST /api/pireps/prefile` — create an in-flight PIREP.
     pub async fn prefile_pirep(&self, body: &PrefileBody) -> Result<PirepCreated, ApiError> {
         self.post_data("/api/pireps/prefile", body).await

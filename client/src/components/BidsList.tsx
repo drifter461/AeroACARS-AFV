@@ -163,6 +163,19 @@ export function BidsList({
     };
   }, []);
 
+  // Background-poll bids so a freshly booked flight on phpVMS appears in
+  // the list almost immediately — the pilot has the app open precisely
+  // because they're about to fly, so a 15 s tick feels live without
+  // burning through the phpVMS rate-limit budget (60 req/min/IP).
+  // Pauses while a flight is active (no new flight can start anyway).
+  useEffect(() => {
+    if (hasActiveFlight) return;
+    const id = setInterval(() => {
+      void fetchBids();
+    }, 15_000);
+    return () => clearInterval(id);
+  }, [hasActiveFlight, fetchBids]);
+
   async function handleRefresh() {
     if (refreshing) return;
     setRefreshing(true);

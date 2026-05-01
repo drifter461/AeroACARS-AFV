@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTranslation } from "react-i18next";
 import type { ActiveFlightInfo } from "../types";
+import { ManualFileDialog } from "./ManualFileDialog";
 
 interface Props {
   /** Active-flight info, owned by Dashboard. Pure display. */
@@ -32,6 +33,15 @@ export function ActiveFlightPanel({ info, onEnded }: Props) {
   const { t, i18n } = useTranslation();
   const [busy, setBusy] = useState<"end" | "cancel" | "forget" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * When `flight_end` fails with `flight_validation_failed`, the backend
+   * sends back a list of i18n-keyed missing-field codes. We surface the
+   * ManualFileDialog so the pilot can either cancel the flight or file it
+   * as a manual PIREP (with optional divert + reason). Null = no dialog.
+   */
+  const [validationMissing, setValidationMissing] = useState<string[] | null>(
+    null,
+  );
   // Tick once a second so the elapsed-time display refreshes between polls.
   const [, setTick] = useState(0);
   useEffect(() => {
@@ -47,6 +57,37 @@ export function ActiveFlightPanel({ info, onEnded }: Props) {
     setError(null);
     try {
       await invoke("flight_end");
+      onEnded?.();
+    } catch (err: unknown) {
+      // Backend's UiError shape: { code, message, details? }. The validation
+      // path puts `{ missing: ["distance", ...] }` into details so we can
+      // render the dialog with the exact reasons the file was rejected.
+      const e = err as {
+        code?: string;
+        message?: string;
+        details?: { missing?: string[] };
+      };
+      if (e?.code === "flight_validation_failed") {
+        setValidationMissing(e.details?.missing ?? []);
+      } else {
+        const msg =
+          typeof err === "object" && err !== null && "message" in err
+            ? String((err as { message: string }).message)
+            : String(err);
+        setError(msg);
+      }
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  /** User accepted the cancel option from the validation dialog. */
+  async function handleCancelFromDialog() {
+    setValidationMissing(null);
+    setBusy("cancel");
+    setError(null);
+    try {
+      await invoke("flight_cancel");
       onEnded?.();
     } catch (err: unknown) {
       const msg =
@@ -166,6 +207,19 @@ export function ActiveFlightPanel({ info, onEnded }: Props) {
         <p className="active-flight__error" role="alert">
           {error}
         </p>
+      )}
+
+      {validationMissing !== null && (
+        <ManualFileDialog
+          plannedArrival={info.arr_airport}
+          missing={validationMissing}
+          onFiled={() => {
+            setValidationMissing(null);
+            onEnded?.();
+          }}
+          onCancelFlight={() => void handleCancelFromDialog()}
+          onClose={() => setValidationMissing(null)}
+        />
       )}
     </section>
   );

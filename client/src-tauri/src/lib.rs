@@ -91,9 +91,60 @@ struct AppState {
     #[cfg(target_os = "windows")]
     msfs: Mutex<MsfsAdapter>,
     active_flight: Mutex<Option<Arc<ActiveFlight>>>,
+    /// Atomic guard for `flight_start` / `flight_adopt`. Both functions await
+    /// network calls *between* checking that no flight is active and writing
+    /// the new ActiveFlight into state. Without this guard, two concurrent
+    /// invokes (StrictMode double-mount, double-click, resume-banner re-render)
+    /// would both pass the initial check and the second would silently
+    /// overwrite the first — losing the streamer reference and leaving
+    /// phpVMS with two adopt attempts. Acquire with `compare_exchange`,
+    /// release in *every* exit path (success and error).
+    flight_setup_in_progress: AtomicBool,
     /// In-process airport-coords cache. Keyed by ICAO uppercase. Populated on
     /// first lookup so we don't re-fetch on every snapshot tick.
     airports: Mutex<HashMap<String, Airport>>,
+}
+
+/// RAII guard for `AppState::flight_setup_in_progress`. Acquire it at the
+/// start of `flight_start` / `flight_adopt`; the in-progress flag is cleared
+/// automatically when the guard goes out of scope (any return path), unless
+/// `disarm()` was called to keep the slot reserved (e.g. because the new
+/// ActiveFlight has been written into state and the `active_flight` mutex
+/// now serves as the conflict guard).
+struct FlightSetupGuard<'a> {
+    flag: &'a AtomicBool,
+    armed: bool,
+}
+
+impl<'a> FlightSetupGuard<'a> {
+    fn try_acquire(flag: &'a AtomicBool) -> Result<Self, UiError> {
+        flag.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .map_err(|_| {
+                UiError::new(
+                    "flight_setup_in_progress",
+                    "another flight start or adopt is already in progress — please wait",
+                )
+            })?;
+        Ok(Self { flag, armed: true })
+    }
+
+    /// Tell the guard to NOT release the in-progress flag on drop. Use this
+    /// once we've successfully written the new ActiveFlight into state — at
+    /// that point the `active_flight` mutex is the source of truth.
+    fn disarm(mut self) {
+        self.armed = false;
+        // Manually release the in-progress flag right now; from here the
+        // `active_flight` mutex blocks duplicate setups.
+        self.flag.store(false, Ordering::SeqCst);
+    }
+}
+
+impl Drop for FlightSetupGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.flag.store(false, Ordering::SeqCst);
+        }
+    }
 }
 
 /// In-memory record of an in-progress flight. Held inside an `Arc` so the
@@ -226,10 +277,14 @@ pub struct LoginResult {
 
 /// Errors returned to the UI in a serializable shape.
 /// `code` is a stable, machine-readable identifier the frontend uses for i18n.
+/// `details` carries optional structured payload (e.g. list of missing
+/// validation fields) so the UI can render a richer error than just a string.
 #[derive(Debug, Serialize)]
 pub struct UiError {
     code: String,
     message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    details: Option<serde_json::Value>,
 }
 
 impl UiError {
@@ -237,7 +292,13 @@ impl UiError {
         Self {
             code: code.into(),
             message: message.into(),
+            details: None,
         }
+    }
+
+    fn with_details(mut self, details: serde_json::Value) -> Self {
+        self.details = Some(details);
+        self
     }
 }
 
@@ -246,6 +307,7 @@ impl From<ApiError> for UiError {
         Self {
             code: err.code().to_string(),
             message: err.to_string(),
+            details: None,
         }
     }
 }
@@ -616,6 +678,15 @@ async fn flight_adopt(
     state: tauri::State<'_, AppState>,
     pirep_id: String,
 ) -> Result<ActiveFlightInfo, UiError> {
+    // Reserve the setup slot atomically — released automatically (via the
+    // guard's Drop) on any error path, or disarmed once we've committed the
+    // new ActiveFlight into state. Without this, two concurrent adopts
+    // would both see active_flight=None and one would silently overwrite
+    // the other (we observed this in production logs: StrictMode +
+    // resume-banner re-render produced four "flight adopted" lines for a
+    // single PIREP).
+    let setup_guard = FlightSetupGuard::try_acquire(&state.flight_setup_in_progress)?;
+
     {
         let guard = state.active_flight.lock().expect("active_flight lock");
         if guard.is_some() {
@@ -686,6 +757,9 @@ async fn flight_adopt(
         let mut guard = state.active_flight.lock().expect("active_flight lock");
         *guard = Some(Arc::clone(&flight));
     }
+    // ActiveFlight is now committed — release the in-progress flag so the
+    // active_flight mutex alone guards subsequent adopts.
+    setup_guard.disarm();
     // Don't spawn the streamer yet — the resume banner is in countdown mode
     // and the user can still cancel. `flight_resume_confirm` spawns it.
     let _ = client;
@@ -702,6 +776,10 @@ async fn flight_start(
     state: tauri::State<'_, AppState>,
     bid_id: i64,
 ) -> Result<ActiveFlightInfo, UiError> {
+    // Same race protection as flight_adopt: a double-click on "Start flight"
+    // would otherwise prefile two PIREPs against the same bid.
+    let setup_guard = FlightSetupGuard::try_acquire(&state.flight_setup_in_progress)?;
+
     {
         let guard = state.active_flight.lock().expect("active_flight lock");
         if guard.is_some() {
@@ -992,6 +1070,8 @@ async fn flight_start(
         let mut guard = state.active_flight.lock().expect("active_flight lock");
         *guard = Some(Arc::clone(&flight));
     }
+    // ActiveFlight is committed; release the setup-in-progress flag.
+    setup_guard.disarm();
 
     spawn_position_streamer(app.clone(), Arc::clone(&flight), client);
 
@@ -1000,12 +1080,88 @@ async fn flight_start(
     Ok(info)
 }
 
-/// File the active PIREP with computed final stats.
+/// Minimum thresholds a flight has to pass before we'll let it file as a clean
+/// ACARS PIREP. Anything below these is either a buggy run, a half-baked test,
+/// or a flight that never actually flew — phpVMS shouldn't get those.
+const MIN_FLIGHT_TIME_MIN: i32 = 1;
+const MIN_DISTANCE_NM: f64 = 1.0;
+const MIN_POSITION_COUNT: u32 = 5;
+
+/// Names of fields that failed validation, returned to the UI as the
+/// `details` payload of the `flight_validation_failed` UiError. The UI looks
+/// up `flight.validation.<key>` for the localized message and decides
+/// whether the user can still file as a manual PIREP.
+fn validate_for_filing(
+    flight: &ActiveFlight,
+    stats: &FlightStats,
+    elapsed_minutes: i32,
+) -> Vec<&'static str> {
+    let mut missing = Vec::new();
+    if elapsed_minutes < MIN_FLIGHT_TIME_MIN {
+        missing.push("flight_time");
+    }
+    if stats.distance_nm < MIN_DISTANCE_NM {
+        missing.push("distance");
+    }
+    if stats.position_count < MIN_POSITION_COUNT {
+        missing.push("position_count");
+    }
+    if stats.block_fuel_kg.is_none() || stats.last_fuel_kg.is_none() {
+        missing.push("fuel");
+    }
+    // Must have actually arrived at a parking position. Anything before
+    // BlocksOn means engines weren't shut down on the ground at the gate.
+    if !matches!(
+        stats.phase,
+        FlightPhase::BlocksOn | FlightPhase::Arrived | FlightPhase::PirepSubmitted
+    ) {
+        missing.push("not_arrived");
+    }
+    // Bid is required for a clean ACARS PIREP. `flight_adopt` falls back to
+    // bid_id=0 when no matching bid is found server-side, which means the
+    // pilot is flying a PIREP that no longer has a booking attached. That
+    // can happen legitimately (admin removed the bid) but it's never an
+    // ACARS-clean situation — admin must review.
+    if flight.bid_id <= 0 {
+        missing.push("no_bid");
+    }
+    missing
+}
+
+/// File the active PIREP with computed final stats. Refuses to file if any
+/// of the minimum-quality checks in `validate_for_filing` fail — the UI then
+/// surfaces a dialog letting the user cancel the flight or file as a manual
+/// PIREP via [`flight_end_manual`].
 #[tauri::command]
 async fn flight_end(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), UiError> {
+    // Validate WITHOUT removing the flight from state, so a failed validation
+    // leaves the user able to retry, edit-and-file-manual, or cancel.
+    {
+        let guard = state.active_flight.lock().expect("active_flight lock");
+        let flight = guard
+            .as_ref()
+            .ok_or_else(|| UiError::new("no_active_flight", "no flight is active"))?;
+        let stats = flight.stats.lock().expect("flight stats");
+        let elapsed_minutes = (Utc::now() - flight.started_at).num_minutes() as i32;
+        let missing = validate_for_filing(flight, &stats, elapsed_minutes);
+        if !missing.is_empty() {
+            tracing::warn!(
+                pirep_id = %flight.pirep_id,
+                missing = ?missing,
+                "rejecting PIREP filing — validation failed"
+            );
+            return Err(UiError::new(
+                "flight_validation_failed",
+                "flight does not meet minimum requirements for an ACARS PIREP",
+            )
+            .with_details(serde_json::json!({ "missing": missing })));
+        }
+    }
+
+    // Validation passed — now actually take the flight out of state and file.
     let flight = {
         let mut guard = state.active_flight.lock().expect("active_flight lock");
         guard
@@ -1064,13 +1220,161 @@ async fn flight_end(
         custom_fields = body.fields.as_ref().map(|f| f.len()).unwrap_or(0),
         "filing PIREP"
     );
-    let result = client.file_pirep(&flight.pirep_id, &body).await;
-    // Always clear local persistence — if filing failed, the user can either
-    // retry via support tooling or just start a fresh flight.
-    clear_persisted_flight(&app);
-    result?;
-    tracing::info!(pirep_id = %flight.pirep_id, "PIREP filed");
-    Ok(())
+    match client.file_pirep(&flight.pirep_id, &body).await {
+        Ok(()) => {
+            clear_persisted_flight(&app);
+            tracing::info!(pirep_id = %flight.pirep_id, "PIREP filed");
+            consume_bid_best_effort(&client, flight.bid_id).await;
+            Ok(())
+        }
+        Err(e) => {
+            // File call failed — don't drop the flight on the floor. Put it
+            // back in state so the user can retry instead of orphaning the
+            // PIREP server-side.
+            tracing::warn!(
+                pirep_id = %flight.pirep_id,
+                error = %e,
+                "PIREP file failed — restoring flight to state for retry"
+            );
+            let mut guard = state.active_flight.lock().expect("active_flight lock");
+            *guard = Some(flight);
+            Err(e.into())
+        }
+    }
+}
+
+/// Best-effort: drop the bid that was used for this flight. phpVMS does NOT
+/// auto-consume bids on PIREP file, so without this the booked flight stays
+/// in the pilot's bid list even after Accepted. A failure here is non-fatal
+/// — the user can clean up via the phpVMS UI if needed.
+async fn consume_bid_best_effort(client: &Client, bid_id: i64) {
+    if bid_id <= 0 {
+        return;
+    }
+    match client.delete_bid(bid_id).await {
+        Ok(()) => tracing::info!(bid_id, "bid removed after PIREP filing"),
+        Err(e) => tracing::warn!(
+            bid_id,
+            error = %e,
+            "could not remove bid after PIREP filing — please clean up manually"
+        ),
+    }
+}
+
+/// File the active PIREP as a *manual* report — bypasses the validation in
+/// `flight_end` and tags the source as manual so the VA admin knows the data
+/// wasn't 100% machine-collected.
+///
+/// Use cases:
+///   * Flight ended with broken stats (e.g. resumed run that lost block_fuel)
+///     but pilot still wants to file rather than cancel.
+///   * Divert: planned EDDP→EDDF, actually landed EDDV. The pilot supplies
+///     `divert_to = "EDDV"` and a `reason`; admin sees the divert tag in the
+///     notes and adjusts the PIREP airports manually.
+///
+/// All optional fields end up in the PIREP notes with clear `[MANUAL]` /
+/// `[DIVERT]` tags so the admin reviewing the flight can act on them.
+#[tauri::command]
+async fn flight_end_manual(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    notes_override: Option<String>,
+    divert_to: Option<String>,
+    reason: Option<String>,
+) -> Result<(), UiError> {
+    let flight = {
+        let mut guard = state.active_flight.lock().expect("active_flight lock");
+        guard
+            .take()
+            .ok_or_else(|| UiError::new("no_active_flight", "no flight is active"))?
+    };
+    flight.stop.store(true, Ordering::Relaxed);
+    let client = current_client(&state)?;
+
+    let body = {
+        let stats = flight.stats.lock().expect("flight stats");
+        let elapsed_minutes = (Utc::now() - flight.started_at).num_minutes() as i32;
+        let fares = if flight.fares.is_empty() {
+            None
+        } else {
+            Some(
+                flight
+                    .fares
+                    .iter()
+                    .map(|(id, count)| FareEntry {
+                        id: *id,
+                        count: *count,
+                    })
+                    .collect(),
+            )
+        };
+        let fuel_used = match (stats.block_fuel_kg, stats.last_fuel_kg) {
+            (Some(b), Some(c)) if b > c => Some((b - c) as f64),
+            _ => None,
+        };
+        let distance_nm = stats.distance_nm;
+        let fields = build_pirep_fields(&flight, &stats);
+        let mut notes = build_pirep_notes(&flight, &stats);
+        notes.push_str("\n\n[MANUAL FILE — auto-validation bypassed by pilot.]");
+        if let Some(divert) = divert_to
+            .as_ref()
+            .map(|s| s.trim().to_uppercase())
+            .filter(|s| !s.is_empty())
+        {
+            notes.push_str(&format!(
+                "\n\n[DIVERT] Planned arrival: {planned}. Actual landing: {actual}.",
+                planned = flight.arr_airport,
+                actual = divert,
+            ));
+        }
+        if let Some(r) = reason
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            notes.push_str("\n\nReason: ");
+            notes.push_str(r);
+        }
+        if let Some(extra) = notes_override
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            notes.push_str("\n\nPilot notes: ");
+            notes.push_str(extra);
+        }
+        FileBody {
+            flight_time: Some(elapsed_minutes.max(0)),
+            fuel_used,
+            distance: Some(distance_nm),
+            source_name: Some(format!(
+                "CloudeAcars/{} (manual)",
+                env!("CARGO_PKG_VERSION")
+            )),
+            notes: Some(notes),
+            fares,
+            fields: Some(fields),
+        }
+    };
+    tracing::info!(pirep_id = %flight.pirep_id, "filing PIREP (manual)");
+    match client.file_pirep(&flight.pirep_id, &body).await {
+        Ok(()) => {
+            clear_persisted_flight(&app);
+            tracing::info!(pirep_id = %flight.pirep_id, "PIREP filed (manual)");
+            consume_bid_best_effort(&client, flight.bid_id).await;
+            Ok(())
+        }
+        Err(e) => {
+            tracing::warn!(
+                pirep_id = %flight.pirep_id,
+                error = %e,
+                "manual PIREP file failed — restoring flight to state for retry"
+            );
+            let mut guard = state.active_flight.lock().expect("active_flight lock");
+            *guard = Some(flight);
+            Err(e.into())
+        }
+    }
 }
 
 /// Cancel the active PIREP without filing it.
@@ -1725,7 +2029,9 @@ fn try_resume_flight(app: &AppHandle, state: &tauri::State<'_, AppState>, client
     {
         let guard = state.active_flight.lock().expect("active_flight lock");
         if guard.is_some() {
-            tracing::warn!("active flight already in memory, skipping resume");
+            // Expected on second mount under React StrictMode (dev) — the
+            // first mount already restored the flight. Idempotent, no WARN.
+            tracing::debug!("active flight already in memory, skipping resume");
             return;
         }
     }
@@ -1792,6 +2098,7 @@ pub fn run() {
             flight_status,
             flight_start,
             flight_end,
+            flight_end_manual,
             flight_cancel,
             flight_forget,
             flight_discover_resumable,
