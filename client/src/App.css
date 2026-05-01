@@ -498,7 +498,10 @@ button:disabled {
   position: absolute;
   left: 0;
   top: -16px;
-  transform: translateX(-50%);
+  /* Rotate 90° so the nose points along the track toward the gate
+     instead of straight up. translateX is the position adjustment;
+     the rotation tilts the SVG path itself. */
+  transform: translateX(-50%) rotate(90deg);
   color: var(--accent);
   filter: drop-shadow(0 2px 6px color-mix(in srgb, var(--accent) 50%, transparent));
   transition: left 0.8s cubic-bezier(0.22, 1, 0.36, 1);
