@@ -192,6 +192,48 @@ mod adapter {
         fbw_beacon: f64,
         #[simconnect(name = "L:LIGHTING_NAV_0", unit = "Number")]
         fbw_nav: f64,
+
+        // ---- LVars: Fenix A320 (Phase H.4 Stage 2.3) ----
+        // Source: D1ngtalk/Yourcontrols-config-for-Fenixsim-A320 +
+        // FenixSim KB. Two naming conventions: `S_*` is the switch
+        // position the pilot has set, `I_*` is the indicator (what's
+        // actually active after aircraft logic). For exterior lights
+        // and FCU buttons, S_* is the right read.
+        // Beacon: 0=off, 1=on.
+        #[simconnect(name = "L:S_OH_EXT_LT_BEACON", unit = "Number")]
+        fnx_beacon: f64,
+        // Strobe: 0=off, 1=auto, 2=on.
+        #[simconnect(name = "L:S_OH_EXT_LT_STROBE", unit = "Number")]
+        fnx_strobe: f64,
+        // Wing: 0=off, 1=on.
+        #[simconnect(name = "L:S_OH_EXT_LT_WING", unit = "Number")]
+        fnx_wing: f64,
+        // Nav+Logo combined selector: 0=off, 1=1/2 (nav only), 2=2/2 (+logo).
+        #[simconnect(name = "L:S_OH_EXT_LT_NAV_LOGO", unit = "Number")]
+        fnx_nav_logo: f64,
+        // Runway turn-off lights: 0=off, 1=on.
+        #[simconnect(name = "L:S_OH_EXT_LT_RWY_TURNOFF", unit = "Number")]
+        fnx_rwy_turnoff: f64,
+        // Landing light per side: 0=retracted, 1=off (extended), 2=on.
+        #[simconnect(name = "L:S_OH_EXT_LT_LANDING_L", unit = "Number")]
+        fnx_landing_l: f64,
+        #[simconnect(name = "L:S_OH_EXT_LT_LANDING_R", unit = "Number")]
+        fnx_landing_r: f64,
+        // Nose light: 0=off, 1=taxi, 2=T.O.
+        #[simconnect(name = "L:S_OH_EXT_LT_NOSE", unit = "Number")]
+        fnx_nose: f64,
+        // FCU autopilot pushbuttons (active = 1).
+        #[simconnect(name = "L:S_FCU_AP1", unit = "Number")]
+        fnx_ap1: f64,
+        #[simconnect(name = "L:S_FCU_AP2", unit = "Number")]
+        fnx_ap2: f64,
+        #[simconnect(name = "L:S_FCU_LOC", unit = "Number")]
+        fnx_loc: f64,
+        #[simconnect(name = "L:S_FCU_APPR", unit = "Number")]
+        fnx_appr: f64,
+        // Parking brake: 0=released, 1=set.
+        #[simconnect(name = "L:S_MIP_PARKING_BRAKE", unit = "Number")]
+        fnx_park_brake: f64,
     }
 
     /// Pounds → kilograms (avoirdupois, 6-digit precision).
@@ -223,21 +265,34 @@ mod adapter {
         .count() as u8;
         let profile = AircraftProfile::detect(&t.title, &t.atc_model);
 
-        // For FBW A32NX, override avionics/lights/AP from LVars — the
-        // standard SimVars are stale or unwired on the community Airbus.
+        // Profile-aware mapping: study-level Airbus add-ons publish
+        // cockpit state through their own LVars rather than the standard
+        // MSFS SimVars. Pick the right source per profile; default
+        // aircraft fall through to the standard SimVars.
         let is_fbw = matches!(profile, AircraftProfile::FbwA32nx);
+        let is_fnx = matches!(profile, AircraftProfile::FenixA320);
+
         let xpdr_code = if is_fbw {
-            // FBW LVar is the BCO16-encoded squawk in decimal form.
             Some(decode_squawk_decimal(t.fbw_xpdr))
+        } else if is_fnx {
+            // Fenix XPDR isn't a single decimal LVar in the Block-2 set
+            // we have mapped — leave it as None so the activity log
+            // doesn't pump the noisy TRANSPONDER CODE:1 keypad-edit
+            // values. Standard squawk filtering (>= 1000) handles other
+            // aircraft.
+            None
         } else {
             Some(squawk_from_bcd(t.transponder_bcd))
         };
         let (light_landing, light_taxi) = if is_fbw {
-            // FBW landing lights = either side extended *and* on (>= 1).
-            // Nose-light selector: 0=OFF, 1=TAXI, 2=T.O. Taxi-light flag
-            // == nose-light at >= 1 (any extended state).
             let landing = (t.fbw_landing_l as i32) > 1 || (t.fbw_landing_r as i32) > 1;
             let taxi = (t.fbw_nose_lights as i32) >= 1;
+            (Some(landing), Some(taxi))
+        } else if is_fnx {
+            // Fenix landing-light per side: 0=retracted, 1=off, 2=on.
+            // Nose: 0=off, 1=taxi, 2=T.O — taxi flag is nose >= 1.
+            let landing = (t.fnx_landing_l as i32) >= 2 || (t.fnx_landing_r as i32) >= 2;
+            let taxi = (t.fnx_nose as i32) >= 1;
             (Some(landing), Some(taxi))
         } else {
             (Some(t.light_landing), Some(t.light_taxi))
@@ -248,8 +303,23 @@ mod adapter {
                 Some(t.fbw_strobe as i32 != 0),
                 Some(t.fbw_nav as i32 != 0),
             )
+        } else if is_fnx {
+            // Strobe: 0=off, 1=auto (counts as on for our purposes), 2=on.
+            // Nav+Logo combined: 0=off, 1=nav only, 2=nav+logo. We treat
+            // any value >= 1 as "nav lights on".
+            (
+                Some(t.fnx_beacon as i32 != 0),
+                Some(t.fnx_strobe as i32 != 0),
+                Some(t.fnx_nav_logo as i32 >= 1),
+            )
         } else {
             (Some(t.light_beacon), Some(t.light_strobe), Some(t.light_nav))
+        };
+        let light_logo = if is_fnx {
+            // Fenix combines nav+logo: value 2 = both nav and logo on.
+            Some(t.fnx_nav_logo as i32 >= 2)
+        } else {
+            Some(t.light_logo)
         };
         let (ap_master, ap_hdg, ap_alt, ap_nav, ap_appr) = if is_fbw {
             (
@@ -259,6 +329,18 @@ mod adapter {
                 Some(t.fbw_ap_nav),
                 Some(t.fbw_ap_appr),
             )
+        } else if is_fnx {
+            // Fenix: AP1 OR AP2 active = master on. HDG/ALT modes aren't
+            // exposed as discrete LVars in the public set we have; use
+            // None so the activity log just shows "Autopilot ENGAGED"
+            // without spurious mode flips.
+            (
+                Some(t.fnx_ap1 as i32 != 0 || t.fnx_ap2 as i32 != 0),
+                None,
+                None,
+                Some(t.fnx_loc as i32 != 0),
+                Some(t.fnx_appr as i32 != 0),
+            )
         } else {
             (
                 Some(t.ap_master),
@@ -267,6 +349,11 @@ mod adapter {
                 Some(t.ap_nav),
                 Some(t.ap_approach),
             )
+        };
+        let parking_brake_state = if is_fnx {
+            t.fnx_park_brake as i32 != 0
+        } else {
+            t.parking_brake
         };
         SimSnapshot {
             timestamp: Utc::now(),
@@ -284,7 +371,7 @@ mod adapter {
             true_airspeed_kt: t.true_airspeed_kt as f32,
             g_force: t.g_force as f32,
             on_ground: t.on_ground,
-            parking_brake: t.parking_brake,
+            parking_brake: parking_brake_state,
             stall_warning: t.stall_warning,
             overspeed_warning: t.overspeed_warning,
             // Pause/slew/sim-rate aren't read yet; safe defaults — they
@@ -324,7 +411,7 @@ mod adapter {
             light_strobe,
             light_taxi,
             light_nav,
-            light_logo: Some(t.light_logo),
+            light_logo,
             // Autopilot — FBW-specific LVars when matched.
             autopilot_master: ap_master,
             autopilot_heading: ap_hdg,
