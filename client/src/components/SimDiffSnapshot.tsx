@@ -163,9 +163,17 @@ export function SimDiffSnapshot({ snapshot }: Props) {
 }
 
 /**
- * Pull the diff-relevant fields out of a SimSnapshot. We deliberately
- * skip the position floats (lat/lon/alt) because they move every
- * tick anyway and would dominate the diff with noise.
+ * Pull the diff-relevant fields out of a SimSnapshot. Two categories
+ * are deliberately skipped:
+ *
+ *   * Position floats (lat/lon/altitude/speeds) — drift every tick.
+ *   * Fuel / weight / ZFW — drift continuously while engines or APU
+ *     are running (~0.04 kg/s for an A320 APU). The pilot sees those
+ *     in the Mass & Fuel section already; including them here just
+ *     drowns out the actual switch effect we're trying to find.
+ *
+ * Anything that actually represents a switch / discrete state (lights,
+ * AP modes, gear, flaps, brakes, transponder, COM/NAV) stays in.
  */
 function flattenSnapshot(s: SimSnapshot): Record<string, FieldValue> {
   return {
@@ -176,9 +184,6 @@ function flattenSnapshot(s: SimSnapshot): Record<string, FieldValue> {
     "snap.engines_running": s.engines_running,
     "snap.gear_position": round(s.gear_position, 2),
     "snap.flaps_position": round(s.flaps_position, 2),
-    "snap.fuel_total_kg": round(s.fuel_total_kg, 0),
-    "snap.total_weight_kg": s.total_weight_kg ?? null,
-    "snap.zfw_kg": s.zfw_kg ?? null,
     "snap.transponder_code": s.transponder_code ?? null,
     "snap.com1_mhz": s.com1_mhz ?? null,
     "snap.com2_mhz": s.com2_mhz ?? null,
