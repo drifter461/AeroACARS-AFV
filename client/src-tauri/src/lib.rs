@@ -47,13 +47,14 @@ fn position_interval(phase: FlightPhase) -> Duration {
         // Brief, critical events — sample a touch faster so the touchdown
         // point and the actual liftoff don't get smeared between two posts.
         FlightPhase::Takeoff | FlightPhase::Landing => 5,
-        // On the ground (taxi, pushback, takeoff roll) — 10 s is plenty;
+        // Boarding + Pushback need fast ticks because a real pushback
+        // can be over in 8–15 s; if the streamer only fires every 10 s
+        // we miss the entire phase between two snapshots and the
+        // dashboard jumps straight from Boarding to Taxi.
+        FlightPhase::Boarding | FlightPhase::Pushback => 4,
+        // On the ground (taxi, takeoff roll) — 10 s is plenty;
         // movements are slow and the live map just needs a clean trail.
-        FlightPhase::Boarding
-        | FlightPhase::Pushback
-        | FlightPhase::TaxiOut
-        | FlightPhase::TakeoffRoll
-        | FlightPhase::TaxiIn => 10,
+        FlightPhase::TaxiOut | FlightPhase::TakeoffRoll | FlightPhase::TaxiIn => 10,
         // Approach / final — pilot wants the inbound track precise (ILS,
         // localizer, glideslope) without overdoing samples.
         FlightPhase::Approach | FlightPhase::Final => 8,
@@ -2676,13 +2677,40 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
     // Match on a local Copy so the rest of the body is free to mutate `stats`.
     match prev_phase {
         FlightPhase::Boarding => {
-            if was_brake && !snap.parking_brake && snap.on_ground {
+            // Pushback detection: aircraft moves on the ground while
+            // engines are still off — that's the truck pushing. Catches
+            // both flows MSFS supports:
+            //   * MSFS native pushback (Ctrl+P) which often doesn't
+            //     toggle the parking brake at all
+            //   * GSX / hand-flown pushback where the pilot only
+            //     releases the brake at the start
+            // Engines running + ground motion = the pilot skipped a
+            // push and went straight to taxi — jump to TaxiOut so we
+            // don't get stuck in Boarding.
+            if snap.on_ground && snap.groundspeed_kt > 0.5 {
+                if snap.engines_running == 0 {
+                    next_phase = FlightPhase::Pushback;
+                    stats.block_off_at = Some(now);
+                } else {
+                    next_phase = FlightPhase::TaxiOut;
+                    stats.block_off_at = Some(now);
+                }
+            } else if was_brake && !snap.parking_brake && snap.on_ground {
+                // Brake released but no movement yet — assume the
+                // pilot is about to push back.
                 next_phase = FlightPhase::Pushback;
                 stats.block_off_at = Some(now);
             }
         }
         FlightPhase::Pushback => {
-            if snap.groundspeed_kt > 5.0 && snap.on_ground {
+            // Pushback ends when the aircraft is rolling forward under
+            // its own power: engines running AND moving. Plain GS > 5
+            // wasn't reliable — pushback trucks routinely hit 4–5 kt,
+            // and we don't want to call that "taxi" yet.
+            if snap.on_ground
+                && snap.engines_running > 0
+                && snap.groundspeed_kt > 3.0
+            {
                 next_phase = FlightPhase::TaxiOut;
             }
         }
