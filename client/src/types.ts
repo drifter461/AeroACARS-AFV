@@ -132,6 +132,13 @@ export interface SimSnapshot {
   /** Gross weight (`TOTAL WEIGHT` SimVar). null when the aircraft addon
    *  doesn't wire it (e.g. Fenix). Already in kg. */
   total_weight_kg: number | null;
+  /** Avionics — null when the active aircraft profile doesn't wire
+   *  the underlying SimVar/LVar (notably Fenix for COM/NAV). */
+  transponder_code: number | null;
+  com1_mhz: number | null;
+  com2_mhz: number | null;
+  nav1_mhz: number | null;
+  nav2_mhz: number | null;
   /** Exterior lights — null when the active aircraft profile doesn't
    *  wire the underlying SimVar/LVar. */
   light_landing: boolean | null;

@@ -232,6 +232,21 @@
       "touchdown": "Last Touchdown (sim-latched)"
     }
   },
+  "diff": {
+    "title": "Switch Detective (snapshot diff)",
+    "hint": "Take Snapshot A → flip a switch in the cockpit → take Snapshot B. The table lists only the fields that changed.",
+    "take_a": "Snapshot A",
+    "retake_a": "Re-take Snapshot A",
+    "take_b": "Snapshot B",
+    "retake_b": "Re-take Snapshot B",
+    "reset": "Reset",
+    "a_taken_at": "A: {{time}}",
+    "b_taken_at": "B: {{time}}",
+    "no_changes": "No changes between snapshots.",
+    "col_field": "Field",
+    "col_before": "Before",
+    "col_after": "After"
+  },
   "inspector": {
     "title": "SimVar / LVar Inspector",
     "hint": "Type a SimVar or LVar name to watch its value live. Useful for figuring out which LVar a cockpit switch maps to.",

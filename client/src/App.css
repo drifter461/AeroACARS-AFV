@@ -1298,6 +1298,61 @@ button:disabled {
   color: #ef4444;
 }
 
+/* ----- Switch Detective: diff snapshot ----- */
+
+.diff-controls {
+  display: flex;
+  gap: 6px;
+  margin: 4px 0 8px;
+  flex-wrap: wrap;
+}
+
+.button--ghost {
+  background: transparent;
+  color: var(--text-muted);
+  border-color: var(--border);
+}
+
+.diff-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  font-family: "SF Mono", "Cascadia Code", "Source Code Pro", Menlo, Consolas,
+    monospace;
+  font-feature-settings: "tnum" 1;
+}
+
+.diff-table th,
+.diff-table td {
+  padding: 5px 8px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+
+.diff-table th {
+  font-weight: 500;
+  color: var(--text-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.diff-table__field {
+  word-break: break-all;
+  color: var(--text);
+}
+
+.diff-table__before {
+  color: var(--text-muted);
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, currentColor 50%, transparent);
+}
+
+.diff-table__after {
+  color: #22c55e;
+  font-weight: 500;
+}
+
 /* ===== Login form ===== */
 
 .login {

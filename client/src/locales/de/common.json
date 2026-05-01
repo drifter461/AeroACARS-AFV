@@ -232,6 +232,21 @@
       "touchdown": "Letzter Touchdown (vom Sim erfasst)"
     }
   },
+  "diff": {
+    "title": "Schalter-Detektor (Snapshot-Diff)",
+    "hint": "Snapshot A nehmen → Schalter im Cockpit umlegen → Snapshot B nehmen. Die Tabelle zeigt nur die Felder, die sich geändert haben.",
+    "take_a": "Snapshot A",
+    "retake_a": "Snapshot A erneut",
+    "take_b": "Snapshot B",
+    "retake_b": "Snapshot B erneut",
+    "reset": "Zurücksetzen",
+    "a_taken_at": "A: {{time}}",
+    "b_taken_at": "B: {{time}}",
+    "no_changes": "Keine Änderungen zwischen den Snapshots.",
+    "col_field": "Feld",
+    "col_before": "Vorher",
+    "col_after": "Nachher"
+  },
   "inspector": {
     "title": "SimVar / LVar Inspektor",
     "hint": "Trage einen SimVar- oder LVar-Namen ein, um den Wert live zu beobachten. Nützlich, um z.B. herauszufinden, welcher LVar zu welchem Cockpit-Schalter gehört.",
