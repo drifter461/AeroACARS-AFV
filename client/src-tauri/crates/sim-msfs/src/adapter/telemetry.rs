@@ -87,6 +87,63 @@ pub const TELEMETRY_FIELDS: &[TelemetryField] = &[
     F::f64("AMBIENT WIND VELOCITY", "knots"),
     F::f64("KOHLSMAN SETTING MB", "millibars"),
     F::f64("AMBIENT TEMPERATURE", "celsius"),
+    // ---- Avionics (Phase 5 / SU2-safe standard SimVars) ----
+    // All wired by Asobo's simulation core regardless of aircraft;
+    // Fenix is the documented exception — it bypasses the standard
+    // COM/NAV SimVars and uses internal LVars. We surface the raw
+    // values here and the snapshot mapping suppresses them for
+    // Fenix to avoid the "1024 MHz" QNH-bleed garbage we saw with
+    // the old crate.
+    F::f64("TRANSPONDER CODE:1", "BCO16"),
+    F::f64("COM ACTIVE FREQUENCY:1", "MHz"),
+    F::f64("COM ACTIVE FREQUENCY:2", "MHz"),
+    F::f64("NAV ACTIVE FREQUENCY:1", "MHz"),
+    F::f64("NAV ACTIVE FREQUENCY:2", "MHz"),
+    // ---- Exterior lights ----
+    F::bool("LIGHT LANDING"),
+    F::bool("LIGHT BEACON"),
+    F::bool("LIGHT STROBE"),
+    F::bool("LIGHT TAXI"),
+    F::bool("LIGHT NAV"),
+    F::bool("LIGHT LOGO"),
+    // ---- Autopilot ----
+    F::bool("AUTOPILOT MASTER"),
+    F::bool("AUTOPILOT HEADING LOCK"),
+    F::bool("AUTOPILOT ALTITUDE LOCK"),
+    F::bool("AUTOPILOT NAV1 LOCK"),
+    F::bool("AUTOPILOT APPROACH HOLD"),
+    // ---- Powerplant (per-engine fuel flow, summed in mapping) ----
+    F::f64("ENG FUEL FLOW PPH:1", "pounds per hour"),
+    F::f64("ENG FUEL FLOW PPH:2", "pounds per hour"),
+    F::f64("ENG FUEL FLOW PPH:3", "pounds per hour"),
+    F::f64("ENG FUEL FLOW PPH:4", "pounds per hour"),
+
+    // ---- FBW A32NX LVars ----
+    // LVars don't get rejected by SimConnect — non-FBW aircraft just
+    // read 0 from them, so adding them universally is safe. The
+    // snapshot mapping only consults these when AircraftProfile
+    // detects FBW. Reference:
+    // https://github.com/flybywiresim/aircraft/blob/master/fbw-a32nx/docs/a320-simvars.md
+    F::f64("L:A32NX_TRANSPONDER_CODE", "Number"),
+    F::f64("L:A32NX_AUTOPILOT_ACTIVE", "Bool"),
+    F::f64("L:A32NX_AUTOPILOT_HEADING_HOLD_MODE", "Bool"),
+    F::f64("L:A32NX_AUTOPILOT_ALTITUDE_HOLD_MODE", "Bool"),
+    F::f64("L:A32NX_AUTOPILOT_LOC_MODE_ACTIVE", "Bool"),
+    F::f64("L:A32NX_AUTOPILOT_APPR_MODE_ACTIVE", "Bool"),
+    // FBW total fuel quantity, kg — the documented "live" total.
+    F::f64("L:A32NX_TOTAL_FUEL_QUANTITY", "Number"),
+
+    // ---- Fenix A320 LVars ----
+    // LVar names from the Fenix knowledge base + community reverse
+    // engineering. Like FBW, these read 0 on non-Fenix aircraft.
+    // Beacon switch: 0 = OFF, 1 = ON.
+    F::f64("L:S_OH_EXT_LT_BEACON", "Number"),
+    // Strobe selector: 0 = OFF, 1 = AUTO, 2 = ON.
+    F::f64("L:S_OH_EXT_LT_STROBE", "Number"),
+    // Combined nav + logo: 0 = OFF, 1 = NAV only, 2 = NAV + LOGO.
+    F::f64("L:S_OH_EXT_LT_NAV_LOGO", "Number"),
+    // Parking brake on Fenix MIP: 0 = released, 1 = set.
+    F::f64("L:S_MIP_PARKING_BRAKE", "Number"),
 ];
 
 // Helper builders so the table above stays compact.
@@ -159,6 +216,101 @@ pub struct Telemetry {
     pub wind_speed_kt: f64,
     pub qnh_hpa: f64,
     pub oat_c: f64,
+
+    pub transponder_bcd: f64,
+    pub com1_mhz: f64,
+    pub com2_mhz: f64,
+    pub nav1_mhz: f64,
+    pub nav2_mhz: f64,
+
+    pub light_landing: bool,
+    pub light_beacon: bool,
+    pub light_strobe: bool,
+    pub light_taxi: bool,
+    pub light_nav: bool,
+    pub light_logo: bool,
+
+    pub ap_master: bool,
+    pub ap_heading: bool,
+    pub ap_altitude: bool,
+    pub ap_nav: bool,
+    pub ap_approach: bool,
+
+    pub eng1_ff_pph: f64,
+    pub eng2_ff_pph: f64,
+    pub eng3_ff_pph: f64,
+    pub eng4_ff_pph: f64,
+
+    // FBW A32NX LVars
+    pub fbw_xpdr: f64,
+    pub fbw_ap_active: f64,
+    pub fbw_ap_hdg: f64,
+    pub fbw_ap_alt: f64,
+    pub fbw_ap_nav: f64,
+    pub fbw_ap_appr: f64,
+    pub fbw_total_fuel_kg: f64,
+
+    // Fenix A320 LVars
+    pub fnx_beacon: f64,
+    pub fnx_strobe: f64,
+    pub fnx_nav_logo: f64,
+    pub fnx_park_brake: f64,
+}
+
+// ---- Touchdown sample (separate data definition #2) ----
+//
+// MSFS itself latches these the moment the gear contacts the ground;
+// values stay frozen until the next takeoff. Lives in its own data
+// definition so a rejection (e.g. on aircraft / sim builds that
+// don't expose all of these yet) can't shift the per-tick telemetry
+// layout. Verified field names + units against the MSFS 2024 SDK
+// docs:
+// https://docs.flightsimulator.com/msfs2024/html/6_Programming_APIs/SimVars/Aircraft_SimVars/Aircraft_Misc_Variables.htm
+
+pub const TOUCHDOWN_FIELDS: &[TelemetryField] = &[
+    F::f64("PLANE TOUCHDOWN NORMAL VELOCITY", "feet per second"),
+    F::f64("PLANE TOUCHDOWN PITCH DEGREES", "degrees"),
+    F::f64("PLANE TOUCHDOWN BANK DEGREES", "degrees"),
+    F::f64("PLANE TOUCHDOWN HEADING DEGREES MAGNETIC", "degrees"),
+    F::f64("PLANE TOUCHDOWN LATITUDE", "radians"),
+    F::f64("PLANE TOUCHDOWN LONGITUDE", "radians"),
+];
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Touchdown {
+    pub vs_fps: f64,
+    pub pitch_deg: f64,
+    pub bank_deg: f64,
+    pub heading_mag_deg: f64,
+    pub lat_rad: f64,
+    pub lon_rad: f64,
+}
+
+impl Touchdown {
+    pub fn from_block(bytes: &[u8]) -> Self {
+        let mut t = Touchdown::default();
+        let mut off = 0usize;
+        if let Some(v) = read_f64(bytes, off) { t.vs_fps = v; }
+        off += 8;
+        if let Some(v) = read_f64(bytes, off) { t.pitch_deg = v; }
+        off += 8;
+        if let Some(v) = read_f64(bytes, off) { t.bank_deg = v; }
+        off += 8;
+        if let Some(v) = read_f64(bytes, off) { t.heading_mag_deg = v; }
+        off += 8;
+        if let Some(v) = read_f64(bytes, off) { t.lat_rad = v; }
+        off += 8;
+        if let Some(v) = read_f64(bytes, off) { t.lon_rad = v; }
+        let _ = off;
+        t
+    }
+
+    /// `true` while the sim hasn't recorded a touchdown this session.
+    /// All six values stay at 0 until the first contact, so a clean
+    /// 0,0,0 across position + VS is the obvious sentinel.
+    pub fn is_uninitialised(&self) -> bool {
+        self.lat_rad == 0.0 && self.lon_rad == 0.0 && self.vs_fps == 0.0
+    }
 }
 
 impl Telemetry {
@@ -238,6 +390,43 @@ impl Telemetry {
         pull_f64!(t.qnh_hpa);
         pull_f64!(t.oat_c);
 
+        pull_f64!(t.transponder_bcd);
+        pull_f64!(t.com1_mhz);
+        pull_f64!(t.com2_mhz);
+        pull_f64!(t.nav1_mhz);
+        pull_f64!(t.nav2_mhz);
+
+        pull_i32!(t.light_landing);
+        pull_i32!(t.light_beacon);
+        pull_i32!(t.light_strobe);
+        pull_i32!(t.light_taxi);
+        pull_i32!(t.light_nav);
+        pull_i32!(t.light_logo);
+
+        pull_i32!(t.ap_master);
+        pull_i32!(t.ap_heading);
+        pull_i32!(t.ap_altitude);
+        pull_i32!(t.ap_nav);
+        pull_i32!(t.ap_approach);
+
+        pull_f64!(t.eng1_ff_pph);
+        pull_f64!(t.eng2_ff_pph);
+        pull_f64!(t.eng3_ff_pph);
+        pull_f64!(t.eng4_ff_pph);
+
+        pull_f64!(t.fbw_xpdr);
+        pull_f64!(t.fbw_ap_active);
+        pull_f64!(t.fbw_ap_hdg);
+        pull_f64!(t.fbw_ap_alt);
+        pull_f64!(t.fbw_ap_nav);
+        pull_f64!(t.fbw_ap_appr);
+        pull_f64!(t.fbw_total_fuel_kg);
+
+        pull_f64!(t.fnx_beacon);
+        pull_f64!(t.fnx_strobe);
+        pull_f64!(t.fnx_nav_logo);
+        pull_f64!(t.fnx_park_brake);
+
         // Silence the unused-assignment warning the last `pull_*!`
         // emits (the macro always advances `off`, but the very last
         // call doesn't read it again).
@@ -278,26 +467,99 @@ fn read_str256(bytes: &[u8], off: usize) -> Option<String> {
 
 fn telemetry_to_snapshot(t: Telemetry, simulator: Simulator) -> SimSnapshot {
     let profile = AircraftProfile::detect(&t.title, &t.atc_model);
+    let is_fenix = matches!(profile, AircraftProfile::FenixA320);
+    let is_fbw = matches!(profile, AircraftProfile::FbwA32nx);
 
     let engines_running = (t.eng1_firing as u8)
         + (t.eng2_firing as u8)
         + (t.eng3_firing as u8)
         + (t.eng4_firing as u8);
 
-    // Fuel: prefer the SU2 EX1 SimVar (works for modern fuel-system
-    // aircraft), fall back to the legacy WEIGHT SimVar.
-    let fuel_total_lb = if t.fuel_total_lb_ex1 > 0.0 {
-        t.fuel_total_lb_ex1
+    // Fuel pick order: FBW LVar (already in kg) > EX1 SimVar (SU2+,
+    // works for modern fuel system) > legacy WEIGHT SimVar.
+    let fuel_total_kg = if is_fbw && t.fbw_total_fuel_kg > 0.0 {
+        t.fbw_total_fuel_kg as f32
+    } else if t.fuel_total_lb_ex1 > 0.0 {
+        (t.fuel_total_lb_ex1 * KG_PER_LB) as f32
     } else {
-        t.fuel_total_lb_legacy
+        (t.fuel_total_lb_legacy * KG_PER_LB) as f32
     };
-    let fuel_total_kg = (fuel_total_lb * KG_PER_LB) as f32;
 
     // Gross weight: TOTAL WEIGHT is documented as authoritative.
     let total_weight_kg = if t.total_weight_lb > 0.0 {
         Some((t.total_weight_lb * KG_PER_LB) as f32)
     } else {
         None
+    };
+
+    // Total fuel flow across all running engines, kg/h. Sum the
+    // per-engine PPH SimVars and convert.
+    let total_ff_pph = t.eng1_ff_pph + t.eng2_ff_pph + t.eng3_ff_pph + t.eng4_ff_pph;
+    let fuel_flow_kg_per_h = if total_ff_pph > 0.0 {
+        Some((total_ff_pph * KG_PER_LB) as f32)
+    } else {
+        None
+    };
+
+    // Transponder code: FBW writes a plain decimal LVar (e.g.
+    // L:A32NX_TRANSPONDER_CODE = 2523 means squawk 2523), the
+    // standard SimVar is BCD-encoded (0x1234 = squawk 1234).
+    let transponder_code = if is_fbw && t.fbw_xpdr > 0.0 {
+        Some(t.fbw_xpdr.round().clamp(0.0, 7777.0) as u16)
+    } else if t.transponder_bcd > 0.0 {
+        let raw = t.transponder_bcd.round() as u32;
+        let d1 = (raw >> 12) & 0xF;
+        let d2 = (raw >> 8) & 0xF;
+        let d3 = (raw >> 4) & 0xF;
+        let d4 = raw & 0xF;
+        Some((d1 * 1000 + d2 * 100 + d3 * 10 + d4) as u16)
+    } else {
+        None
+    };
+
+    // Autopilot: FBW publishes its own LVars; default & Fenix use the
+    // standard SimVars. Fenix's L:I_FCU_* LVars flicker spuriously
+    // when unrelated cockpit switches are touched, so we keep them
+    // off the AP path entirely (validated in earlier session).
+    let (ap_master, ap_hdg, ap_alt, ap_nav, ap_appr) = if is_fbw {
+        (
+            t.fbw_ap_active != 0.0,
+            t.fbw_ap_hdg != 0.0,
+            t.fbw_ap_alt != 0.0,
+            t.fbw_ap_nav != 0.0,
+            t.fbw_ap_appr != 0.0,
+        )
+    } else {
+        (
+            t.ap_master,
+            t.ap_heading,
+            t.ap_altitude,
+            t.ap_nav,
+            t.ap_approach,
+        )
+    };
+
+    // Lights: Fenix uses overhead-LVars instead of the standard
+    // SimVars, with selector positions (off / auto / on; nav-only /
+    // nav+logo). Translate to bools.
+    let (light_beacon, light_strobe, light_nav, light_logo) = if is_fenix {
+        (
+            t.fnx_beacon as i32 != 0,
+            t.fnx_strobe as i32 != 0,
+            t.fnx_nav_logo as i32 >= 1,
+            t.fnx_nav_logo as i32 >= 2,
+        )
+    } else {
+        (t.light_beacon, t.light_strobe, t.light_nav, t.light_logo)
+    };
+
+    // Parking brake: Fenix routes through L:S_MIP_PARKING_BRAKE
+    // (the MIP switch state) which is more reliable than the
+    // standard SimVar on that aircraft.
+    let parking_brake = if is_fenix {
+        t.fnx_park_brake as i32 != 0
+    } else {
+        t.parking_brake
     };
 
     SimSnapshot {
@@ -316,7 +578,7 @@ fn telemetry_to_snapshot(t: Telemetry, simulator: Simulator) -> SimSnapshot {
         true_airspeed_kt: t.true_airspeed_kt as f32,
         g_force: t.g_force as f32,
         on_ground: t.on_ground,
-        parking_brake: t.parking_brake,
+        parking_brake,
         stall_warning: t.stall_warning,
         overspeed_warning: t.overspeed_warning,
         paused: false,
@@ -348,27 +610,27 @@ fn telemetry_to_snapshot(t: Telemetry, simulator: Simulator) -> SimSnapshot {
         aircraft_registration: Some(t.atc_id).filter(|s| !s.is_empty()),
         simulator,
         sim_version: None,
-        // Avionics / lights / AP: not yet ported to raw FFI. They
-        // come back in the next iteration once the foundation is
-        // proven. Until then the rest of the app sees None and skips
-        // those fields cleanly.
-        transponder_code: None,
-        com1_mhz: None,
-        com2_mhz: None,
-        nav1_mhz: None,
-        nav2_mhz: None,
-        light_landing: None,
-        light_beacon: None,
-        light_strobe: None,
-        light_taxi: None,
-        light_nav: None,
-        light_logo: None,
-        autopilot_master: None,
-        autopilot_heading: None,
-        autopilot_altitude: None,
-        autopilot_nav: None,
-        autopilot_approach: None,
-        fuel_flow_kg_per_h: None,
+        // Avionics: standard SimVars work for all aircraft except
+        // Fenix, which doesn't wire COM/NAV at all (we'd otherwise
+        // read garbage memory just like with the old crate). Force
+        // None for that profile.
+        transponder_code,
+        com1_mhz: if is_fenix { None } else { Some(t.com1_mhz as f32) },
+        com2_mhz: if is_fenix { None } else { Some(t.com2_mhz as f32) },
+        nav1_mhz: if is_fenix { None } else { Some(t.nav1_mhz as f32) },
+        nav2_mhz: if is_fenix { None } else { Some(t.nav2_mhz as f32) },
+        light_landing: Some(t.light_landing),
+        light_beacon: Some(light_beacon),
+        light_strobe: Some(light_strobe),
+        light_taxi: Some(t.light_taxi),
+        light_nav: Some(light_nav),
+        light_logo: Some(light_logo),
+        autopilot_master: Some(ap_master),
+        autopilot_heading: Some(ap_hdg),
+        autopilot_altitude: Some(ap_alt),
+        autopilot_nav: Some(ap_nav),
+        autopilot_approach: Some(ap_appr),
+        fuel_flow_kg_per_h,
         parking_name: None,
         parking_number: None,
         selected_runway: None,

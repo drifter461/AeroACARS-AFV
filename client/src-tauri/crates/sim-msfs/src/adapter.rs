@@ -18,13 +18,19 @@ use sim_core::{AircraftProfile, SimKind, SimSnapshot, Simulator};
 mod sys;
 mod telemetry;
 
-use telemetry::TELEMETRY_FIELDS;
+use telemetry::{Touchdown, TELEMETRY_FIELDS, TOUCHDOWN_FIELDS};
 
 // IDs used in our SimConnect calls — chosen freely as long as they're
-// unique within the connection. We only ever register one definition
-// and one request.
+// unique within the connection. Data definition #1 holds the per-tick
+// telemetry; #2 the touchdown snapshot, which only the simulation
+// itself fills (and only at the moment the gear hits the ground).
+// Splitting them means a touchdown SimVar rejection can never shift
+// the live telemetry layout — same reason we left the old crate
+// behind.
 const DEFINITION_ID: sys::SIMCONNECT_DATA_DEFINITION_ID = 1;
 const REQUEST_ID: sys::SIMCONNECT_DATA_REQUEST_ID = 1;
+const TOUCHDOWN_DEFINITION_ID: sys::SIMCONNECT_DATA_DEFINITION_ID = 2;
+const TOUCHDOWN_REQUEST_ID: sys::SIMCONNECT_DATA_REQUEST_ID = 2;
 const STALE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Public connection state mirrored to the frontend.
@@ -48,6 +54,10 @@ struct Shared {
     state: Mutex<ConnectionState>,
     snapshot: Mutex<Option<SimSnapshot>>,
     last_error: Mutex<Option<String>>,
+    /// Last touchdown sample as seen on data definition #2. Updated
+    /// asynchronously by SimConnect — we merge it into each emitted
+    /// `SimSnapshot` so downstream consumers see a unified view.
+    touchdown: Mutex<Option<Touchdown>>,
 }
 
 impl Default for MsfsAdapter {
@@ -63,6 +73,7 @@ impl MsfsAdapter {
                 state: Mutex::new(ConnectionState::Disconnected),
                 snapshot: Mutex::new(None),
                 last_error: Mutex::new(None),
+                touchdown: Mutex::new(None),
             }),
             worker: None,
             stop: Arc::new(AtomicBool::new(false)),
@@ -139,12 +150,21 @@ fn worker_loop(shared: Arc<Shared>, stop: Arc<AtomicBool>, kind: SimKind) {
                     sleep_or_stop(&stop, Duration::from_secs(2));
                     continue;
                 }
+                // Touchdown registration is best-effort: a failure
+                // there should NOT take down live telemetry. Log and
+                // proceed.
+                if let Err(e) = conn.register_touchdown() {
+                    tracing::warn!(error = %e, "register_touchdown failed — touchdown values will stay None");
+                }
                 if let Err(e) = conn.request_data_per_second() {
                     set_error(&shared, format!("RequestDataOnSimObject failed: {e}"));
                     tracing::error!(error = %e, "request_data_per_second failed");
                     drop(conn);
                     sleep_or_stop(&stop, Duration::from_secs(2));
                     continue;
+                }
+                if let Err(e) = conn.request_touchdown_per_second() {
+                    tracing::warn!(error = %e, "request_touchdown_per_second failed — touchdown values will stay None");
                 }
                 run_dispatch(&shared, &stop, &mut conn, kind);
                 // run_dispatch only returns when stop is signalled or
@@ -200,20 +220,45 @@ fn run_dispatch(
                         "SIMCONNECT_RECV_EXCEPTION — SimVar request was rejected"
                     );
                 }
-                Ok(Some(DispatchMsg::SimObjectData { bytes })) => {
-                    let snap = telemetry::parse(&bytes, simulator);
+                Ok(Some(DispatchMsg::SimObjectData { request_id, bytes })) => {
                     last_data = Instant::now();
-                    if !got_first {
-                        got_first = true;
-                        *shared.state.lock().unwrap() = ConnectionState::Connected;
-                        tracing::info!(
-                            aircraft = ?snap.aircraft_title,
-                            profile = ?snap.aircraft_profile,
-                            "MSFS first snapshot received"
-                        );
-                        log_first_snapshot_diagnostics(&snap);
+                    match request_id {
+                        REQUEST_ID => {
+                            let mut snap = telemetry::parse(&bytes, simulator);
+                            // Merge in the most recent touchdown sample
+                            // so consumers see a unified snapshot.
+                            if let Some(td) = *shared.touchdown.lock().unwrap() {
+                                if !td.is_uninitialised() {
+                                    snap.touchdown_vs_fpm =
+                                        Some((td.vs_fps * 60.0) as f32);
+                                    snap.touchdown_pitch_deg = Some(td.pitch_deg as f32);
+                                    snap.touchdown_bank_deg = Some(td.bank_deg as f32);
+                                    snap.touchdown_heading_mag_deg =
+                                        Some(td.heading_mag_deg as f32);
+                                    snap.touchdown_lat = Some(td.lat_rad.to_degrees());
+                                    snap.touchdown_lon = Some(td.lon_rad.to_degrees());
+                                }
+                            }
+                            if !got_first {
+                                got_first = true;
+                                *shared.state.lock().unwrap() = ConnectionState::Connected;
+                                tracing::info!(
+                                    aircraft = ?snap.aircraft_title,
+                                    profile = ?snap.aircraft_profile,
+                                    "MSFS first snapshot received"
+                                );
+                                log_first_snapshot_diagnostics(&snap);
+                            }
+                            *shared.snapshot.lock().unwrap() = Some(snap);
+                        }
+                        TOUCHDOWN_REQUEST_ID => {
+                            let td = Touchdown::from_block(&bytes);
+                            *shared.touchdown.lock().unwrap() = Some(td);
+                        }
+                        other => {
+                            tracing::trace!(request_id = other, "unknown SimObjectData request_id");
+                        }
                     }
-                    *shared.snapshot.lock().unwrap() = Some(snap);
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "SimConnect dispatch error");
@@ -322,6 +367,61 @@ impl Connection {
         Ok(())
     }
 
+    /// Register the touchdown sample fields under definition #2.
+    /// Best-effort: we already log per-field exceptions in the
+    /// dispatch loop, so a partial registration here is recoverable.
+    fn register_touchdown(&mut self) -> Result<(), String> {
+        for (idx, field) in TOUCHDOWN_FIELDS.iter().enumerate() {
+            let cname = std::ffi::CString::new(field.name)
+                .map_err(|_| "SimVar name contained NUL".to_string())?;
+            let cunit = std::ffi::CString::new(field.unit)
+                .map_err(|_| "Unit string contained NUL".to_string())?;
+            let datatype = match field.kind {
+                telemetry::FieldKind::Float64 => sys::SIMCONNECT_DATATYPE_FLOAT64,
+                telemetry::FieldKind::Int32 => sys::SIMCONNECT_DATATYPE_INT32,
+                telemetry::FieldKind::String256 => sys::SIMCONNECT_DATATYPE_STRING256,
+            };
+            let hr = unsafe {
+                sys::SimConnect_AddToDataDefinition(
+                    self.handle,
+                    TOUCHDOWN_DEFINITION_ID,
+                    cname.as_ptr(),
+                    cunit.as_ptr(),
+                    datatype,
+                    0.0,
+                    u32::MAX,
+                )
+            };
+            if hr != 0 {
+                return Err(format!(
+                    "AddToDataDefinition for touchdown SimVar #{idx} \"{}\" returned 0x{hr:08X}",
+                    field.name
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn request_touchdown_per_second(&mut self) -> Result<(), String> {
+        let hr = unsafe {
+            sys::SimConnect_RequestDataOnSimObject(
+                self.handle,
+                TOUCHDOWN_REQUEST_ID,
+                TOUCHDOWN_DEFINITION_ID,
+                sys::SIMCONNECT_OBJECT_ID_USER,
+                sys::SIMCONNECT_PERIOD_SECOND,
+                0,
+                0,
+                0,
+                0,
+            )
+        };
+        if hr != 0 {
+            return Err(format!("HRESULT 0x{hr:08X}"));
+        }
+        Ok(())
+    }
+
     /// Subscribe at SECOND cadence — the application bumps to faster
     /// intervals via its own polling loop, but for raw SimConnect a
     /// 1 Hz feed is plenty for our use.
@@ -380,6 +480,8 @@ impl Connection {
                 // payload — is at the same offset as
                 // `SIMCONNECT_RECV_SIMOBJECT_DATA::dwData`. We copy
                 // the bytes out so the dispatch ptr can be reused.
+                let recv_data = unsafe { &*(p_data as *const sys::SIMCONNECT_RECV_SIMOBJECT_DATA) };
+                let request_id = recv_data.dwRequestID;
                 let header_size = std::mem::size_of::<sys::SIMCONNECT_RECV_SIMOBJECT_DATA>();
                 let total = cb_data as usize;
                 if total < header_size {
@@ -392,6 +494,7 @@ impl Connection {
                     std::slice::from_raw_parts(base.add(payload_start), payload_len)
                 };
                 Some(DispatchMsg::SimObjectData {
+                    request_id,
                     bytes: bytes.to_vec(),
                 })
             }
@@ -423,6 +526,7 @@ enum DispatchMsg {
         index: u32,
     },
     SimObjectData {
+        request_id: u32,
         bytes: Vec<u8>,
     },
 }
