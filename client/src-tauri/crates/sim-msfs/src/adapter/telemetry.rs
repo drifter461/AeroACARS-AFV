@@ -500,6 +500,17 @@ fn telemetry_to_snapshot(t: Telemetry, simulator: Simulator) -> SimSnapshot {
         None
     };
 
+    // ZFW = Zero Fuel Weight = gross weight minus current fuel.
+    // Matches the value Airbus EFBs / FMCs display under "ZFW".
+    // Only meaningful when both inputs are positive — otherwise the
+    // arithmetic produces nonsense (e.g. GW=0 - fuel=4700 → -4700).
+    let zfw_kg = match total_weight_kg {
+        Some(gw) if gw > 0.0 && fuel_total_kg >= 0.0 && gw > fuel_total_kg => {
+            Some(gw - fuel_total_kg)
+        }
+        _ => None,
+    };
+
     // Total fuel flow across all running engines, kg/h. Sum the
     // per-engine PPH SimVars and convert.
     let total_ff_pph = t.eng1_ff_pph + t.eng2_ff_pph + t.eng3_ff_pph + t.eng4_ff_pph;
@@ -597,7 +608,7 @@ fn telemetry_to_snapshot(t: Telemetry, simulator: Simulator) -> SimSnapshot {
         engines_running,
         fuel_total_kg,
         fuel_used_kg: 0.0,
-        zfw_kg: None,
+        zfw_kg,
         payload_kg: None,
         total_weight_kg,
         // Touchdown sample: not yet wired in raw mode; stays None

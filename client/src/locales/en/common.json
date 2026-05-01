@@ -197,6 +197,7 @@
       "on_ground": "On ground",
       "fuel_total": "Fuel on board",
       "total_weight": "Gross weight",
+      "zfw": "Zero fuel weight (ZFW)",
       "fuel_flow": "Fuel flow",
       "touchdown_vs": "Touchdown V/S",
       "touchdown_pitch": "Touchdown pitch",

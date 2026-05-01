@@ -197,6 +197,7 @@
       "on_ground": "Am Boden",
       "fuel_total": "Kraftstoff an Bord",
       "total_weight": "Bruttogewicht",
+      "zfw": "Leergewicht (ZFW)",
       "fuel_flow": "Verbrauchsrate",
       "touchdown_vs": "Touchdown V/S",
       "touchdown_pitch": "Touchdown Pitch",

@@ -120,6 +120,11 @@ function MassFuelGrid({ snap, locale }: { snap: SimSnapshot; locale: string }) {
             ? fmtKgLb(snap.total_weight_kg, locale)
             : <em className="sim-panel__muted">{t("sim.fields.not_wired")}</em>}
         </Row>
+        <Row label={t("sim.fields.zfw")}>
+          {snap.zfw_kg !== null && snap.zfw_kg > 0
+            ? fmtKgLb(snap.zfw_kg, locale)
+            : <em className="sim-panel__muted">{t("sim.fields.not_wired")}</em>}
+        </Row>
       </dl>
     </>
   );
