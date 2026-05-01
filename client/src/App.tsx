@@ -2,36 +2,65 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { applyTheme, getInitialTheme, type Theme } from "./theme";
+import { LoginPage } from "./components/LoginPage";
+import { Dashboard } from "./components/Dashboard";
+import type { LoginResult } from "./types";
 
-interface AppInfo {
-  name: string;
-  version: string;
-  commit: string | null;
-}
+type SessionStatus =
+  | { kind: "loading" }
+  | { kind: "loggedOut" }
+  | { kind: "loggedIn"; session: LoginResult };
 
 function App() {
   const { t, i18n } = useTranslation();
   const [theme, setTheme] = useState<Theme>(() => getInitialTheme());
-  const [info, setInfo] = useState<AppInfo | null>(null);
+  const [status, setStatus] = useState<SessionStatus>({ kind: "loading" });
 
   useEffect(() => {
     applyTheme(theme);
   }, [theme]);
 
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const result = await invoke<LoginResult | null>("phpvms_load_session");
+        if (cancelled) return;
+        setStatus(
+          result ? { kind: "loggedIn", session: result } : { kind: "loggedOut" },
+        );
+      } catch {
+        // If session restore fails for any reason, fall back to login.
+        if (!cancelled) setStatus({ kind: "loggedOut" });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   function toggleTheme() {
     setTheme((prev) => (prev === "dark" ? "light" : "dark"));
   }
 
-  async function loadAppInfo() {
-    const result = await invoke<AppInfo>("app_info");
-    setInfo(result);
+  async function handleLogout() {
+    try {
+      await invoke("phpvms_logout");
+    } catch {
+      // Even if the keyring call fails, drop in-memory session.
+    }
+    setStatus({ kind: "loggedOut" });
   }
+
+  const phpvmsConnected = status.kind === "loggedIn";
 
   return (
     <main className="app">
       <header className="app__header">
-        <h1>{t("app.name")}</h1>
-        <p className="tagline">{t("app.tagline")}</p>
+        <div>
+          <h1>{t("app.name")}</h1>
+          <p className="tagline">{t("app.tagline")}</p>
+        </div>
 
         <div className="header-actions">
           <button
@@ -57,10 +86,16 @@ function App() {
       </header>
 
       <section className="status-grid">
-        <div className="status-card status-card--offline">
+        <div
+          className={`status-card status-card--${
+            phpvmsConnected ? "online" : "offline"
+          }`}
+        >
           <span className="status-card__label">{t("status.phpvms")}</span>
           <span className="status-card__value">
-            {t("status.phpvms_disconnected")}
+            {phpvmsConnected
+              ? t("status.phpvms_connected")
+              : t("status.phpvms_disconnected")}
           </span>
         </div>
         <div className="status-card status-card--offline">
@@ -71,25 +106,17 @@ function App() {
         </div>
       </section>
 
-      <section className="phase">
-        <h2>{t("phase.title")}</h2>
-        <p>{t("phase.description")}</p>
+      {status.kind === "loading" && (
+        <section className="phase">
+          <p>{t("status.checking_session")}</p>
+        </section>
+      )}
 
-        <button type="button" onClick={loadAppInfo}>
-          {t("actions.show_app_info")}
-        </button>
+      {status.kind === "loggedOut" && <LoginPage onSuccess={(s) => setStatus({ kind: "loggedIn", session: s })} />}
 
-        {info && (
-          <dl className="appinfo">
-            <dt>{t("appinfo.version")}</dt>
-            <dd>
-              {info.name} {info.version}
-            </dd>
-            <dt>{t("appinfo.commit")}</dt>
-            <dd>{info.commit ?? t("appinfo.commit_unknown")}</dd>
-          </dl>
-        )}
-      </section>
+      {status.kind === "loggedIn" && (
+        <Dashboard session={status.session} onLogout={handleLogout} />
+      )}
     </main>
   );
 }

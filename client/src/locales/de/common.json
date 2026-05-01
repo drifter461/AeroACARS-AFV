@@ -9,21 +9,58 @@
   },
   "status": {
     "phpvms": "phpVMS",
+    "phpvms_connected": "Verbunden",
     "phpvms_disconnected": "Nicht verbunden",
     "simulator": "Simulator",
-    "simulator_disconnected": "Nicht verbunden"
+    "simulator_disconnected": "Nicht verbunden",
+    "checking_session": "Sitzung wird wiederhergestellt…"
   },
   "actions": {
     "toggle_theme_dark": "Dunkles Design",
     "toggle_theme_light": "Helles Design",
     "language_de": "Deutsch",
     "language_en": "English",
-    "show_app_info": "App-Info anzeigen"
+    "show_app_info": "App-Info anzeigen",
+    "logout": "Abmelden"
   },
   "appinfo": {
     "title": "Anwendungs-Info",
     "version": "Version",
     "commit": "Commit",
     "commit_unknown": "(Entwicklungs-Build)"
+  },
+  "login": {
+    "title": "Mit phpVMS verbinden",
+    "description": "Geben Sie die URL Ihrer phpVMS-Seite und Ihren API-Key ein. Der Schlüssel wird sicher im Anmeldeinformationsspeicher Ihres Betriebssystems hinterlegt und niemals im Klartext auf der Festplatte gespeichert.",
+    "url_label": "phpVMS-Seiten-URL",
+    "url_placeholder": "https://meine-va.example.com",
+    "api_key_label": "API-Schlüssel",
+    "api_key_placeholder": "Zu finden in Ihrem Pilotenprofil",
+    "submit": "Verbinden",
+    "submitting": "Verbinde…",
+    "error": {
+      "invalid_url": "Das sieht nicht nach einer gültigen URL aus. Bitte mit https:// (empfohlen) oder http:// beginnen.",
+      "network": "Server nicht erreichbar. Bitte Internetverbindung und URL prüfen.",
+      "unauthenticated": "Der API-Schlüssel wurde abgelehnt. Bitte erneut prüfen.",
+      "forbidden": "Der Server hat die Anfrage abgelehnt. Ihr Konto hat möglicherweise nicht die nötigen Berechtigungen.",
+      "not_found": "Der phpVMS-API-Endpunkt wurde unter dieser URL nicht gefunden. Handelt es sich wirklich um eine phpVMS-7-Seite?",
+      "rate_limited": "Zu viele Anfragen — bitte in einer Minute erneut versuchen.",
+      "server": "Der Server hat einen Fehler gemeldet. Bitte erneut versuchen oder den VA-Admin kontaktieren.",
+      "bad_response": "Die Server-Antwort konnte nicht verstanden werden. Möglicherweise läuft auf der Seite kein phpVMS 7.",
+      "keyring": "Auf den Anmeldeinformationsspeicher konnte nicht zugegriffen werden.",
+      "config_path": "Speicherort für die Konfiguration konnte nicht ermittelt werden.",
+      "config_read": "Gespeicherte Konfiguration konnte nicht gelesen werden.",
+      "config_write": "Konfiguration konnte nicht gespeichert werden.",
+      "config_parse": "Die gespeicherte Konfiguration ist beschädigt.",
+      "unknown": "Ein unerwarteter Fehler ist aufgetreten."
+    }
+  },
+  "dashboard": {
+    "welcome": "Willkommen, {{name}}",
+    "pilot_id": "Piloten-ID",
+    "airline": "Airline",
+    "current_airport": "Aktueller Flughafen",
+    "home_airport": "Heimatflughafen",
+    "site": "Seite"
   }
 }

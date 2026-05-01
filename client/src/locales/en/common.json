@@ -9,21 +9,58 @@
   },
   "status": {
     "phpvms": "phpVMS",
+    "phpvms_connected": "Connected",
     "phpvms_disconnected": "Not connected",
     "simulator": "Simulator",
-    "simulator_disconnected": "Not connected"
+    "simulator_disconnected": "Not connected",
+    "checking_session": "Restoring session…"
   },
   "actions": {
     "toggle_theme_dark": "Switch to dark mode",
     "toggle_theme_light": "Switch to light mode",
     "language_de": "Deutsch",
     "language_en": "English",
-    "show_app_info": "Show app info"
+    "show_app_info": "Show app info",
+    "logout": "Sign out"
   },
   "appinfo": {
     "title": "Application info",
     "version": "Version",
     "commit": "Commit",
     "commit_unknown": "(development build)"
+  },
+  "login": {
+    "title": "Connect to phpVMS",
+    "description": "Enter your phpVMS site URL and API key. The key is stored securely in your operating system's credential store and never written to disk in plaintext.",
+    "url_label": "phpVMS site URL",
+    "url_placeholder": "https://your-va.example.com",
+    "api_key_label": "API key",
+    "api_key_placeholder": "Found under your pilot profile",
+    "submit": "Connect",
+    "submitting": "Connecting…",
+    "error": {
+      "invalid_url": "That doesn't look like a valid URL. Use https:// (recommended) or http://.",
+      "network": "Could not reach the server. Check your internet connection and the URL.",
+      "unauthenticated": "The API key was rejected. Please double-check it.",
+      "forbidden": "The server refused the request. Your account may lack the required permissions.",
+      "not_found": "The phpVMS API endpoint was not found at that URL. Is this really a phpVMS 7 site?",
+      "rate_limited": "Too many requests — please try again in a minute.",
+      "server": "The server returned an error. Try again or contact your VA admin.",
+      "bad_response": "The server response could not be understood. The site may not be running phpVMS 7.",
+      "keyring": "Could not access the OS credential store.",
+      "config_path": "Could not determine where to store the configuration.",
+      "config_read": "Could not read the saved configuration.",
+      "config_write": "Could not save the configuration.",
+      "config_parse": "The saved configuration is corrupted.",
+      "unknown": "An unexpected error occurred."
+    }
+  },
+  "dashboard": {
+    "welcome": "Welcome, {{name}}",
+    "pilot_id": "Pilot ID",
+    "airline": "Airline",
+    "current_airport": "Current airport",
+    "home_airport": "Home airport",
+    "site": "Site"
   }
 }
