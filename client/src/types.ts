@@ -187,6 +187,9 @@ export interface ActiveFlightInfo {
   pirep_id: string;
   bid_id: number;
   started_at: string;
+  /** ICAO of the operating airline, e.g. "DLH". Combined with
+   *  `flight_number` to render the full callsign ("DLH155"). */
+  airline_icao: string;
   flight_number: string;
   dpt_airport: string;
   arr_airport: string;

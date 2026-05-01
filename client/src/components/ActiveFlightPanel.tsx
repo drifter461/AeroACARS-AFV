@@ -146,18 +146,33 @@ export function ActiveFlightPanel({ info, onEnded }: Props) {
   return (
     <section className="active-flight">
       <header className="active-flight__header">
-        <div>
+        <div className="active-flight__title-block">
           <span className="active-flight__label">
             {t("active_flight.title")}
           </span>
-          <h2 className="active-flight__callsign">{info.flight_number}</h2>
-          <span className="active-flight__phase">
-            {t(`active_flight.phase.${info.phase}`, { defaultValue: info.phase })}
-          </span>
+          <div className="active-flight__heading">
+            <h2 className="active-flight__callsign">
+              {info.airline_icao
+                ? `${info.airline_icao} ${info.flight_number}`
+                : info.flight_number}
+            </h2>
+            <span
+              className={`active-flight__phase active-flight__phase--${info.phase}`}
+            >
+              {t(`active_flight.phase.${info.phase}`, {
+                defaultValue: info.phase,
+              })}
+            </span>
+          </div>
         </div>
         <div className="active-flight__route">
           <span className="active-flight__icao">{info.dpt_airport}</span>
-          <span className="active-flight__arrow">→</span>
+          <span className="active-flight__route-arrow">
+            <span className="active-flight__arrow">→</span>
+            <span className="active-flight__route-distance">
+              {fmtDistance(info.distance_nm, i18n.language)}
+            </span>
+          </span>
           <span className="active-flight__icao">{info.arr_airport}</span>
         </div>
         <div className="active-flight__actions">
@@ -189,15 +204,15 @@ export function ActiveFlightPanel({ info, onEnded }: Props) {
       </header>
 
       <dl className="active-flight__stats">
-        <div>
+        <div className="active-flight__stat">
           <dt>{t("active_flight.elapsed")}</dt>
           <dd>{fmtDuration(info.started_at, i18n.language)}</dd>
         </div>
-        <div>
+        <div className="active-flight__stat">
           <dt>{t("active_flight.distance")}</dt>
           <dd>{fmtDistance(info.distance_nm, i18n.language)}</dd>
         </div>
-        <div>
+        <div className="active-flight__stat">
           <dt>{t("active_flight.positions")}</dt>
           <dd>{info.position_count}</dd>
         </div>

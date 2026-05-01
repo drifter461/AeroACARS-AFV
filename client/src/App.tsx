@@ -5,6 +5,7 @@ import { applyTheme, getInitialTheme, type Theme } from "./theme";
 import { LoginPage } from "./components/LoginPage";
 import { Dashboard } from "./components/Dashboard";
 import { SettingsPanel } from "./components/SettingsPanel";
+import { ActivityLogPanel } from "./components/ActivityLogPanel";
 import type { LoginResult, SimConnectionState } from "./types";
 
 type SessionStatus =
@@ -12,7 +13,7 @@ type SessionStatus =
   | { kind: "loggedOut" }
   | { kind: "loggedIn"; session: LoginResult };
 
-type Tab = "dashboard" | "settings";
+type Tab = "dashboard" | "log" | "settings";
 
 const DEBUG_STORAGE_KEY = "cloudeacars.debug";
 
@@ -126,6 +127,15 @@ function App() {
           <button
             type="button"
             role="tab"
+            aria-selected={tab === "log"}
+            className={`tab ${tab === "log" ? "tab--active" : ""}`}
+            onClick={() => setTab("log")}
+          >
+            {t("tabs.log")}
+          </button>
+          <button
+            type="button"
+            role="tab"
             aria-selected={tab === "settings"}
             className={`tab ${tab === "settings" ? "tab--active" : ""}`}
             onClick={() => setTab("settings")}
@@ -155,6 +165,8 @@ function App() {
           debugMode={debugMode}
         />
       )}
+
+      {status.kind === "loggedIn" && tab === "log" && <ActivityLogPanel />}
 
       {status.kind === "loggedIn" && tab === "settings" && (
         <SettingsPanel

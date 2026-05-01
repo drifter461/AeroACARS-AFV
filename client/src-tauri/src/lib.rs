@@ -5,7 +5,7 @@
 //! per-user config dir. The API key itself is stored via `secrets` (OS keyring),
 //! never on disk in plaintext.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -120,12 +120,46 @@ fn title_mentions_icao(title: &str, icao: &str) -> bool {
 
 /// Shared application state — wraps the currently-authenticated client (if any)
 /// and (on Windows) the MSFS adapter.
+/// Cap on retained activity-log entries. The frontend displays the most
+/// recent N — older lines fall off so the buffer doesn't grow forever
+/// during a long flight (~5 h cruise = ~600 phase-tagged position posts
+/// in the log; 1000 leaves comfortable headroom for transitions, errors
+/// and bid-list updates on top).
+const ACTIVITY_LOG_CAPACITY: usize = 1000;
+
+/// Severity of an activity-log entry. Drives the frontend's icon/colour.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum ActivityLevel {
+    Info,
+    Warn,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ActivityEntry {
+    timestamp: DateTime<Utc>,
+    level: ActivityLevel,
+    /// Stable English label for the event (e.g. "PIREP prefiled").
+    /// Frontend may translate via i18n if a key matches; otherwise
+    /// renders as-is.
+    message: String,
+    /// Optional context — flight phase, PIREP id, error code, etc.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
+}
+
 #[derive(Default)]
 struct AppState {
     client: Mutex<Option<Client>>,
     #[cfg(target_os = "windows")]
     msfs: Mutex<MsfsAdapter>,
     active_flight: Mutex<Option<Arc<ActiveFlight>>>,
+    /// Ring buffer of pilot-visible activity events. Surfaced via the
+    /// `activity_log_get` Tauri command; the dashboard renders them in
+    /// the new "ACARS-Log" tab — same idea as the smartcars activity
+    /// feed (login → bids loaded → prefiled → boarding → …).
+    activity_log: Mutex<VecDeque<ActivityEntry>>,
     /// Atomic guard for `flight_start` / `flight_adopt`. Both functions await
     /// network calls *between* checking that no flight is active and writing
     /// the new ActiveFlight into state. Without this guard, two concurrent
@@ -189,6 +223,10 @@ struct ActiveFlight {
     pirep_id: String,
     bid_id: i64,
     started_at: DateTime<Utc>,
+    /// ICAO of the operating airline (e.g. "DLH"). Combined with
+    /// `flight_number` to produce the full callsign on the dashboard
+    /// ("DLH155" instead of just "155"). Empty string when unknown.
+    airline_icao: String,
     flight_number: String,
     dpt_airport: String,
     arr_airport: String,
@@ -216,6 +254,8 @@ struct PersistedFlight {
     pirep_id: String,
     bid_id: i64,
     started_at: DateTime<Utc>,
+    #[serde(default)]
+    airline_icao: String,
     flight_number: String,
     dpt_airport: String,
     arr_airport: String,
@@ -262,6 +302,44 @@ struct FlightStats {
     // ---- Fuel tracking ----
     block_fuel_kg: Option<f32>,
     last_fuel_kg: Option<f32>,
+
+    // ---- Edge detector for activity log (Phase H.3) ----
+    /// Last value we logged to the activity feed. Used to detect when the
+    /// pilot changes a knob and emit one log entry per change rather than
+    /// repeating the current state every tick.
+    last_logged_squawk: Option<u16>,
+    last_logged_com1: Option<f32>,
+    last_logged_com2: Option<f32>,
+    last_logged_nav1: Option<f32>,
+    last_logged_nav2: Option<f32>,
+    last_logged_lights: Option<LightsState>,
+    last_logged_ap: Option<ApState>,
+    last_logged_parking_brake: Option<bool>,
+    last_logged_engines_running: Option<u8>,
+    last_logged_stall: Option<bool>,
+    last_logged_overspeed: Option<bool>,
+}
+
+/// Snapshot of the six exterior lights we track. Compared as a whole so we
+/// can emit one log entry per "lights change" rather than six on a config
+/// transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct LightsState {
+    landing: bool,
+    beacon: bool,
+    strobe: bool,
+    taxi: bool,
+    nav: bool,
+    logo: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct ApState {
+    master: bool,
+    heading: bool,
+    altitude: bool,
+    nav: bool,
+    approach: bool,
 }
 
 impl FlightStats {
@@ -278,6 +356,7 @@ pub struct ActiveFlightInfo {
     pirep_id: String,
     bid_id: i64,
     started_at: String,
+    airline_icao: String,
     flight_number: String,
     dpt_airport: String,
     arr_airport: String,
@@ -345,6 +424,134 @@ impl From<ApiError> for UiError {
             details: None,
         }
     }
+}
+
+// ---- Helpers ----
+
+/// Render the full callsign as "DLH 155" (airline + space + number) when
+/// the airline ICAO is known, falling back to bare "155" otherwise.
+fn format_callsign(airline_icao: &str, flight_number: &str) -> String {
+    if airline_icao.is_empty() {
+        flight_number.to_string()
+    } else {
+        format!("{} {}", airline_icao, flight_number)
+    }
+}
+
+// ---- Activity log ----
+
+/// Suppress repeated "same" activity entries fired within this window.
+/// React StrictMode in dev double-mounts effects, so the login + session-
+/// restore commands run twice on startup; we don't want the user to see
+/// every event duplicated. Five seconds is wide enough to dedupe those
+/// without merging genuine repeats during a long flight.
+const ACTIVITY_DEDUPE_WINDOW_SECS: i64 = 5;
+
+fn would_dedupe(log: &VecDeque<ActivityEntry>, now: DateTime<Utc>, message: &str) -> bool {
+    log.back().is_some_and(|prev| {
+        prev.message == message
+            && (now - prev.timestamp).num_seconds() < ACTIVITY_DEDUPE_WINDOW_SECS
+    })
+}
+
+/// Push an entry into the in-memory activity log. Caps the buffer at
+/// `ACTIVITY_LOG_CAPACITY` so a long-running session doesn't leak memory.
+/// Also mirrors the entry to `tracing` at the matching level so command-
+/// line debugging stays consistent. Identical messages within
+/// `ACTIVITY_DEDUPE_WINDOW_SECS` of each other collapse to a single line.
+fn log_activity(
+    state: &tauri::State<'_, AppState>,
+    level: ActivityLevel,
+    message: impl Into<String>,
+    detail: Option<String>,
+) {
+    let now = Utc::now();
+    let message = message.into();
+    {
+        let log = state.activity_log.lock().expect("activity_log lock");
+        if would_dedupe(&log, now, &message) {
+            return;
+        }
+    }
+    let entry = ActivityEntry {
+        timestamp: now,
+        level,
+        message,
+        detail,
+    };
+    match level {
+        ActivityLevel::Info => {
+            tracing::info!(message = %entry.message, detail = ?entry.detail, "activity")
+        }
+        ActivityLevel::Warn => {
+            tracing::warn!(message = %entry.message, detail = ?entry.detail, "activity")
+        }
+        ActivityLevel::Error => {
+            tracing::error!(message = %entry.message, detail = ?entry.detail, "activity")
+        }
+    }
+    let mut log = state.activity_log.lock().expect("activity_log lock");
+    log.push_back(entry);
+    while log.len() > ACTIVITY_LOG_CAPACITY {
+        log.pop_front();
+    }
+}
+
+/// Same as `log_activity` but takes an `AppHandle` for use inside the
+/// streamer task (which has no `tauri::State` handle).
+fn log_activity_handle(
+    app: &AppHandle,
+    level: ActivityLevel,
+    message: impl Into<String>,
+    detail: Option<String>,
+) {
+    let now = Utc::now();
+    let message = message.into();
+    let state = app.state::<AppState>();
+    {
+        let log = state.activity_log.lock().expect("activity_log lock");
+        if would_dedupe(&log, now, &message) {
+            return;
+        }
+    }
+    let entry = ActivityEntry {
+        timestamp: now,
+        level,
+        message,
+        detail,
+    };
+    match level {
+        ActivityLevel::Info => {
+            tracing::info!(message = %entry.message, detail = ?entry.detail, "activity")
+        }
+        ActivityLevel::Warn => {
+            tracing::warn!(message = %entry.message, detail = ?entry.detail, "activity")
+        }
+        ActivityLevel::Error => {
+            tracing::error!(message = %entry.message, detail = ?entry.detail, "activity")
+        }
+    }
+    let mut log = state.activity_log.lock().expect("activity_log lock");
+    log.push_back(entry);
+    while log.len() > ACTIVITY_LOG_CAPACITY {
+        log.pop_front();
+    }
+}
+
+/// `GET` the entire activity log. Frontend polls this every couple of
+/// seconds; `ACTIVITY_LOG_CAPACITY` keeps the payload bounded.
+#[tauri::command]
+fn activity_log_get(state: tauri::State<'_, AppState>) -> Vec<ActivityEntry> {
+    let log = state.activity_log.lock().expect("activity_log lock");
+    log.iter().cloned().collect()
+}
+
+/// Wipe the activity log. Useful when the pilot starts a fresh session
+/// and doesn't want the previous flight's chatter cluttering the panel.
+#[tauri::command]
+fn activity_log_clear(state: tauri::State<'_, AppState>) {
+    let mut log = state.activity_log.lock().expect("activity_log lock");
+    log.clear();
 }
 
 // ---- Site config persistence ----
@@ -431,9 +638,14 @@ async fn phpvms_login(
     apply_sim_kind(&state, saved_kind);
 
     // Try to resume an in-progress flight (e.g. after a client crash).
-    try_resume_flight(&app, &state, &client);
+    try_resume_flight(&app, &state, &client).await;
 
-    tracing::info!(pilot = profile.name.as_str(), ?saved_kind, "logged in");
+    log_activity(
+        &state,
+        ActivityLevel::Info,
+        format!("Logged in as {}", profile.name),
+        Some(format!("Sim: {:?}", saved_kind)),
+    );
     Ok(LoginResult { profile, base_url })
 }
 
@@ -477,8 +689,13 @@ async fn phpvms_load_session(
             // Auto-start the simulator adapter when we restore an existing session.
             let saved_kind = read_sim_config(&app).kind;
             apply_sim_kind(&state, saved_kind);
-            try_resume_flight(&app, &state, &client);
-            tracing::info!(?saved_kind, "session restored");
+            try_resume_flight(&app, &state, &client).await;
+            log_activity(
+                &state,
+                ActivityLevel::Info,
+                format!("Session restored — {}", profile.name),
+                Some(format!("Sim: {:?}", saved_kind)),
+            );
             Ok(Some(LoginResult { profile, base_url }))
         }
         // Stored key was rejected — drop it so the next login goes via the form.
@@ -550,6 +767,7 @@ fn save_active_flight(app: &AppHandle, flight: &ActiveFlight) {
         pirep_id: flight.pirep_id.clone(),
         bid_id: flight.bid_id,
         started_at: flight.started_at,
+        airline_icao: flight.airline_icao.clone(),
         flight_number: flight.flight_number.clone(),
         dpt_airport: flight.dpt_airport.clone(),
         arr_airport: flight.arr_airport.clone(),
@@ -620,6 +838,7 @@ fn flight_info(flight: &ActiveFlight) -> ActiveFlightInfo {
         pirep_id: flight.pirep_id.clone(),
         bid_id: flight.bid_id,
         started_at: flight.started_at.to_rfc3339(),
+        airline_icao: flight.airline_icao.clone(),
         flight_number: flight.flight_number.clone(),
         dpt_airport: flight.dpt_airport.clone(),
         arr_airport: flight.arr_airport.clone(),
@@ -770,12 +989,18 @@ async fn flight_adopt(
         })
         .unwrap_or_default();
 
+    let airline_icao = matching_bid
+        .and_then(|b| b.flight.airline.as_ref())
+        .map(|a| a.icao.clone())
+        .unwrap_or_default();
+
     let flight = Arc::new(ActiveFlight {
         pirep_id: pirep.id.clone(),
         bid_id,
         // We don't know the original prefile time; treat "now" as the start
         // for our counters. The PIREP's actual times are intact server-side.
         started_at: Utc::now(),
+        airline_icao,
         flight_number,
         dpt_airport,
         arr_airport,
@@ -800,7 +1025,17 @@ async fn flight_adopt(
     let _ = client;
 
     let info = flight_info(flight.as_ref());
-    tracing::info!(pirep_id = %flight.pirep_id, "flight adopted (awaiting resume confirm)");
+    log_activity(
+        &state,
+        ActivityLevel::Info,
+        format!(
+            "Adopted in-progress flight {} ({} → {})",
+            format_callsign(&flight.airline_icao, &flight.flight_number),
+            flight.dpt_airport,
+            flight.arr_airport
+        ),
+        Some(format!("PIREP {}", flight.pirep_id)),
+    );
     Ok(info)
 }
 
@@ -1088,6 +1323,12 @@ async fn flight_start(
         pirep_id: pirep.id.clone(),
         bid_id,
         started_at: Utc::now(),
+        airline_icao: bid
+            .flight
+            .airline
+            .as_ref()
+            .map(|a| a.icao.clone())
+            .unwrap_or_default(),
         flight_number: bid.flight.flight_number.clone(),
         dpt_airport: bid.flight.dpt_airport_id.clone(),
         arr_airport: bid.flight.arr_airport_id.clone(),
@@ -1111,7 +1352,17 @@ async fn flight_start(
     spawn_position_streamer(app.clone(), Arc::clone(&flight), client);
 
     let info = flight_info(flight.as_ref());
-    tracing::info!(pirep_id = %flight.pirep_id, "flight started");
+    log_activity(
+        &state,
+        ActivityLevel::Info,
+        format!(
+            "Flight started: {} {} → {}",
+            format_callsign(&flight.airline_icao, &flight.flight_number),
+            flight.dpt_airport,
+            flight.arr_airport
+        ),
+        Some(format!("PIREP prefiled as {}", flight.pirep_id)),
+    );
     Ok(info)
 }
 
@@ -1259,7 +1510,21 @@ async fn flight_end(
     match client.file_pirep(&flight.pirep_id, &body).await {
         Ok(()) => {
             clear_persisted_flight(&app);
-            tracing::info!(pirep_id = %flight.pirep_id, "PIREP filed");
+            log_activity(
+                &state,
+                ActivityLevel::Info,
+                format!(
+                    "PIREP filed: {} {} → {}",
+                    format_callsign(&flight.airline_icao, &flight.flight_number),
+                    flight.dpt_airport,
+                    flight.arr_airport
+                ),
+                Some(format!(
+                    "Distance {:.1} nm, fuel {:.0} lb",
+                    body.distance.unwrap_or(0.0),
+                    body.fuel_used.unwrap_or(0.0)
+                )),
+            );
             consume_bid_best_effort(&client, flight.bid_id).await;
             Ok(())
         }
@@ -1267,10 +1532,11 @@ async fn flight_end(
             // File call failed — don't drop the flight on the floor. Put it
             // back in state so the user can retry instead of orphaning the
             // PIREP server-side.
-            tracing::warn!(
-                pirep_id = %flight.pirep_id,
-                error = %e,
-                "PIREP file failed — restoring flight to state for retry"
+            log_activity(
+                &state,
+                ActivityLevel::Error,
+                "PIREP file failed",
+                Some(format!("{} — flight kept in state for retry", e)),
             );
             let mut guard = state.active_flight.lock().expect("active_flight lock");
             *guard = Some(flight);
@@ -1397,7 +1663,17 @@ async fn flight_end_manual(
     match client.file_pirep(&flight.pirep_id, &body).await {
         Ok(()) => {
             clear_persisted_flight(&app);
-            tracing::info!(pirep_id = %flight.pirep_id, "PIREP filed (manual)");
+            log_activity(
+                &state,
+                ActivityLevel::Warn,
+                format!(
+                    "Manual PIREP filed: {} {} → {}",
+                    format_callsign(&flight.airline_icao, &flight.flight_number),
+                    flight.dpt_airport,
+                    flight.arr_airport
+                ),
+                Some("Source tagged 'manual' — admin will review".into()),
+            );
             consume_bid_best_effort(&client, flight.bid_id).await;
             Ok(())
         }
@@ -1432,7 +1708,17 @@ async fn flight_cancel(
     // Clear local persistence regardless — the user wants this gone.
     clear_persisted_flight(&app);
     result?;
-    tracing::info!(pirep_id = %flight.pirep_id, "PIREP cancelled");
+    log_activity(
+        &state,
+        ActivityLevel::Warn,
+        format!(
+            "Flight cancelled: {} {} → {}",
+            format_callsign(&flight.airline_icao, &flight.flight_number),
+            flight.dpt_airport,
+            flight.arr_airport
+        ),
+        Some(format!("PIREP {}", flight.pirep_id)),
+    );
     Ok(())
 }
 
@@ -1527,6 +1813,9 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
 
             // Update running stats AND step the flight-phase FSM.
             let phase_change = step_flight(&flight, &snap);
+            // Diff cockpit knobs against last-seen values and log changes
+            // to the activity feed. One entry per change, not per tick.
+            detect_telemetry_changes(&app, &flight, &snap);
             let position = snapshot_to_position(&snap);
 
             match client
@@ -1555,6 +1844,15 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
             // On phase change, push the new status to phpVMS so the
             // live-map and PIREP detail page reflect the current phase.
             if let Some(new_phase) = phase_change {
+                log_activity_handle(
+                    &app,
+                    ActivityLevel::Info,
+                    format!("Phase: {:?}", new_phase),
+                    Some(format!(
+                        "Alt {:.0} ft, GS {:.0} kt, AGL {:.0} ft",
+                        snap.altitude_msl_ft, snap.groundspeed_kt, snap.altitude_agl_ft
+                    )),
+                );
                 if let Some(status) = phase_to_status(new_phase) {
                     tracing::info!(
                         pirep_id = %flight.pirep_id,
@@ -1878,6 +2176,249 @@ fn phase_to_status(phase: FlightPhase) -> Option<&'static str> {
     }
 }
 
+/// Diff cockpit knob state against the last-logged values and emit one
+/// activity-feed entry per real change. Called from the streamer loop on
+/// every tick. The first call (after a fresh `flight_start` / `flight_adopt`)
+/// also logs the aircraft + simulator identity, so the log opens with a
+/// "Aircraft: …" line like smartcars does.
+fn detect_telemetry_changes(app: &AppHandle, flight: &ActiveFlight, snap: &SimSnapshot) {
+    let mut stats = flight.stats.lock().expect("flight stats");
+
+    // ---- Aircraft + sim banner — first tick only.
+    let first_tick = stats.last_logged_squawk.is_none()
+        && stats.last_logged_com1.is_none()
+        && stats.last_logged_lights.is_none();
+    if first_tick {
+        let title = snap.aircraft_title.as_deref().unwrap_or("(unknown)");
+        // Some aircraft (Fenix, FBW) return a localization key like
+        // "ATCCOM.AC_MODEL A320.0.text" in `ATC MODEL` rather than the plain
+        // ICAO. Filter that out — a stray dot in an ICAO never happens.
+        let icao_raw = snap.aircraft_icao.as_deref().unwrap_or("");
+        let icao = if icao_raw.contains('.') || icao_raw.is_empty() {
+            "?"
+        } else {
+            icao_raw
+        };
+        let reg = snap.aircraft_registration.as_deref().unwrap_or("?");
+        log_activity_handle(
+            app,
+            ActivityLevel::Info,
+            format!("Aircraft: {title}"),
+            Some(format!("Type {icao} · Reg {reg} · Sim {:?}", snap.simulator)),
+        );
+    }
+
+    // ---- Squawk
+    if let Some(sq) = snap.transponder_code {
+        if stats.last_logged_squawk != Some(sq) {
+            // Don't spam on the first tick if the value is the boring 1200/7000.
+            if !first_tick || (sq != 1200 && sq != 7000 && sq != 0) {
+                log_activity_handle(
+                    app,
+                    ActivityLevel::Info,
+                    format!("Squawk set to {:04}", sq),
+                    None,
+                );
+            }
+            stats.last_logged_squawk = Some(sq);
+        }
+    }
+
+    // ---- COM frequencies
+    if let Some(f) = snap.com1_mhz {
+        if stats.last_logged_com1.map(|v| (v - f).abs() > 0.001) != Some(false) {
+            if !first_tick {
+                log_activity_handle(
+                    app,
+                    ActivityLevel::Info,
+                    format!("COM1 → {:.3} MHz", f),
+                    None,
+                );
+            }
+            stats.last_logged_com1 = Some(f);
+        }
+    }
+    if let Some(f) = snap.com2_mhz {
+        if stats.last_logged_com2.map(|v| (v - f).abs() > 0.001) != Some(false) {
+            if !first_tick {
+                log_activity_handle(
+                    app,
+                    ActivityLevel::Info,
+                    format!("COM2 → {:.3} MHz", f),
+                    None,
+                );
+            }
+            stats.last_logged_com2 = Some(f);
+        }
+    }
+
+    // ---- NAV frequencies
+    if let Some(f) = snap.nav1_mhz {
+        if stats.last_logged_nav1.map(|v| (v - f).abs() > 0.001) != Some(false) {
+            if !first_tick {
+                log_activity_handle(
+                    app,
+                    ActivityLevel::Info,
+                    format!("NAV1 → {:.3} MHz", f),
+                    None,
+                );
+            }
+            stats.last_logged_nav1 = Some(f);
+        }
+    }
+    if let Some(f) = snap.nav2_mhz {
+        if stats.last_logged_nav2.map(|v| (v - f).abs() > 0.001) != Some(false) {
+            if !first_tick {
+                log_activity_handle(
+                    app,
+                    ActivityLevel::Info,
+                    format!("NAV2 → {:.3} MHz", f),
+                    None,
+                );
+            }
+            stats.last_logged_nav2 = Some(f);
+        }
+    }
+
+    // ---- Exterior lights
+    let lights = LightsState {
+        landing: snap.light_landing.unwrap_or(false),
+        beacon: snap.light_beacon.unwrap_or(false),
+        strobe: snap.light_strobe.unwrap_or(false),
+        taxi: snap.light_taxi.unwrap_or(false),
+        nav: snap.light_nav.unwrap_or(false),
+        logo: snap.light_logo.unwrap_or(false),
+    };
+    if stats.last_logged_lights != Some(lights) {
+        if let Some(prev) = stats.last_logged_lights {
+            // Log per-light transitions so the pilot sees exactly what changed.
+            let changes = [
+                ("Landing", prev.landing, lights.landing),
+                ("Beacon", prev.beacon, lights.beacon),
+                ("Strobe", prev.strobe, lights.strobe),
+                ("Taxi", prev.taxi, lights.taxi),
+                ("Nav", prev.nav, lights.nav),
+                ("Logo", prev.logo, lights.logo),
+            ];
+            for (name, old, new) in changes {
+                if old != new {
+                    log_activity_handle(
+                        app,
+                        ActivityLevel::Info,
+                        format!("{name} lights {}", if new { "ON" } else { "OFF" }),
+                        None,
+                    );
+                }
+            }
+        }
+        stats.last_logged_lights = Some(lights);
+    }
+
+    // ---- Autopilot
+    let ap = ApState {
+        master: snap.autopilot_master.unwrap_or(false),
+        heading: snap.autopilot_heading.unwrap_or(false),
+        altitude: snap.autopilot_altitude.unwrap_or(false),
+        nav: snap.autopilot_nav.unwrap_or(false),
+        approach: snap.autopilot_approach.unwrap_or(false),
+    };
+    if stats.last_logged_ap != Some(ap) {
+        if let Some(prev) = stats.last_logged_ap {
+            // Master toggle is the headline event; modes are detail.
+            if prev.master != ap.master {
+                log_activity_handle(
+                    app,
+                    ActivityLevel::Info,
+                    format!("Autopilot {}", if ap.master { "ENGAGED" } else { "OFF" }),
+                    None,
+                );
+            }
+            let modes = [
+                ("HDG", prev.heading, ap.heading),
+                ("ALT", prev.altitude, ap.altitude),
+                ("NAV", prev.nav, ap.nav),
+                ("APR", prev.approach, ap.approach),
+            ];
+            for (name, old, new) in modes {
+                if old != new {
+                    log_activity_handle(
+                        app,
+                        ActivityLevel::Info,
+                        format!("AP {name} {}", if new { "ARMED" } else { "OFF" }),
+                        None,
+                    );
+                }
+            }
+        }
+        stats.last_logged_ap = Some(ap);
+    }
+
+    // ---- Parking brake
+    if stats.last_logged_parking_brake != Some(snap.parking_brake) {
+        if stats.last_logged_parking_brake.is_some() {
+            log_activity_handle(
+                app,
+                ActivityLevel::Info,
+                format!(
+                    "Parking brake {}",
+                    if snap.parking_brake { "SET" } else { "RELEASED" }
+                ),
+                None,
+            );
+        }
+        stats.last_logged_parking_brake = Some(snap.parking_brake);
+    }
+
+    // ---- Engines (count only — per-engine N1/N2 is a future extension)
+    if stats.last_logged_engines_running != Some(snap.engines_running) {
+        if let Some(prev) = stats.last_logged_engines_running {
+            if prev < snap.engines_running {
+                log_activity_handle(
+                    app,
+                    ActivityLevel::Info,
+                    format!(
+                        "Engine started — {} of {} running",
+                        snap.engines_running, snap.engines_running
+                    ),
+                    None,
+                );
+            } else if prev > snap.engines_running {
+                log_activity_handle(
+                    app,
+                    ActivityLevel::Info,
+                    format!("Engine shutdown — {} running", snap.engines_running),
+                    None,
+                );
+            }
+        }
+        stats.last_logged_engines_running = Some(snap.engines_running);
+    }
+
+    // ---- Stall / overspeed warnings (always loud)
+    if stats.last_logged_stall != Some(snap.stall_warning) {
+        if snap.stall_warning {
+            log_activity_handle(
+                app,
+                ActivityLevel::Warn,
+                "Stall warning".to_string(),
+                Some(format!("IAS {:.0} kt, AGL {:.0} ft", snap.indicated_airspeed_kt, snap.altitude_agl_ft)),
+            );
+        }
+        stats.last_logged_stall = Some(snap.stall_warning);
+    }
+    if stats.last_logged_overspeed != Some(snap.overspeed_warning) {
+        if snap.overspeed_warning {
+            log_activity_handle(
+                app,
+                ActivityLevel::Warn,
+                "Overspeed warning".to_string(),
+                Some(format!("IAS {:.0} kt", snap.indicated_airspeed_kt)),
+            );
+        }
+        stats.last_logged_overspeed = Some(snap.overspeed_warning);
+    }
+}
+
 fn snapshot_to_position(snap: &SimSnapshot) -> PositionEntry {
     PositionEntry {
         lat: snap.lat,
@@ -2111,7 +2652,11 @@ fn sim_status(app: AppHandle, _state: tauri::State<'_, AppState>) -> SimStatus {
 /// On login or session restore, check the on-disk active-flight file. If it's
 /// recent enough, recreate the in-memory ActiveFlight and restart position
 /// streaming — picks up exactly where the previous run left off.
-fn try_resume_flight(app: &AppHandle, state: &tauri::State<'_, AppState>, client: &Client) {
+async fn try_resume_flight(
+    app: &AppHandle,
+    state: &tauri::State<'_, AppState>,
+    client: &Client,
+) {
     let Some(persisted) = read_persisted_flight(app) else {
         return;
     };
@@ -2144,10 +2689,30 @@ fn try_resume_flight(app: &AppHandle, state: &tauri::State<'_, AppState>, client
         "resuming in-progress flight"
     );
 
+    // Backfill missing airline ICAO. PersistedFlight defaults to "" when the
+    // JSON pre-dates the airline_icao field, or when the flight was originally
+    // adopted from a discovered PIREP that didn't have a matching bid. Try
+    // get_bids() once on resume; if it doesn't match either, fall back to
+    // empty (UI then renders flight_number alone, like before this fix).
+    let mut airline_icao = persisted.airline_icao.clone();
+    if airline_icao.is_empty() {
+        if let Ok(bids) = client.get_bids().await {
+            if let Some(matching) = bids
+                .iter()
+                .find(|b| b.flight.flight_number == persisted.flight_number)
+            {
+                if let Some(a) = matching.flight.airline.as_ref() {
+                    airline_icao = a.icao.clone();
+                }
+            }
+        }
+    }
+
     let flight = Arc::new(ActiveFlight {
         pirep_id: persisted.pirep_id.clone(),
         bid_id: persisted.bid_id,
         started_at: persisted.started_at,
+        airline_icao,
         flight_number: persisted.flight_number.clone(),
         dpt_airport: persisted.dpt_airport.clone(),
         arr_airport: persisted.arr_airport.clone(),
@@ -2168,7 +2733,6 @@ fn try_resume_flight(app: &AppHandle, state: &tauri::State<'_, AppState>, client
     }
     // NOTE: do not spawn the streamer here. The frontend-driven
     // `flight_resume_confirm` does it after the resume banner is dismissed.
-    let _ = client; // unused now, kept in signature for symmetry
 }
 
 // ---- Bootstrap ----
@@ -2202,6 +2766,8 @@ pub fn run() {
             flight_end,
             flight_end_manual,
             flight_cancel,
+            activity_log_get,
+            activity_log_clear,
             flight_forget,
             flight_discover_resumable,
             flight_adopt,

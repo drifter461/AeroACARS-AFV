@@ -9,7 +9,17 @@
   },
   "tabs": {
     "dashboard": "Dashboard",
+    "log": "ACARS-Log",
     "settings": "Einstellungen"
+  },
+  "activity_log": {
+    "title": "ACARS-Aktivitätsprotokoll",
+    "count_one": "{{count}} Eintrag",
+    "count_other": "{{count}} Einträge",
+    "count": "{{count}} Einträge",
+    "empty": "Noch keine Ereignisse aufgezeichnet. Login, Flug-Start, Phasenwechsel und PIREP-Einreichungen erscheinen hier.",
+    "clear": "Leeren",
+    "confirm_clear": "Aktivitätsprotokoll wirklich leeren?"
   },
   "settings": {
     "title": "Einstellungen",

@@ -923,6 +923,138 @@ input:disabled {
   white-space: pre-wrap;
 }
 
+/* ===== Activity log (smartcars-style flight feed) ===== */
+
+.activity-log {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.activity-log__header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.activity-log__title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.activity-log__count {
+  font-size: 12px;
+  color: var(--text-muted);
+  padding: 2px 8px;
+  background: var(--surface-2);
+  border-radius: 999px;
+}
+
+.activity-log__clear {
+  margin-left: auto;
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 4px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.activity-log__clear:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--text-muted) 10%, transparent);
+}
+
+.activity-log__clear:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.activity-log__empty {
+  margin: 0;
+  padding: 24px 12px;
+  font-size: 13px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.activity-log__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  max-height: 60vh;
+  overflow-y: auto;
+  font-family: "SF Mono", "Cascadia Code", "Source Code Pro", Menlo, Consolas,
+    monospace;
+  font-size: 13px;
+}
+
+.activity-log__entry {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px;
+  padding: 6px 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+}
+
+.activity-log__entry:last-child {
+  border-bottom: none;
+}
+
+.activity-log__entry--info {
+  /* default */
+}
+
+.activity-log__entry--warn {
+  background: color-mix(in srgb, var(--warning, orange) 8%, transparent);
+}
+
+.activity-log__entry--error {
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+
+.activity-log__time {
+  color: var(--text-muted);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.activity-log__entry--warn .activity-log__time {
+  color: var(--warning, orange);
+}
+
+.activity-log__entry--error .activity-log__time {
+  color: var(--danger);
+}
+
+.activity-log__body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.activity-log__message {
+  color: var(--text);
+  font-weight: 500;
+  word-break: break-word;
+}
+
+.activity-log__detail {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
 /* ===== Resume banner (legacy inline — kept for non-modal uses) ===== */
 
 .resume-banner {
@@ -987,102 +1119,192 @@ input:disabled {
 /* ===== Active flight ===== */
 
 .active-flight {
-  background: var(--surface);
-  border: 1px solid color-mix(in srgb, var(--accent) 50%, var(--border));
-  border-radius: 10px;
-  padding: 12px 14px;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--accent) 8%, var(--surface)) 0%,
+    var(--surface) 60%
+  );
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border));
+  border-radius: 12px;
+  padding: 18px 22px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 16px;
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 10%, transparent);
 }
 
 .active-flight__header {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(200px, auto) 1fr auto;
   align-items: center;
-  gap: 16px;
-  flex-wrap: wrap;
+  gap: 24px;
+}
+
+@media (max-width: 800px) {
+  .active-flight__header {
+    grid-template-columns: 1fr;
+  }
+  .active-flight__actions {
+    margin-left: 0;
+  }
+}
+
+.active-flight__title-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
 .active-flight__label {
   display: block;
   font-size: 10px;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.08em;
   color: var(--accent);
-  font-weight: 600;
+  font-weight: 700;
+}
+
+.active-flight__heading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 
 .active-flight__callsign {
   margin: 0;
-  font-size: 18px;
-  font-weight: 700;
+  font-size: 26px;
+  font-weight: 800;
   letter-spacing: -0.01em;
+  font-family: "SF Mono", "Cascadia Code", "Source Code Pro", Menlo, Consolas,
+    monospace;
 }
 
 .active-flight__phase {
   display: inline-block;
-  margin-top: 2px;
-  padding: 2px 10px;
+  padding: 4px 12px;
   border-radius: 999px;
   background: color-mix(in srgb, var(--accent) 20%, var(--surface-2));
   color: var(--accent);
   font-size: 11px;
-  font-weight: 600;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+
+/* Phase-specific colour cues so the badge is scannable at a glance. */
+.active-flight__phase--boarding,
+.active-flight__phase--pushback,
+.active-flight__phase--taxi_out,
+.active-flight__phase--taxi_in {
+  background: color-mix(in srgb, var(--accent) 18%, var(--surface-2));
+  color: var(--accent);
+}
+
+.active-flight__phase--takeoff_roll,
+.active-flight__phase--takeoff,
+.active-flight__phase--landing {
+  background: color-mix(in srgb, var(--warning, orange) 22%, var(--surface-2));
+  color: var(--warning, orange);
+}
+
+.active-flight__phase--climb,
+.active-flight__phase--cruise,
+.active-flight__phase--descent {
+  background: color-mix(in srgb, var(--success, #22c55e) 18%, var(--surface-2));
+  color: var(--success, #22c55e);
+}
+
+.active-flight__phase--approach,
+.active-flight__phase--final {
+  background: color-mix(in srgb, var(--warning, orange) 18%, var(--surface-2));
+  color: var(--warning, orange);
+}
+
+.active-flight__phase--blocks_on,
+.active-flight__phase--arrived,
+.active-flight__phase--pirep_submitted {
+  background: color-mix(in srgb, var(--success, #22c55e) 22%, var(--surface-2));
+  color: var(--success, #22c55e);
 }
 
 .active-flight__route {
   display: flex;
   align-items: center;
-  gap: 8px;
+  justify-content: center;
+  gap: 14px;
   font-family: "SF Mono", "Cascadia Code", "Source Code Pro", Menlo, Consolas,
     monospace;
-  font-size: 16px;
-  font-weight: 600;
 }
 
 .active-flight__icao {
+  font-size: 22px;
+  font-weight: 700;
   letter-spacing: 0.02em;
+  color: var(--text);
+}
+
+.active-flight__route-arrow {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0;
+  min-width: 80px;
 }
 
 .active-flight__arrow {
   color: var(--accent);
   font-weight: 700;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.active-flight__route-distance {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: 500;
+  letter-spacing: 0.02em;
 }
 
 .active-flight__actions {
-  margin-left: auto;
   display: flex;
   gap: 6px;
   flex-wrap: wrap;
+  align-items: center;
+  margin-left: auto;
 }
 
 .active-flight__stats {
   margin: 0;
-  display: flex;
-  gap: 24px;
-  flex-wrap: wrap;
-  font-size: 13px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px;
 }
 
-.active-flight__stats > div {
+.active-flight__stat {
+  background: color-mix(in srgb, var(--surface-2) 60%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  border-radius: 8px;
+  padding: 10px 14px;
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 4px;
 }
 
-.active-flight__stats dt {
-  font-size: 11px;
+.active-flight__stat dt {
+  font-size: 10px;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.07em;
   color: var(--text-muted);
+  font-weight: 600;
 }
 
-.active-flight__stats dd {
+.active-flight__stat dd {
   margin: 0;
-  font-weight: 600;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text);
   font-family: "SF Mono", "Cascadia Code", "Source Code Pro", Menlo, Consolas,
     monospace;
 }

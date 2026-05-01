@@ -200,11 +200,23 @@ export function ResumeFlightBanner({
   const flight =
     mode.kind === "auto_resumed"
       ? {
-          flight_number: mode.flight.flight_number,
+          // Resumed (disk) flights know the operating airline; render it as
+          // part of the callsign so "DLH155" shows instead of bare "155".
+          callsign: mode.flight.airline_icao
+            ? `${mode.flight.airline_icao} ${mode.flight.flight_number}`
+            : mode.flight.flight_number,
           dpt_airport: mode.flight.dpt_airport,
           arr_airport: mode.flight.arr_airport,
         }
-      : mode.flight;
+      : {
+          // Discovered (phpVMS) flights: PirepSummary doesn't carry the
+          // airline ICAO, so we fall back to flight_number alone — the
+          // dashboard's ActiveFlightPanel surfaces it correctly once
+          // adoption pulls the matching bid.
+          callsign: mode.flight.flight_number,
+          dpt_airport: mode.flight.dpt_airport,
+          arr_airport: mode.flight.arr_airport,
+        };
 
   return (
     <section className="resume-modal" role="status" aria-live="polite">
@@ -221,7 +233,7 @@ export function ResumeFlightBanner({
           <div className="resume-modal__icao">{flight.arr_airport}</div>
         </div>
 
-        <div className="resume-modal__callsign">{flight.flight_number}</div>
+        <div className="resume-modal__callsign">{flight.callsign}</div>
 
         <div className="resume-modal__countdown">
           <div
