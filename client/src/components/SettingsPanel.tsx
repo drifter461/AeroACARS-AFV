@@ -16,6 +16,10 @@ const ALL_KINDS: SimKind[] = [
 interface Props {
   debugMode: boolean;
   onDebugModeChange: (next: boolean) => void;
+  /** Auto-file the PIREP once the FSM reaches Arrived. Persisted
+   *  via the App.tsx storage helpers. */
+  autoFile: boolean;
+  onAutoFileChange: (next: boolean) => void;
   theme: Theme;
   onThemeChange: (next: Theme) => void;
   /** Latest sim telemetry — surfaced in the debug section when the
@@ -26,6 +30,8 @@ interface Props {
 export function SettingsPanel({
   debugMode,
   onDebugModeChange,
+  autoFile,
+  onAutoFileChange,
   theme,
   onThemeChange,
   simStatus,
@@ -119,6 +125,23 @@ export function SettingsPanel({
               </option>
             ))}
           </select>
+        </label>
+      </div>
+
+      <div className="settings__section">
+        <h3>{t("settings.filing_section")}</h3>
+        <label className="settings__checkbox">
+          <input
+            type="checkbox"
+            checked={autoFile}
+            onChange={(e) => onAutoFileChange(e.target.checked)}
+          />
+          <span>
+            <strong>{t("settings.auto_file_label")}</strong>
+            <span className="settings__row-hint">
+              {t("settings.auto_file_hint")}
+            </span>
+          </span>
         </label>
       </div>
 

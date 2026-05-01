@@ -19,6 +19,7 @@ type SessionStatus =
 type Tab = "cockpit" | "briefing" | "log" | "settings";
 
 const DEBUG_STORAGE_KEY = "cloudeacars.debug";
+const AUTO_FILE_STORAGE_KEY = "cloudeacars.autoFile";
 
 function loadDebugMode(): boolean {
   return localStorage.getItem(DEBUG_STORAGE_KEY) === "1";
@@ -28,12 +29,27 @@ function saveDebugMode(value: boolean) {
   localStorage.setItem(DEBUG_STORAGE_KEY, value ? "1" : "0");
 }
 
+/** Auto-file the PIREP when the FSM reaches Arrived. Default ON —
+ *  removes one click from the happy path. Disabling forces the
+ *  pilot to hit "Flug beenden" manually, useful when they want to
+ *  inspect mass / fuel / activity log before submitting. */
+function loadAutoFile(): boolean {
+  const v = localStorage.getItem(AUTO_FILE_STORAGE_KEY);
+  // Default true: only persisted "0" disables.
+  return v !== "0";
+}
+
+function saveAutoFile(value: boolean) {
+  localStorage.setItem(AUTO_FILE_STORAGE_KEY, value ? "1" : "0");
+}
+
 function App() {
   const { t } = useTranslation();
   const [theme, setTheme] = useState<Theme>(() => getInitialTheme());
   const [status, setStatus] = useState<SessionStatus>({ kind: "loading" });
   const [tab, setTab] = useState<Tab>("briefing");
   const [debugMode, setDebugMode] = useState<boolean>(() => loadDebugMode());
+  const [autoFile, setAutoFile] = useState<boolean>(() => loadAutoFile());
   const { status: simStatus, snapshot: simSnapshot } = useSimSession();
   const simState = simStatus?.state ?? "disconnected";
   const [activeFlight, setActiveFlight] = useState<ActiveFlightInfo | null>(
@@ -115,6 +131,11 @@ function App() {
   function handleDebugModeChange(next: boolean) {
     setDebugMode(next);
     saveDebugMode(next);
+  }
+
+  function handleAutoFileChange(next: boolean) {
+    setAutoFile(next);
+    saveAutoFile(next);
   }
 
   const phpvmsConnected = status.kind === "loggedIn";
@@ -229,6 +250,7 @@ function App() {
           setActiveFlight={setActiveFlight}
           simSnapshot={simSnapshot}
           onSwitchToBriefing={() => setTab("briefing")}
+          autoFile={autoFile}
         />
       )}
 
@@ -249,6 +271,8 @@ function App() {
         <SettingsPanel
           debugMode={debugMode}
           onDebugModeChange={handleDebugModeChange}
+          autoFile={autoFile}
+          onAutoFileChange={handleAutoFileChange}
           theme={theme}
           onThemeChange={setTheme}
           simStatus={simStatus}

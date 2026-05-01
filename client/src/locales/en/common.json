@@ -90,6 +90,9 @@
     "simulator_section": "Simulator",
     "simulator_label": "Active simulator",
     "simulator_hint": "Pick your simulator. CloudeAcars connects automatically as soon as the sim is running.",
+    "filing_section": "PIREP filing",
+    "auto_file_label": "Auto-file PIREP",
+    "auto_file_hint": "Files the PIREP automatically once the flight reaches the \"Arrived\" phase (at gate, engines off, parking brake set). The manual \"End flight\" button remains available for cases where validation fails.",
     "developer_section": "Developer options",
     "debug_mode_label": "Debug mode",
     "debug_mode_hint": "Shows the full telemetry grid (position, altitude, speeds, attitude, G-load) on the dashboard. Not needed for normal use."

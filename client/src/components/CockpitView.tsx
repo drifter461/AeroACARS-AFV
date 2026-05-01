@@ -13,6 +13,10 @@ interface Props {
   /** Called when there's no active flight and the user wants to pick
    *  one — UI nudges them to the briefing tab. */
   onSwitchToBriefing: () => void;
+  /** Auto-file the PIREP once the FSM reaches `Arrived`. Toggle in
+   *  Settings → Filing. When false the pilot has to click
+   *  "Flug beenden" themselves. */
+  autoFile: boolean;
 }
 
 /**
@@ -30,6 +34,7 @@ export function CockpitView({
   setActiveFlight,
   simSnapshot,
   onSwitchToBriefing,
+  autoFile,
 }: Props) {
   const { t } = useTranslation();
 
@@ -47,6 +52,7 @@ export function CockpitView({
       autoFiledRef.current = null;
       return;
     }
+    if (!autoFile) return;
     if (activeFlight.phase !== "arrived") return;
     if (autoFiledRef.current === activeFlight.pirep_id) return;
     autoFiledRef.current = activeFlight.pirep_id;
@@ -64,7 +70,7 @@ export function CockpitView({
         // can hit the button manually.
       }
     })();
-  }, [activeFlight]);
+  }, [activeFlight, autoFile]);
 
   if (!activeFlight) {
     return (
