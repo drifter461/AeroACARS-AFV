@@ -2739,7 +2739,12 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
     let prev_phase = stats.phase;
     let mut next_phase = prev_phase;
     let was_on_ground = stats.was_on_ground.unwrap_or(snap.on_ground);
-    let was_brake = stats.was_parking_brake.unwrap_or(snap.parking_brake);
+    // was_parking_brake is no longer consulted by any phase transition
+    // (we removed the brake-release-only Pushback trigger), but the
+    // tracking field stays — the activity-log change detector below
+    // and any future transition that wants brake-state history will
+    // pick it up. Acknowledge to silence the unused-variable warning.
+    let _ = stats.was_parking_brake;
 
     // Capture the departure gate as soon as MSFS gives us a parking
     // name — that means the aircraft is still on the named stand and
@@ -2757,29 +2762,27 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
     // Match on a local Copy so the rest of the body is free to mutate `stats`.
     match prev_phase {
         FlightPhase::Boarding => {
-            // Pushback detection: aircraft moves on the ground while
-            // engines are still off — that's the truck pushing. Catches
-            // both flows MSFS supports:
-            //   * MSFS native pushback (Ctrl+P) which often doesn't
-            //     toggle the parking brake at all
-            //   * GSX / hand-flown pushback where the pilot only
-            //     releases the brake at the start
-            // Engines running + ground motion = the pilot skipped a
-            // push and went straight to taxi — jump to TaxiOut so we
-            // don't get stuck in Boarding.
+            // Pushback / departure detection: actual movement is the
+            // only reliable trigger. Brake-release alone is NOT enough
+            // — pilots routinely release the brake to test controls,
+            // prep for taxi, or because GSX flips it during boarding.
+            // Without movement, that's still Boarding.
+            //
+            // Branches:
+            //   * Moving with engines OFF → tug is pushing → Pushback
+            //   * Moving with engines ON  → straight to TaxiOut
+            //                                (powered movement, no push)
+            //
+            // Both flows MSFS supports get covered: the native Ctrl+P
+            // push (often doesn't touch parking brake) and the GSX
+            // / hand-flown push (brake released first, then truck).
             if snap.on_ground && snap.groundspeed_kt > 0.5 {
-                if snap.engines_running == 0 {
-                    next_phase = FlightPhase::Pushback;
-                    stats.block_off_at = Some(now);
-                } else {
-                    next_phase = FlightPhase::TaxiOut;
-                    stats.block_off_at = Some(now);
-                }
-            } else if was_brake && !snap.parking_brake && snap.on_ground {
-                // Brake released but no movement yet — assume the
-                // pilot is about to push back.
-                next_phase = FlightPhase::Pushback;
                 stats.block_off_at = Some(now);
+                next_phase = if snap.engines_running == 0 {
+                    FlightPhase::Pushback
+                } else {
+                    FlightPhase::TaxiOut
+                };
             }
         }
         FlightPhase::Pushback => {
