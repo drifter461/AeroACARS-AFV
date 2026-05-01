@@ -111,6 +111,26 @@ pub struct SimSnapshot {
 /// LVars (and the activity log can show the pilot which mapping is in use).
 /// Detection runs on every snapshot but the answer is cached on the adapter
 /// — the title only changes when the pilot loads a different airframe.
+///
+/// Mapping status (Phase H.4 backlog):
+///   * `FbwA32nx`   — LVars wired (untested live, FBW not loaded yet).
+///   * `FenixA320`  — Lights / parking brake / flaps wired and verified
+///                    in MSFS 2024. AP indicator LVars (`I_FCU_AP*`) were
+///                    observed flickering and are intentionally disabled
+///                    until a stable source is identified.
+///   * `Pmdg737`    — detection only; LVars TBD (PMDG ships its own
+///                    SimConnect ClientData SDK, not plain LVars — needs
+///                    a separate subscribe path).
+///   * `Pmdg777`    — same as 737.
+///   * `IniA340`    — detection only; LVar list TBD.
+///   * `IniA350`    — detection only; LVar list TBD.
+///   * `IniA346Pro` — detection only; LVar list TBD.
+///
+/// Cross-cutting issue: ~50 LVar fields in one SimConnectObject macro
+/// appears to overflow the read path on Fenix (lights/flaps return 0.0
+/// despite live cockpit changes); future work is a runtime-defined LVar
+/// reader (likely via `msfs-rs` or MobiFlight WASM client data) so each
+/// profile only subscribes to the LVars it actually uses.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AircraftProfile {

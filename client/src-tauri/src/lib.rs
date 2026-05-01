@@ -269,6 +269,111 @@ struct PersistedFlight {
     dpt_airport: String,
     arr_airport: String,
     fares: Vec<(i64, i32)>,
+    /// Snapshot of running flight statistics (distance, fuel, phase
+    /// FSM state, captured timestamps). Written by the position
+    /// streamer every `STATS_PERSIST_EVERY_TICKS` posts; read by
+    /// `try_resume_flight` so a Tauri restart mid-flight doesn't lose
+    /// fuel-burn or distance numbers — that was the root cause of the
+    /// "0 distance / 0 fuel" PIREPs we saw before Phase H.4.
+    #[serde(default)]
+    stats: PersistedFlightStats,
+}
+
+/// Persistable subset of `FlightStats`. The activity-log edge-detector
+/// state (`last_logged_*`) is intentionally NOT persisted — after a
+/// resume we restart the diff detection cleanly.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct PersistedFlightStats {
+    #[serde(default)]
+    distance_nm: f64,
+    #[serde(default)]
+    position_count: u32,
+    #[serde(default)]
+    phase: FlightPhase,
+    #[serde(default)]
+    block_off_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    takeoff_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    landing_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    block_on_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    takeoff_weight_kg: Option<f64>,
+    #[serde(default)]
+    takeoff_fuel_kg: Option<f32>,
+    #[serde(default)]
+    landing_rate_fpm: Option<f32>,
+    #[serde(default)]
+    landing_g_force: Option<f32>,
+    #[serde(default)]
+    landing_pitch_deg: Option<f32>,
+    #[serde(default)]
+    landing_speed_kt: Option<f32>,
+    #[serde(default)]
+    landing_weight_kg: Option<f64>,
+    #[serde(default)]
+    landing_heading_deg: Option<f32>,
+    #[serde(default)]
+    landing_fuel_kg: Option<f32>,
+    #[serde(default)]
+    block_fuel_kg: Option<f32>,
+    #[serde(default)]
+    last_fuel_kg: Option<f32>,
+    #[serde(default)]
+    last_lat: Option<f64>,
+    #[serde(default)]
+    last_lon: Option<f64>,
+}
+
+impl PersistedFlightStats {
+    fn snapshot_from(stats: &FlightStats) -> Self {
+        Self {
+            distance_nm: stats.distance_nm,
+            position_count: stats.position_count,
+            phase: stats.phase,
+            block_off_at: stats.block_off_at,
+            takeoff_at: stats.takeoff_at,
+            landing_at: stats.landing_at,
+            block_on_at: stats.block_on_at,
+            takeoff_weight_kg: stats.takeoff_weight_kg,
+            takeoff_fuel_kg: stats.takeoff_fuel_kg,
+            landing_rate_fpm: stats.landing_rate_fpm,
+            landing_g_force: stats.landing_g_force,
+            landing_pitch_deg: stats.landing_pitch_deg,
+            landing_speed_kt: stats.landing_speed_kt,
+            landing_weight_kg: stats.landing_weight_kg,
+            landing_heading_deg: stats.landing_heading_deg,
+            landing_fuel_kg: stats.landing_fuel_kg,
+            block_fuel_kg: stats.block_fuel_kg,
+            last_fuel_kg: stats.last_fuel_kg,
+            last_lat: stats.last_lat,
+            last_lon: stats.last_lon,
+        }
+    }
+
+    fn apply_to(self, stats: &mut FlightStats) {
+        stats.distance_nm = self.distance_nm;
+        stats.position_count = self.position_count;
+        stats.phase = self.phase;
+        stats.block_off_at = self.block_off_at;
+        stats.takeoff_at = self.takeoff_at;
+        stats.landing_at = self.landing_at;
+        stats.block_on_at = self.block_on_at;
+        stats.takeoff_weight_kg = self.takeoff_weight_kg;
+        stats.takeoff_fuel_kg = self.takeoff_fuel_kg;
+        stats.landing_rate_fpm = self.landing_rate_fpm;
+        stats.landing_g_force = self.landing_g_force;
+        stats.landing_pitch_deg = self.landing_pitch_deg;
+        stats.landing_speed_kt = self.landing_speed_kt;
+        stats.landing_weight_kg = self.landing_weight_kg;
+        stats.landing_heading_deg = self.landing_heading_deg;
+        stats.landing_fuel_kg = self.landing_fuel_kg;
+        stats.block_fuel_kg = self.block_fuel_kg;
+        stats.last_fuel_kg = self.last_fuel_kg;
+        stats.last_lat = self.last_lat;
+        stats.last_lon = self.last_lon;
+    }
 }
 
 #[derive(Default)]
@@ -480,6 +585,13 @@ fn format_callsign(airline_icao: &str, flight_number: &str) -> String {
 }
 
 // ---- Activity log ----
+
+/// How many position-streamer ticks between persistence flushes. Stats
+/// are snapshotted to disk every Nth post so a Tauri crash mid-flight
+/// can resume with reasonably fresh distance/fuel/phase data instead of
+/// the zeros we wrote at flight_start. 5 ticks ≈ every ~25–150 s
+/// depending on phase cadence — fine for the cost of a small JSON write.
+const STATS_PERSIST_EVERY_TICKS: u32 = 5;
 
 /// AP master toggles only emit a log entry once they've held for this
 /// many seconds. Stops a flickering / pulsed LVar (Fenix's momentary
@@ -810,6 +922,12 @@ fn clear_persisted_flight(app: &AppHandle) {
 }
 
 fn save_active_flight(app: &AppHandle, flight: &ActiveFlight) {
+    // Snapshot stats inside a short-lived guard so we don't hold the
+    // mutex while doing I/O.
+    let stats_snapshot = {
+        let guard = flight.stats.lock().expect("flight stats");
+        PersistedFlightStats::snapshot_from(&guard)
+    };
     let persisted = PersistedFlight {
         pirep_id: flight.pirep_id.clone(),
         bid_id: flight.bid_id,
@@ -820,6 +938,7 @@ fn save_active_flight(app: &AppHandle, flight: &ActiveFlight) {
         dpt_airport: flight.dpt_airport.clone(),
         arr_airport: flight.arr_airport.clone(),
         fares: flight.fares.clone(),
+        stats: stats_snapshot,
     };
     if let Err(e) = write_persisted_flight(app, &persisted) {
         tracing::warn!(error = ?e, "could not persist active flight");
@@ -1920,6 +2039,19 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                 }
             }
 
+            // Periodically flush running stats to disk so a Tauri restart
+            // (or crash) doesn't lose distance/fuel/phase data. The
+            // identification fields are written every time too — cheap,
+            // and keeps the file consistent if any of them changed via
+            // backfill (airline_icao / planned_registration on resume).
+            let should_persist = {
+                let stats = flight.stats.lock().expect("flight stats");
+                stats.position_count % STATS_PERSIST_EVERY_TICKS == 0
+            };
+            if should_persist {
+                save_active_flight(&app, &flight);
+            }
+
             // On phase change, push the new status to phpVMS so the
             // live-map and PIREP detail page reflect the current phase.
             if let Some(new_phase) = phase_change {
@@ -2848,6 +2980,19 @@ async fn try_resume_flight(
         return;
     }
 
+    // Same guard as flight_start / flight_adopt: if another resume is
+    // already running (StrictMode double-mount in dev fires
+    // phpvms_load_session twice in close succession), bail silently.
+    // Without this, the second resume would do a duplicate get_bids /
+    // get_aircraft round-trip even though the first had already won.
+    let _setup_guard = match FlightSetupGuard::try_acquire(&state.flight_setup_in_progress) {
+        Ok(g) => g,
+        Err(_) => {
+            tracing::debug!("resume already in progress, skipping duplicate call");
+            return;
+        }
+    };
+
     {
         let guard = state.active_flight.lock().expect("active_flight lock");
         if guard.is_some() {
@@ -2902,6 +3047,19 @@ async fn try_resume_flight(
         }
     }
 
+    // Restore stats so the resumed flight continues with the distance,
+    // fuel-burn and phase the streamer had right before the crash.
+    // Without this, every resume produces a "0 distance / 0 fuel" PIREP
+    // because we'd start the stats from zero again.
+    let mut restored_stats = FlightStats::new();
+    persisted.stats.clone().apply_to(&mut restored_stats);
+    tracing::info!(
+        distance_nm = restored_stats.distance_nm,
+        position_count = restored_stats.position_count,
+        ?restored_stats.phase,
+        "restored flight stats from disk"
+    );
+
     let flight = Arc::new(ActiveFlight {
         pirep_id: persisted.pirep_id.clone(),
         bid_id: persisted.bid_id,
@@ -2912,7 +3070,7 @@ async fn try_resume_flight(
         dpt_airport: persisted.dpt_airport.clone(),
         arr_airport: persisted.arr_airport.clone(),
         fares: persisted.fares.clone(),
-        stats: Mutex::new(FlightStats::new()),
+        stats: Mutex::new(restored_stats),
         stop: AtomicBool::new(false),
         // Flag the UI to surface a 10-second confirmation banner before any
         // position posts go out. The streamer is intentionally NOT spawned
