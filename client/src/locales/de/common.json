@@ -1,0 +1,29 @@
+{
+  "app": {
+    "name": "CloudeAcars",
+    "tagline": "ACARS für phpVMS 7"
+  },
+  "phase": {
+    "title": "Phase 1 — Grundgerüst",
+    "description": "Das Tauri-Skeleton steht. Login, Simulator-Anbindung und PIREP-Übermittlung folgen als Nächstes."
+  },
+  "status": {
+    "phpvms": "phpVMS",
+    "phpvms_disconnected": "Nicht verbunden",
+    "simulator": "Simulator",
+    "simulator_disconnected": "Nicht verbunden"
+  },
+  "actions": {
+    "toggle_theme_dark": "Dunkles Design",
+    "toggle_theme_light": "Helles Design",
+    "language_de": "Deutsch",
+    "language_en": "English",
+    "show_app_info": "App-Info anzeigen"
+  },
+  "appinfo": {
+    "title": "Anwendungs-Info",
+    "version": "Version",
+    "commit": "Commit",
+    "commit_unknown": "(Entwicklungs-Build)"
+  }
+}

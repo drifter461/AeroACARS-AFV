@@ -31,8 +31,10 @@ pnpm-debug.log*
 *.key
 *.p12
 *.pfx
-secrets/
-.secrets/
+# Anchored to repo root so we don't accidentally match the
+# client/src-tauri/crates/secrets/ Rust crate (a code module for keyring access).
+/secrets/
+/.secrets/
 
 # ===== Rust (Tauri core, plugins) =====
 target/

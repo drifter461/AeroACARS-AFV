@@ -1,0 +1,27 @@
+[package]
+name = "sim-msfs"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "MSFS 2020/2024 simulator adapter via SimConnect SDK (Windows only). Never FSUIPC."
+
+# Windows-only crate: leave the lib empty on non-Windows targets so the workspace still builds on macOS/Linux.
+
+[dependencies]
+sim-core.workspace = true
+serde.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+# SimConnect bindings — to be added in Phase 1 implementation step.
+# Choices to evaluate:
+#   * `simconnect-sdk` — fairly complete, MIT.
+#   * Hand-rolled `bindgen` against the official SimConnect.h shipped with MSFS.
+# The crate stays empty until that decision is made.
+# [target.'cfg(target_os = "windows")'.dependencies]
+# simconnect-sdk = "..."
+
+[lints]
+workspace = true
