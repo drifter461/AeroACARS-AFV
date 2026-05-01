@@ -97,6 +97,100 @@ pub struct SimSnapshot {
     // ---- Powerplant (totals — per-engine arrays land later) ----
     /// Total fuel-flow across all running engines, kg/h.
     pub fuel_flow_kg_per_h: Option<f32>,
+
+    // ---- Aircraft profile (Phase H.4) ----
+    /// Detected aircraft profile. Drives which set of variables (default
+    /// MSFS SimVars vs add-on-specific LVars) the adapter reads from.
+    /// `Default` covers Asobo + most payware that pipes state into the
+    /// standard SimVars (e.g. PMDG 737/777 mostly do); the named variants
+    /// cover study-level add-ons that pull state from their own LVars.
+    pub aircraft_profile: AircraftProfile,
+}
+
+/// Identifies the active aircraft add-on so the adapter can read the right
+/// LVars (and the activity log can show the pilot which mapping is in use).
+/// Detection runs on every snapshot but the answer is cached on the adapter
+/// — the title only changes when the pilot loads a different airframe.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AircraftProfile {
+    /// Standard MSFS SimVars only — works for Asobo and most payware.
+    #[default]
+    Default,
+    /// FlyByWire A32NX (community Airbus). Reads `L:A32NX_*` LVars.
+    /// LVar reference: github.com/flybywiresim/aircraft/blob/master/
+    /// fbw-a32nx/docs/a320-simvars.md
+    FbwA32nx,
+    /// Fenix Simulations A320 v2. LVars in `Cockpit_Behavior.xml` plus
+    /// the Fenix knowledge base.
+    FenixA320,
+    /// PMDG 737 (700/800/900). LVars are in PMDG's SDK header.
+    Pmdg737,
+    /// PMDG 777 (200/300). Same SDK family as the 737.
+    Pmdg777,
+    /// INIBuilds A340 (Standard Edition).
+    IniA340,
+    /// INIBuilds A350.
+    IniA350,
+    /// INIBuilds A340-600 Pro.
+    IniA346Pro,
+}
+
+impl AircraftProfile {
+    /// Best-effort identification from the MSFS `TITLE` and `ATC MODEL`
+    /// strings. Falls back to `Default` when nothing matches — that's the
+    /// safe path: we keep using the standard SimVar set we already wire
+    /// up, so undetected aircraft still produce a working PIREP.
+    pub fn detect(title: &str, icao: &str) -> Self {
+        let t = title.to_lowercase();
+        let i = icao.to_lowercase();
+        // FlyByWire — distinguish from real Airbus by FBW's marker text.
+        if t.contains("flybywire") || t.contains("fbw a32nx") || t.contains("a32nx") {
+            return Self::FbwA32nx;
+        }
+        // Fenix — title typically begins with "FenixA320" / "FenixA319".
+        if t.contains("fenix") {
+            return Self::FenixA320;
+        }
+        // PMDG 737 — covers 736/737/738/739 NG and MAX variants.
+        if t.contains("pmdg") && (t.contains("737") || i.contains("b73")) {
+            return Self::Pmdg737;
+        }
+        // PMDG 777 — 772/773 ER/Freighter.
+        if t.contains("pmdg") && (t.contains("777") || i.contains("b77")) {
+            return Self::Pmdg777;
+        }
+        // INIBuilds A350.
+        if t.contains("inibuilds") && t.contains("a350") {
+            return Self::IniA350;
+        }
+        // INIBuilds A340-600 Pro — pro suffix is the discriminator vs the
+        // standard A340 build.
+        if t.contains("inibuilds") && (t.contains("a346") || t.contains("a340-600"))
+            && t.contains("pro")
+        {
+            return Self::IniA346Pro;
+        }
+        // INIBuilds A340 base.
+        if t.contains("inibuilds") && t.contains("a340") {
+            return Self::IniA340;
+        }
+        Self::Default
+    }
+
+    /// Short human-readable label for the activity log.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Default => "Default (standard SimVars)",
+            Self::FbwA32nx => "FlyByWire A32NX",
+            Self::FenixA320 => "Fenix A320",
+            Self::Pmdg737 => "PMDG 737",
+            Self::Pmdg777 => "PMDG 777",
+            Self::IniA340 => "INIBuilds A340",
+            Self::IniA350 => "INIBuilds A350",
+            Self::IniA346Pro => "INIBuilds A340-600 Pro",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

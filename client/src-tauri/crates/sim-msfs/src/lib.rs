@@ -19,7 +19,7 @@ mod adapter {
 
     use chrono::Utc;
     use serde::Serialize;
-    use sim_core::{SimKind, SimSnapshot};
+    use sim_core::{AircraftProfile, SimKind, SimSnapshot};
     use simconnect_sdk::{Notification, SimConnect, SimConnectObject};
 
     /// If no SimConnect data arrives within this window we treat the connection
@@ -157,6 +157,41 @@ mod adapter {
         ap_nav: bool,
         #[simconnect(name = "AUTOPILOT APPROACH HOLD", unit = "bool")]
         ap_approach: bool,
+
+        // ---- LVars: FlyByWire A32NX (Phase H.4 Stage 2) ----
+        // Read on every aircraft; non-FBW airframes return 0 since the
+        // LVar simply doesn't exist for them. The mapping in
+        // `telemetry_to_snapshot` only applies these when the detected
+        // profile is FbwA32nx, so other aircraft fall back to the
+        // standard SimVars above. LVar names: github.com/flybywiresim/
+        // aircraft/blob/master/fbw-a32nx/docs/a320-simvars.md
+        #[simconnect(name = "L:A32NX_TRANSPONDER_CODE", unit = "Number")]
+        fbw_xpdr: f64,
+        #[simconnect(name = "L:A32NX_AUTOPILOT_ACTIVE", unit = "Bool")]
+        fbw_ap_active: bool,
+        #[simconnect(name = "L:A32NX_AUTOPILOT_HEADING_HOLD_MODE", unit = "Bool")]
+        fbw_ap_hdg: bool,
+        #[simconnect(name = "L:A32NX_AUTOPILOT_ALTITUDE_HOLD_MODE", unit = "Bool")]
+        fbw_ap_alt: bool,
+        #[simconnect(name = "L:A32NX_AUTOPILOT_LOC_MODE_ACTIVE", unit = "Bool")]
+        fbw_ap_nav: bool,
+        #[simconnect(name = "L:A32NX_AUTOPILOT_APPR_MODE_ACTIVE", unit = "Bool")]
+        fbw_ap_appr: bool,
+        /// 0 = OFF, 1 = TAXI, 2 = T.O — overhead nose-light selector.
+        /// Drives both taxi and landing-light derivations on FBW.
+        #[simconnect(name = "L:A32NX_OVHD_INTLT_NOSE_POSITION", unit = "Number")]
+        fbw_nose_lights: f64,
+        /// Per-side landing-light state (0=retracted/off, 1=on).
+        #[simconnect(name = "L:LIGHTING_LANDING_2", unit = "Number")]
+        fbw_landing_l: f64,
+        #[simconnect(name = "L:LIGHTING_LANDING_3", unit = "Number")]
+        fbw_landing_r: f64,
+        #[simconnect(name = "L:LIGHTING_STROBE_0", unit = "Number")]
+        fbw_strobe: f64,
+        #[simconnect(name = "L:LIGHTING_BEACON_0", unit = "Number")]
+        fbw_beacon: f64,
+        #[simconnect(name = "L:LIGHTING_NAV_0", unit = "Number")]
+        fbw_nav: f64,
     }
 
     /// Pounds → kilograms (avoirdupois, 6-digit precision).
@@ -186,6 +221,53 @@ mod adapter {
         .iter()
         .filter(|x| **x)
         .count() as u8;
+        let profile = AircraftProfile::detect(&t.title, &t.atc_model);
+
+        // For FBW A32NX, override avionics/lights/AP from LVars — the
+        // standard SimVars are stale or unwired on the community Airbus.
+        let is_fbw = matches!(profile, AircraftProfile::FbwA32nx);
+        let xpdr_code = if is_fbw {
+            // FBW LVar is the BCO16-encoded squawk in decimal form.
+            Some(decode_squawk_decimal(t.fbw_xpdr))
+        } else {
+            Some(squawk_from_bcd(t.transponder_bcd))
+        };
+        let (light_landing, light_taxi) = if is_fbw {
+            // FBW landing lights = either side extended *and* on (>= 1).
+            // Nose-light selector: 0=OFF, 1=TAXI, 2=T.O. Taxi-light flag
+            // == nose-light at >= 1 (any extended state).
+            let landing = (t.fbw_landing_l as i32) > 1 || (t.fbw_landing_r as i32) > 1;
+            let taxi = (t.fbw_nose_lights as i32) >= 1;
+            (Some(landing), Some(taxi))
+        } else {
+            (Some(t.light_landing), Some(t.light_taxi))
+        };
+        let (light_beacon, light_strobe, light_nav) = if is_fbw {
+            (
+                Some(t.fbw_beacon as i32 != 0),
+                Some(t.fbw_strobe as i32 != 0),
+                Some(t.fbw_nav as i32 != 0),
+            )
+        } else {
+            (Some(t.light_beacon), Some(t.light_strobe), Some(t.light_nav))
+        };
+        let (ap_master, ap_hdg, ap_alt, ap_nav, ap_appr) = if is_fbw {
+            (
+                Some(t.fbw_ap_active),
+                Some(t.fbw_ap_hdg),
+                Some(t.fbw_ap_alt),
+                Some(t.fbw_ap_nav),
+                Some(t.fbw_ap_appr),
+            )
+        } else {
+            (
+                Some(t.ap_master),
+                Some(t.ap_heading),
+                Some(t.ap_altitude),
+                Some(t.ap_nav),
+                Some(t.ap_approach),
+            )
+        };
         SimSnapshot {
             timestamp: Utc::now(),
             lat: t.lat,
@@ -228,28 +310,39 @@ mod adapter {
             aircraft_registration: Some(t.atc_id.clone()).filter(|s| !s.is_empty()),
             simulator: kind.as_simulator(),
             sim_version: None,
-            // Avionics
-            transponder_code: Some(squawk_from_bcd(t.transponder_bcd)),
+            // Avionics — profile-aware: FBW reads its own LVars, others
+            // fall back to the standard MSFS SimVars.
+            transponder_code: xpdr_code,
             com1_mhz: Some(t.com1_mhz as f32),
             com2_mhz: Some(t.com2_mhz as f32),
             nav1_mhz: Some(t.nav1_mhz as f32),
             nav2_mhz: Some(t.nav2_mhz as f32),
-            // Lights
-            light_landing: Some(t.light_landing),
-            light_beacon: Some(t.light_beacon),
-            light_strobe: Some(t.light_strobe),
-            light_taxi: Some(t.light_taxi),
-            light_nav: Some(t.light_nav),
+            // Lights — FBW uses LVars for everything except logo (which
+            // doesn't exist on the A32NX overhead).
+            light_landing,
+            light_beacon,
+            light_strobe,
+            light_taxi,
+            light_nav,
             light_logo: Some(t.light_logo),
-            // Autopilot
-            autopilot_master: Some(t.ap_master),
-            autopilot_heading: Some(t.ap_heading),
-            autopilot_altitude: Some(t.ap_altitude),
-            autopilot_nav: Some(t.ap_nav),
-            autopilot_approach: Some(t.ap_approach),
+            // Autopilot — FBW-specific LVars when matched.
+            autopilot_master: ap_master,
+            autopilot_heading: ap_hdg,
+            autopilot_altitude: ap_alt,
+            autopilot_nav: ap_nav,
+            autopilot_approach: ap_appr,
             // Powerplant totals
             fuel_flow_kg_per_h: Some((total_ff_pph * LB_TO_KG) as f32),
+            // Aircraft profile — detected once above so the LVar overrides
+            // and the snapshot field agree.
+            aircraft_profile: profile,
         }
+    }
+
+    /// FBW publishes the squawk as a plain decimal in `L:A32NX_TRANSPONDER_CODE`
+    /// — e.g. 2523 means squawk 2523 (no BCD trickery). Just clamp + cast.
+    fn decode_squawk_decimal(v: f64) -> u16 {
+        v.round().clamp(0.0, 7777.0) as u16
     }
 
     #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]

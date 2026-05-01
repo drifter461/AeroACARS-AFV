@@ -318,6 +318,11 @@ struct FlightStats {
     last_logged_engines_running: Option<u8>,
     last_logged_stall: Option<bool>,
     last_logged_overspeed: Option<bool>,
+    /// Last aircraft profile we logged. If the pilot loads a different
+    /// airframe mid-session (e.g. swaps from default A20N to Fenix), the
+    /// detector flips and we want to emit a one-line announcement so the
+    /// user sees the LVar mapping changed.
+    last_logged_profile: Option<sim_core::AircraftProfile>,
 }
 
 /// Snapshot of the six exterior lights we track. Compared as a whole so we
@@ -2204,15 +2209,43 @@ fn detect_telemetry_changes(app: &AppHandle, flight: &ActiveFlight, snap: &SimSn
             app,
             ActivityLevel::Info,
             format!("Aircraft: {title}"),
-            Some(format!("Type {icao} · Reg {reg} · Sim {:?}", snap.simulator)),
+            Some(format!(
+                "Type {icao} · Reg {reg} · Sim {:?} · Profile: {}",
+                snap.simulator,
+                snap.aircraft_profile.label()
+            )),
         );
     }
 
+    // ---- Profile change (after first tick) — pilot swapped airframes
+    if stats.last_logged_profile != Some(snap.aircraft_profile) {
+        if !first_tick {
+            log_activity_handle(
+                app,
+                ActivityLevel::Info,
+                format!(
+                    "Aircraft profile changed → {}",
+                    snap.aircraft_profile.label()
+                ),
+                None,
+            );
+        }
+        stats.last_logged_profile = Some(snap.aircraft_profile);
+    }
+
     // ---- Squawk
+    // Real-world squawks are always 4 octal digits ≥ 1000 — Fenix and a
+    // few other study-level airbuses pump the active-edit-digit into
+    // TRANSPONDER CODE:1 while the pilot keypad-types, which the FlyByWire
+    // / Asobo aircraft don't do. Filter anything < 1000 so the log isn't
+    // flooded with "Squawk set to 0004 / 0003 / 0002" while a value like
+    // 2523 is being entered. The proper fix lives in the per-aircraft
+    // LVar profile (Phase H.4 stage 2).
     if let Some(sq) = snap.transponder_code {
-        if stats.last_logged_squawk != Some(sq) {
+        let is_plausible = sq >= 1000;
+        if is_plausible && stats.last_logged_squawk != Some(sq) {
             // Don't spam on the first tick if the value is the boring 1200/7000.
-            if !first_tick || (sq != 1200 && sq != 7000 && sq != 0) {
+            if !first_tick || (sq != 1200 && sq != 7000) {
                 log_activity_handle(
                     app,
                     ActivityLevel::Info,
@@ -2490,6 +2523,11 @@ fn build_position_log(snap: &SimSnapshot) -> Option<String> {
             "qnh_hpa": snap.qnh_hpa,
             "oat_c": snap.outside_air_temp_c,
         },
+        // Aircraft profile that produced this row. Lets the VA admin filter
+        // PIREPs by add-on (FBW vs Fenix vs PMDG) when reviewing data and
+        // know whether the cockpit-state snapshot used standard SimVars or
+        // an LVar mapping (Phase H.4 Stage 2).
+        "profile": snap.aircraft_profile,
     });
     serde_json::to_string(&payload).ok()
 }
