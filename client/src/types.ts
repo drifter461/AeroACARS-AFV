@@ -175,6 +175,14 @@ export type FlightPhase =
   | "arrived"
   | "pirep_submitted";
 
+export interface ResumableFlight {
+  pirep_id: string;
+  flight_number: string;
+  dpt_airport: string;
+  arr_airport: string;
+  status: string | null;
+}
+
 export interface ActiveFlightInfo {
   pirep_id: string;
   bid_id: number;
@@ -191,6 +199,7 @@ export interface ActiveFlightInfo {
   block_on_at: string | null;
   landing_rate_fpm: number | null;
   landing_g_force: number | null;
+  was_just_resumed: boolean;
 }
 
 export interface AirportInfo {

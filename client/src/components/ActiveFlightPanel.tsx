@@ -3,9 +3,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { useTranslation } from "react-i18next";
 import type { ActiveFlightInfo } from "../types";
 
-const POLL_MS = 2000;
-
 interface Props {
+  /** Active-flight info, owned by Dashboard. Pure display. */
+  info: ActiveFlightInfo | null;
   /** Notify parent when the flight ends so it can refresh bids etc. */
   onEnded?: () => void;
 }
@@ -28,36 +28,15 @@ function fmtDistance(nm: number, locale: string): string {
   )} nmi`;
 }
 
-export function ActiveFlightPanel({ onEnded }: Props) {
+export function ActiveFlightPanel({ info, onEnded }: Props) {
   const { t, i18n } = useTranslation();
-  const [info, setInfo] = useState<ActiveFlightInfo | null>(null);
   const [busy, setBusy] = useState<"end" | "cancel" | "forget" | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [tick, setTick] = useState(0);
-
+  // Tick once a second so the elapsed-time display refreshes between polls.
+  const [, setTick] = useState(0);
   useEffect(() => {
-    let cancelled = false;
-    let timer: ReturnType<typeof setInterval> | null = null;
-
-    async function poll() {
-      try {
-        const next = await invoke<ActiveFlightInfo | null>("flight_status");
-        if (cancelled) return;
-        setInfo(next);
-      } catch {
-        // ignore — IPC errors are transient on dev rebuilds
-      }
-    }
-
-    void poll();
-    timer = setInterval(() => {
-      void poll();
-      setTick((t) => t + 1); // also refreshes the elapsed-time display
-    }, POLL_MS);
-    return () => {
-      cancelled = true;
-      if (timer) clearInterval(timer);
-    };
+    const id = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(id);
   }, []);
 
   if (!info) return null;
@@ -68,7 +47,6 @@ export function ActiveFlightPanel({ onEnded }: Props) {
     setError(null);
     try {
       await invoke("flight_end");
-      setInfo(null);
       onEnded?.();
     } catch (err: unknown) {
       const msg =
@@ -88,7 +66,6 @@ export function ActiveFlightPanel({ onEnded }: Props) {
     setError(null);
     try {
       await invoke("flight_cancel");
-      setInfo(null);
       onEnded?.();
     } catch (err: unknown) {
       const msg =
@@ -113,7 +90,6 @@ export function ActiveFlightPanel({ onEnded }: Props) {
     setError(null);
     try {
       await invoke("flight_forget");
-      setInfo(null);
       onEnded?.();
     } catch (err: unknown) {
       const msg =
@@ -125,9 +101,6 @@ export function ActiveFlightPanel({ onEnded }: Props) {
       setBusy(null);
     }
   }
-
-  // tick is intentionally referenced so React re-renders elapsed time.
-  void tick;
 
   return (
     <section className="active-flight">

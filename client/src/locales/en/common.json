@@ -129,6 +129,17 @@
       "on_ground": "On ground"
     }
   },
+  "resume": {
+    "title": "Active flight detected",
+    "countdown": "Resuming in {{seconds}}s — no position stream is running yet",
+    "adopt_now": "Resume now",
+    "adopting": "Resuming…",
+    "cancel_flight": "Cancel flight",
+    "confirm_cancel": "Cancel the active flight on phpVMS? The PIREP will be discarded. This cannot be undone.",
+    "adopt_failed": "Could not resume the flight",
+    "confirm_failed": "Could not confirm the resume",
+    "cancel_failed": "Could not cancel the flight"
+  },
   "active_flight": {
     "title": "Active flight",
     "phase": {

@@ -624,6 +624,205 @@ input:disabled {
   flex-shrink: 0;
 }
 
+/* ===== Resume card (inline, sits in dashboard flow) ===== */
+
+.resume-modal {
+  background: var(--surface);
+  border: 2px solid var(--accent);
+  border-radius: 12px;
+  padding: 20px 22px;
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 18%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  animation: resume-slide-in 0.2s ease-out;
+}
+
+@keyframes resume-slide-in {
+  from {
+    transform: translateY(-20px) scale(0.95);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0) scale(1);
+    opacity: 1;
+  }
+}
+
+.resume-modal__header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.resume-modal__icon {
+  font-size: 28px;
+  color: var(--accent);
+}
+
+.resume-modal__title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.resume-modal__route {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  font-family: "SF Mono", "Cascadia Code", "Source Code Pro", Menlo, Consolas,
+    monospace;
+}
+
+.resume-modal__icao {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: 0.02em;
+}
+
+.resume-modal__arrow {
+  font-size: 24px;
+  color: var(--accent);
+}
+
+.resume-modal__callsign {
+  text-align: center;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-muted);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.resume-modal__countdown {
+  position: relative;
+  height: 32px;
+  background: var(--surface-2);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.resume-modal__countdown-bar {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    var(--accent),
+    color-mix(in srgb, var(--accent) 70%, var(--success))
+  );
+  transition: width 1s linear;
+  border-radius: 6px;
+}
+
+.resume-modal__countdown-text {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  font-size: 13px;
+  font-weight: 600;
+  color: white;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+  padding: 0 12px;
+  text-align: center;
+}
+
+.resume-modal__actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.resume-modal__primary {
+  flex: 1;
+  font-size: 15px;
+  padding: 12px 16px;
+  font-weight: 600;
+}
+
+.resume-modal__danger {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--danger);
+  font-size: 13px;
+  padding: 12px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.resume-modal__danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  border-color: color-mix(in srgb, var(--danger) 50%, var(--border));
+}
+
+/* ===== Resume banner (legacy inline — kept for non-modal uses) ===== */
+
+.resume-banner {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 16px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--accent) 50%, var(--border));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.resume-banner__icon {
+  font-size: 22px;
+  color: var(--accent);
+  animation: resume-spin 2s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes resume-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(-360deg);
+  }
+}
+
+.resume-banner__body {
+  flex-grow: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.resume-banner__title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.resume-banner__detail {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.resume-banner__hint {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.resume-banner__actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
 /* ===== Active flight ===== */
 
 .active-flight {

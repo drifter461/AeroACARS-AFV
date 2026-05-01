@@ -112,6 +112,14 @@ struct ActiveFlight {
     /// Mutable running stats updated by the streamer task.
     stats: Mutex<FlightStats>,
     stop: AtomicBool,
+    /// True until the resume banner is dismissed (confirmed or cancelled).
+    /// Drives the resume modal on the dashboard.
+    was_just_resumed: AtomicBool,
+    /// Compare-and-swap guard for `spawn_position_streamer`. Several UI paths
+    /// (resume confirm, StrictMode double-mount, retry on transient error)
+    /// could end up calling spawn more than once for the same ActiveFlight;
+    /// this flag ensures only ONE streamer task is ever live per flight.
+    streamer_spawned: AtomicBool,
 }
 
 /// On-disk representation of an active flight, used for resume after a client
@@ -199,6 +207,10 @@ pub struct ActiveFlightInfo {
     block_on_at: Option<String>,
     landing_rate_fpm: Option<f32>,
     landing_g_force: Option<f32>,
+    /// Set to `true` exactly ONCE — the first time the UI reads the flight
+    /// status after an automatic resume (disk or remote). Lets the dashboard
+    /// surface a one-time banner with a 10-second cancel window.
+    was_just_resumed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -502,6 +514,11 @@ async fn airport_get(
 
 fn flight_info(flight: &ActiveFlight) -> ActiveFlightInfo {
     let stats = flight.stats.lock().expect("flight stats");
+    // Don't consume here — the flag stays true until the resume banner has
+    // run its course (flight_resume_confirm or flight_cancel clears it).
+    // This avoids a race with React StrictMode's double-mount where the
+    // first poll consumes the flag before the UI can latch it.
+    let was_just_resumed = flight.was_just_resumed.load(Ordering::Relaxed);
     ActiveFlightInfo {
         pirep_id: flight.pirep_id.clone(),
         bid_id: flight.bid_id,
@@ -518,6 +535,7 @@ fn flight_info(flight: &ActiveFlight) -> ActiveFlightInfo {
         block_on_at: stats.block_on_at.map(|t| t.to_rfc3339()),
         landing_rate_fpm: stats.landing_rate_fpm,
         landing_g_force: stats.landing_g_force,
+        was_just_resumed,
     }
 }
 
@@ -546,6 +564,135 @@ fn phase_to_snake(phase: FlightPhase) -> &'static str {
 fn flight_status(state: tauri::State<'_, AppState>) -> Option<ActiveFlightInfo> {
     let guard = state.active_flight.lock().expect("active_flight lock");
     guard.as_ref().map(|f| flight_info(f.as_ref()))
+}
+
+#[derive(Serialize)]
+pub struct ResumableFlight {
+    pirep_id: String,
+    flight_number: String,
+    dpt_airport: String,
+    arr_airport: String,
+    status: Option<String>,
+}
+
+/// Look on phpVMS for in-progress PIREPs the user could resume. Used to drive
+/// the auto-detection banner on dashboard mount: if the answer is non-empty,
+/// the UI offers to adopt with a 10s countdown.
+///
+/// Skipped (returns empty) if a flight is already attached locally.
+#[tauri::command]
+async fn flight_discover_resumable(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<ResumableFlight>, UiError> {
+    {
+        let guard = state.active_flight.lock().expect("active_flight lock");
+        if guard.is_some() {
+            return Ok(Vec::new());
+        }
+    }
+    let client = current_client(&state)?;
+    let pireps = client.get_user_pireps().await?;
+    Ok(pireps
+        .into_iter()
+        .filter(|p| p.state == Some(0)) // IN_PROGRESS
+        .filter_map(|p| {
+            Some(ResumableFlight {
+                pirep_id: p.id,
+                flight_number: p.flight_number?,
+                dpt_airport: p.dpt_airport_id.unwrap_or_default(),
+                arr_airport: p.arr_airport_id.unwrap_or_default(),
+                status: p.status,
+            })
+        })
+        .collect())
+}
+
+/// Adopt a specific in-progress PIREP — creates the local ActiveFlight,
+/// persists it to disk, starts the position streamer. Used by the resume
+/// banner after the 10s countdown elapses (or the user clicks Resume now).
+#[tauri::command]
+async fn flight_adopt(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    pirep_id: String,
+) -> Result<ActiveFlightInfo, UiError> {
+    {
+        let guard = state.active_flight.lock().expect("active_flight lock");
+        if guard.is_some() {
+            return Err(UiError::new(
+                "flight_already_active",
+                "another flight is already active",
+            ));
+        }
+    }
+
+    let client = current_client(&state)?;
+    let pireps = client.get_user_pireps().await?;
+    let pirep = pireps
+        .into_iter()
+        .find(|p| p.id == pirep_id && p.state == Some(0))
+        .ok_or_else(|| {
+            UiError::new(
+                "pirep_not_resumable",
+                "PIREP not found or no longer in progress",
+            )
+        })?;
+
+    // Best-effort: look for a matching bid so we can carry fares forward to
+    // the eventual file. If no bid matches, file with no fares — phpVMS keeps
+    // whatever was set during prefile.
+    let flight_number = pirep
+        .flight_number
+        .clone()
+        .ok_or_else(|| UiError::new("pirep_invalid", "PIREP has no flight number"))?;
+    let dpt_airport = pirep.dpt_airport_id.clone().unwrap_or_default();
+    let arr_airport = pirep.arr_airport_id.clone().unwrap_or_default();
+
+    let bids = client.get_bids().await.unwrap_or_default();
+    let matching_bid = bids
+        .iter()
+        .find(|b| b.flight.flight_number == flight_number);
+    let bid_id = matching_bid.map(|b| b.id).unwrap_or(0);
+    let fares: Vec<(i64, i32)> = matching_bid
+        .and_then(|b| b.flight.simbrief.as_ref())
+        .and_then(|sb| sb.subfleet.as_ref())
+        .map(|sf| {
+            sf.fares
+                .iter()
+                .filter_map(|f| f.count.map(|c| (f.id, c)))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let flight = Arc::new(ActiveFlight {
+        pirep_id: pirep.id.clone(),
+        bid_id,
+        // We don't know the original prefile time; treat "now" as the start
+        // for our counters. The PIREP's actual times are intact server-side.
+        started_at: Utc::now(),
+        flight_number,
+        dpt_airport,
+        arr_airport,
+        fares,
+        stats: Mutex::new(FlightStats::new()),
+        stop: AtomicBool::new(false),
+        // Surfaced via flight_status to trigger the resume banner.
+        was_just_resumed: AtomicBool::new(true),
+        streamer_spawned: AtomicBool::new(false),
+    });
+
+    save_active_flight(&app, &flight);
+    {
+        let mut guard = state.active_flight.lock().expect("active_flight lock");
+        *guard = Some(Arc::clone(&flight));
+    }
+    // Don't spawn the streamer yet — the resume banner is in countdown mode
+    // and the user can still cancel. `flight_resume_confirm` spawns it.
+    let _ = client;
+
+    let info = flight_info(flight.as_ref());
+    tracing::info!(pirep_id = %flight.pirep_id, "flight adopted (awaiting resume confirm)");
+    Ok(info)
 }
 
 /// Start tracking a flight: prefile a PIREP and begin position streaming.
@@ -834,6 +981,9 @@ async fn flight_start(
         fares,
         stats: Mutex::new(FlightStats::new()),
         stop: AtomicBool::new(false),
+        // Fresh start triggered by user — no banner needed.
+        was_just_resumed: AtomicBool::new(false),
+        streamer_spawned: AtomicBool::new(false),
     });
 
     save_active_flight(&app, &flight);
@@ -945,6 +1095,29 @@ async fn flight_cancel(
     Ok(())
 }
 
+/// Confirm an auto-resumed flight: now actually spawn the position streamer.
+/// Called by the resume banner when its 10-second countdown elapses (or the
+/// user clicks "Resume now"). Until this fires, no position posts go out, so
+/// the user can still cancel without leaving footprints on phpVMS.
+#[tauri::command]
+async fn flight_resume_confirm(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), UiError> {
+    let flight = {
+        let guard = state.active_flight.lock().expect("active_flight lock");
+        guard
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| UiError::new("no_active_flight", "no flight to resume"))?
+    };
+    // Resume confirmed → clear the banner flag.
+    flight.was_just_resumed.store(false, Ordering::Relaxed);
+    let client = current_client(&state)?;
+    spawn_position_streamer(app, flight, client);
+    Ok(())
+}
+
 /// Drop local active-flight state without contacting phpVMS. Useful when the
 /// stored PIREP is orphaned/dead on the server side and the user wants a
 /// clean slate.
@@ -970,9 +1143,21 @@ async fn flight_forget(
 /// `POSITION_INTERVAL_SECS`. Stops when `flight.stop` is set or the active
 /// flight is replaced.
 ///
-/// We use `tauri::async_runtime::spawn` rather than bare `tokio::spawn` so the
-/// task always lands on Tauri's runtime, regardless of feature flags.
+/// CAS-guarded: at most one streamer task per ActiveFlight. Repeat calls are
+/// no-ops, which makes it safe to invoke from multiple UI paths
+/// (`flight_resume_confirm` racing with itself, StrictMode double-mount, etc.).
 fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Client) {
+    if flight
+        .streamer_spawned
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        tracing::debug!(
+            pirep_id = %flight.pirep_id,
+            "position streamer already running, skipping spawn"
+        );
+        return;
+    }
     tauri::async_runtime::spawn(async move {
         tracing::info!(pirep_id = %flight.pirep_id, "position streamer started");
         let mut interval =
@@ -1561,13 +1746,21 @@ fn try_resume_flight(app: &AppHandle, state: &tauri::State<'_, AppState>, client
         fares: persisted.fares.clone(),
         stats: Mutex::new(FlightStats::new()),
         stop: AtomicBool::new(false),
+        // Flag the UI to surface a 10-second confirmation banner before any
+        // position posts go out. The streamer is intentionally NOT spawned
+        // here — `flight_resume_confirm` does that once the user accepts (or
+        // the timer expires), or `flight_cancel` aborts the PIREP.
+        was_just_resumed: AtomicBool::new(true),
+        streamer_spawned: AtomicBool::new(false),
     });
 
     {
         let mut guard = state.active_flight.lock().expect("active_flight lock");
-        *guard = Some(Arc::clone(&flight));
+        *guard = Some(flight);
     }
-    spawn_position_streamer(app.clone(), flight, client.clone());
+    // NOTE: do not spawn the streamer here. The frontend-driven
+    // `flight_resume_confirm` does it after the resume banner is dismissed.
+    let _ = client; // unused now, kept in signature for symmetry
 }
 
 // ---- Bootstrap ----
@@ -1601,6 +1794,9 @@ pub fn run() {
             flight_end,
             flight_cancel,
             flight_forget,
+            flight_discover_resumable,
+            flight_adopt,
+            flight_resume_confirm,
         ])
         .run(tauri::generate_context!())
         .expect("error while running CloudeAcars");

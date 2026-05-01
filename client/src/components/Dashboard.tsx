@@ -10,6 +10,7 @@ import type {
 } from "../types";
 import { ActiveFlightPanel } from "./ActiveFlightPanel";
 import { BidsList } from "./BidsList";
+import { ResumeFlightBanner } from "./ResumeFlightBanner";
 import { SimPanel } from "./SimPanel";
 
 interface Props {
@@ -37,20 +38,27 @@ export function Dashboard({
   const [simState, setSimState] = useState<SimConnectionState>("disconnected");
   const [simSnapshot, setSimSnapshot] = useState<SimSnapshot | null>(null);
 
-  // On dashboard mount, check whether a flight is already active (e.g. after
-  // the app was restarted while a flight was running).
+  // Dashboard owns the flight_status poll; ActiveFlightPanel +
+  // ResumeFlightBanner read the result via props.
   useEffect(() => {
     let cancelled = false;
-    void (async () => {
+    let timer: ReturnType<typeof setInterval> | null = null;
+
+    async function poll() {
       try {
         const flight = await invoke<ActiveFlightInfo | null>("flight_status");
-        if (!cancelled) setActiveFlight(flight);
+        if (cancelled) return;
+        setActiveFlight(flight);
       } catch {
-        // ignore
+        // ignore — IPC errors are transient on dev rebuilds
       }
-    })();
+    }
+
+    void poll();
+    timer = setInterval(poll, 2000);
     return () => {
       cancelled = true;
+      if (timer) clearInterval(timer);
     };
   }, []);
 
@@ -115,7 +123,16 @@ export function Dashboard({
         debugMode={debugMode}
       />
 
-      <ActiveFlightPanel onEnded={() => setActiveFlight(null)} />
+      <ResumeFlightBanner
+        activeFlight={activeFlight}
+        onAdopted={setActiveFlight}
+        onCancelled={() => setActiveFlight(null)}
+      />
+
+      <ActiveFlightPanel
+        info={activeFlight}
+        onEnded={() => setActiveFlight(null)}
+      />
 
       <BidsList
         baseUrl={session.base_url}

@@ -129,6 +129,17 @@
       "on_ground": "Am Boden"
     }
   },
+  "resume": {
+    "title": "Aktiver Flug erkannt",
+    "countdown": "In {{seconds}}s wird der Flug fortgesetzt — solange läuft kein Position-Stream",
+    "adopt_now": "Jetzt fortsetzen",
+    "adopting": "Setze fort…",
+    "cancel_flight": "Flug abbrechen",
+    "confirm_cancel": "Den aktiven Flug auf phpVMS abbrechen? Der PIREP wird storniert. Diese Aktion kann nicht rückgängig gemacht werden.",
+    "adopt_failed": "Wiederherstellung fehlgeschlagen",
+    "confirm_failed": "Bestätigung fehlgeschlagen",
+    "cancel_failed": "Flug konnte nicht abgebrochen werden"
+  },
   "active_flight": {
     "title": "Aktiver Flug",
     "phase": {
