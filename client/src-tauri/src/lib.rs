@@ -34,10 +34,40 @@ const ACTIVE_FLIGHT_FILE: &str = "active_flight.json";
 /// Anything older than this is considered stale and discarded on resume.
 const RESUME_MAX_AGE_HOURS: i64 = 12;
 
-/// How often the background task posts the latest position to phpVMS while a
-/// flight is active. Spec §10 talks about "configurable intervals"; for now we
-/// hard-code a sane default and make it tunable later.
-const POSITION_INTERVAL_SECS: u64 = 10;
+/// Phase-dependent position-post cadence. Ground manoeuvres (taxi, takeoff,
+/// landing rollout) and the approach are where pilots want a precise trail
+/// on the live map; cruise is straight-and-level so a sparse sample is fine
+/// and saves API budget. Spec §10 ("configurable intervals") — these are
+/// the defaults; a future settings panel can override.
+fn position_interval(phase: FlightPhase) -> Duration {
+    let secs = match phase {
+        // Brief, critical events — sample a touch faster so the touchdown
+        // point and the actual liftoff don't get smeared between two posts.
+        FlightPhase::Takeoff | FlightPhase::Landing => 5,
+        // On the ground (taxi, pushback, takeoff roll) — 10 s is plenty;
+        // movements are slow and the live map just needs a clean trail.
+        FlightPhase::Boarding
+        | FlightPhase::Pushback
+        | FlightPhase::TaxiOut
+        | FlightPhase::TakeoffRoll
+        | FlightPhase::TaxiIn => 10,
+        // Approach / final — pilot wants the inbound track precise (ILS,
+        // localizer, glideslope) without overdoing samples.
+        FlightPhase::Approach | FlightPhase::Final => 8,
+        // Climb / descent: moderate change rate.
+        FlightPhase::Climb | FlightPhase::Descent => 10,
+        // Cruise: long straight legs, sparse samples are enough — capped
+        // at 30 s so the live map never goes more than half a minute stale.
+        FlightPhase::Cruise => 30,
+        // Parked / pre-/post-flight — keep a 30 s heartbeat so phpVMS
+        // sees the PIREP is alive while the pilot files.
+        FlightPhase::Preflight
+        | FlightPhase::BlocksOn
+        | FlightPhase::Arrived
+        | FlightPhase::PirepSubmitted => 30,
+    };
+    Duration::from_secs(secs)
+}
 
 /// Minimum great-circle distance between two consecutive samples before we
 /// add it to the running total. Filters out GPS jitter while parked.
@@ -1464,12 +1494,17 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
     }
     tauri::async_runtime::spawn(async move {
         tracing::info!(pirep_id = %flight.pirep_id, "position streamer started");
-        let mut interval =
-            tokio::time::interval(Duration::from_secs(POSITION_INTERVAL_SECS));
-        // Skip the immediate first tick so we don't post before we have a snapshot.
-        interval.tick().await;
+        // Phase-adaptive cadence: re-read the current phase on every tick so
+        // the sleep matches what the aircraft is actually doing right now
+        // (5 s during takeoff/landing, 8 s on approach/final, 10 s on the
+        // ground / climb / descent, 30 s in cruise — capped at 30 s so the
+        // live map never goes more than half a minute stale).
         loop {
-            interval.tick().await;
+            let current_phase = {
+                let stats = flight.stats.lock().expect("flight stats");
+                stats.phase
+            };
+            tokio::time::sleep(position_interval(current_phase)).await;
             if flight.stop.load(Ordering::Relaxed) {
                 break;
             }
