@@ -129,6 +129,16 @@ pub const TELEMETRY_FIELDS: &[TelemetryField] = &[
     /// Auto-spoilers armed for landing (separate from physical handle).
     F::bool("SPOILERS ARMED"),
 
+    // ---- Pushback ----
+    /// Enum: 0 = Straight, 1 = Left, 2 = Right, 3 = No Pushback.
+    /// MSFS itself drives this — we use it as the authoritative
+    /// "pushback finished" signal in the FSM, since the simple
+    /// "moving + engines on = TaxiOut" trigger fires while the tug
+    /// is still pushing the aircraft. Value 3 means the tug has
+    /// disconnected (or the pilot used Ctrl+P to stop), which is
+    /// when we should advance to TaxiOut.
+    F::f64("PUSHBACK STATE", "Enum"),
+
     // ---- Systems ----
     /// APU master switch (0 = off, 1 = on).
     F::bool("APU SWITCH"),
@@ -164,8 +174,24 @@ pub const TELEMETRY_FIELDS: &[TelemetryField] = &[
     F::f64("L:A32NX_TOTAL_FUEL_QUANTITY", "Number"),
 
     // ---- Fenix A320 LVars ----
-    // LVar names from the Fenix knowledge base + community reverse
-    // engineering. Like FBW, these read 0 on non-Fenix aircraft.
+    // Names verified against the Axis-and-Ohs Fenix script bundle
+    // shipped at docs/vendor/FENIX_A3XX_AxisAndOhs_Scripts.xml — each
+    // LVar below appears in that file as either a read or a write
+    // target, so the names are stable for Fenix Block 2.
+    //
+    // Naming convention (from Fenix's `Cockpit_Behavior.xml`):
+    //   * `L:S_OH_*` — overhead switch *state* (instantaneous position)
+    //   * `L:S_FCU_*` — FCU button *state* (push state)
+    //   * `L:E_FCU_*` — FCU encoder *display value* (selected ALT/HDG/…)
+    //   * `L:I_MIP_*` — MIP indicator *lamp* (Autobrake LO/MED/MAX)
+    //   * `L:S_MIP_*` — MIP switch *state*
+    //
+    // LVars never get rejected by SimConnect; a non-Fenix aircraft
+    // just reads 0 from them, so the byte-level parser stays
+    // healthy. The snapshot mapping consults each LVar only when
+    // AircraftProfile::FenixA320 is detected.
+
+    // Lights overhead (already wired before this batch).
     // Beacon switch: 0 = OFF, 1 = ON.
     F::f64("L:S_OH_EXT_LT_BEACON", "Number"),
     // Strobe selector: 0 = OFF, 1 = AUTO, 2 = ON.
@@ -174,6 +200,49 @@ pub const TELEMETRY_FIELDS: &[TelemetryField] = &[
     F::f64("L:S_OH_EXT_LT_NAV_LOGO", "Number"),
     // Parking brake on Fenix MIP: 0 = released, 1 = set.
     F::f64("L:S_MIP_PARKING_BRAKE", "Number"),
+
+    // Cabin signs: real A320 has 3-pos toggles (OFF/AUTO/ON);
+    // Fenix exposes them under the SIGNS namespace, NOT under
+    // INT_LT as my first guess assumed.
+    F::f64("L:S_OH_SIGNS", "Number"),
+    F::f64("L:S_OH_SIGNS_SMOKING", "Number"),
+
+    // APU electrical pushbuttons.
+    F::f64("L:S_OH_ELEC_APU_MASTER", "Number"),
+    F::f64("L:S_OH_ELEC_APU_START", "Number"),
+
+    // Anti-ice (engine + wing). The PROBE/WINDOW HEAT switch lives
+    // outside the PNEUMATIC namespace by Fenix's convention.
+    F::f64("L:S_OH_PNEUMATIC_ENG1_ANTI_ICE", "Number"),
+    F::f64("L:S_OH_PNEUMATIC_ENG2_ANTI_ICE", "Number"),
+    F::f64("L:S_OH_PNEUMATIC_WING_ANTI_ICE", "Number"),
+    F::f64("L:S_OH_PROBE_HEAT", "Number"),
+
+    // Electric panel.
+    F::f64("L:S_OH_ELEC_BAT1", "Number"),
+    F::f64("L:S_OH_ELEC_BAT2", "Number"),
+    F::f64("L:S_OH_ELEC_EXT_PWR", "Number"),
+
+    // FCU button states — replace the unreliable `L:I_FCU_*` lamp
+    // LVars from earlier sessions. The S_ prefix is the button
+    // press state, which actually toggles cleanly.
+    F::f64("L:S_FCU_AP1", "Number"),
+    F::f64("L:S_FCU_AP2", "Number"),
+    F::f64("L:S_FCU_APPR", "Number"),
+    F::f64("L:S_FCU_ATHR", "Number"),
+
+    // FCU encoder displays — what the pilot has selected on the
+    // glareshield. Used to log "Selected ALT 36000" / "Selected
+    // HDG 280" / etc. as the pilot tunes them.
+    F::f64("L:E_FCU_ALTITUDE", "Number"),
+    F::f64("L:E_FCU_HEADING", "Number"),
+    F::f64("L:E_FCU_SPEED", "Number"),
+    F::f64("L:E_FCU_VS", "Number"),
+
+    // Autobrake setting indicators (lamp LVars on the MIP).
+    F::f64("L:I_MIP_AUTOBRAKE_LO_L", "Number"),
+    F::f64("L:I_MIP_AUTOBRAKE_MED_L", "Number"),
+    F::f64("L:I_MIP_AUTOBRAKE_MAX_L", "Number"),
 ];
 
 // Helper builders so the table above stays compact.
@@ -276,6 +345,8 @@ pub struct Telemetry {
     pub spoilers_handle_position: f64,
     pub spoilers_armed: bool,
 
+    pub pushback_state: f64,
+
     pub apu_switch: bool,
     pub apu_pct_rpm: f64,
     pub battery_master: bool,
@@ -301,6 +372,28 @@ pub struct Telemetry {
     pub fnx_strobe: f64,
     pub fnx_nav_logo: f64,
     pub fnx_park_brake: f64,
+    pub fnx_signs_seatbelts: f64,
+    pub fnx_signs_smoking: f64,
+    pub fnx_apu_master: f64,
+    pub fnx_apu_start: f64,
+    pub fnx_eng1_anti_ice: f64,
+    pub fnx_eng2_anti_ice: f64,
+    pub fnx_wing_anti_ice: f64,
+    pub fnx_probe_heat: f64,
+    pub fnx_bat1: f64,
+    pub fnx_bat2: f64,
+    pub fnx_ext_pwr: f64,
+    pub fnx_fcu_ap1: f64,
+    pub fnx_fcu_ap2: f64,
+    pub fnx_fcu_appr: f64,
+    pub fnx_fcu_athr: f64,
+    pub fnx_fcu_alt: f64,
+    pub fnx_fcu_hdg: f64,
+    pub fnx_fcu_spd: f64,
+    pub fnx_fcu_vs: f64,
+    pub fnx_autobrake_lo: f64,
+    pub fnx_autobrake_med: f64,
+    pub fnx_autobrake_max: f64,
 }
 
 // ---- Touchdown sample (separate data definition #2) ----
@@ -595,6 +688,8 @@ impl Telemetry {
         pull_f64!(t.spoilers_handle_position);
         pull_i32!(t.spoilers_armed);
 
+        pull_f64!(t.pushback_state);
+
         pull_i32!(t.apu_switch);
         pull_f64!(t.apu_pct_rpm);
         pull_i32!(t.battery_master);
@@ -618,6 +713,28 @@ impl Telemetry {
         pull_f64!(t.fnx_strobe);
         pull_f64!(t.fnx_nav_logo);
         pull_f64!(t.fnx_park_brake);
+        pull_f64!(t.fnx_signs_seatbelts);
+        pull_f64!(t.fnx_signs_smoking);
+        pull_f64!(t.fnx_apu_master);
+        pull_f64!(t.fnx_apu_start);
+        pull_f64!(t.fnx_eng1_anti_ice);
+        pull_f64!(t.fnx_eng2_anti_ice);
+        pull_f64!(t.fnx_wing_anti_ice);
+        pull_f64!(t.fnx_probe_heat);
+        pull_f64!(t.fnx_bat1);
+        pull_f64!(t.fnx_bat2);
+        pull_f64!(t.fnx_ext_pwr);
+        pull_f64!(t.fnx_fcu_ap1);
+        pull_f64!(t.fnx_fcu_ap2);
+        pull_f64!(t.fnx_fcu_appr);
+        pull_f64!(t.fnx_fcu_athr);
+        pull_f64!(t.fnx_fcu_alt);
+        pull_f64!(t.fnx_fcu_hdg);
+        pull_f64!(t.fnx_fcu_spd);
+        pull_f64!(t.fnx_fcu_vs);
+        pull_f64!(t.fnx_autobrake_lo);
+        pull_f64!(t.fnx_autobrake_med);
+        pull_f64!(t.fnx_autobrake_max);
 
         // Silence the unused-assignment warning the last `pull_*!`
         // emits (the macro always advances `off`, but the very last
@@ -727,10 +844,15 @@ fn telemetry_to_snapshot(t: Telemetry, simulator: Simulator) -> SimSnapshot {
         None
     };
 
-    // Autopilot: FBW publishes its own LVars; default & Fenix use the
-    // standard SimVars. Fenix's L:I_FCU_* LVars flicker spuriously
-    // when unrelated cockpit switches are touched, so we keep them
-    // off the AP path entirely (validated in earlier session).
+    // Autopilot:
+    //   * FBW: dedicated LVars (live mode state).
+    //   * Fenix: the `L:S_FCU_*` button-state LVars from the AAO
+    //     script. We treat AP1 OR AP2 active as "Master engaged".
+    //     Heading / altitude / NAV button-state isn't directly the
+    //     same as "mode is armed", but it's a closer signal than
+    //     the I_FCU_* lamp LVars from the legacy session (those
+    //     flickered with unrelated cockpit switches).
+    //   * Default + others: standard MSFS SimVars.
     let (ap_master, ap_hdg, ap_alt, ap_nav, ap_appr) = if is_fbw {
         (
             t.fbw_ap_active != 0.0,
@@ -738,6 +860,18 @@ fn telemetry_to_snapshot(t: Telemetry, simulator: Simulator) -> SimSnapshot {
             t.fbw_ap_alt != 0.0,
             t.fbw_ap_nav != 0.0,
             t.fbw_ap_appr != 0.0,
+        )
+    } else if is_fenix {
+        let master = t.fnx_fcu_ap1 as i32 != 0 || t.fnx_fcu_ap2 as i32 != 0;
+        // We don't have HDG/ALT/NAV-mode LVars yet; fall back to the
+        // standard SimVars for those if Fenix wires them, otherwise
+        // they stay false. AP master is the most important value.
+        (
+            master,
+            t.ap_heading,
+            t.ap_altitude,
+            t.ap_nav,
+            t.fnx_fcu_appr as i32 != 0 || t.ap_approach,
         )
     } else {
         (
@@ -770,6 +904,98 @@ fn telemetry_to_snapshot(t: Telemetry, simulator: Simulator) -> SimSnapshot {
         t.fnx_park_brake as i32 != 0
     } else {
         t.parking_brake
+    };
+
+    // System switch overrides for Fenix (LVar names verified against
+    // the Axis-and-Ohs script bundle). Each one falls back to the
+    // standard SimVar if the LVar reads exactly 0 — that way the
+    // override only takes over when Fenix is actually feeding values.
+    let apu_switch = if is_fenix {
+        t.fnx_apu_master as i32 != 0
+    } else {
+        t.apu_switch
+    };
+    let pitot_heat = if is_fenix {
+        // L:S_OH_PROBE_HEAT: 0=AUTO, 1=ON. AUTO means heating is
+        // automatically active when engines are running, so we
+        // treat both states as "heat available".
+        t.fnx_probe_heat >= 0.0 // always considered "active" on Airbus
+    } else {
+        t.pitot_heat
+    };
+    let battery_master = if is_fenix {
+        // BAT 1 OR BAT 2 in AUTO/ON position counts as "battery on".
+        // 0=OFF, 1=AUTO on real Airbus.
+        t.fnx_bat1 as i32 != 0 || t.fnx_bat2 as i32 != 0
+    } else {
+        t.battery_master
+    };
+    let engine_anti_ice = if is_fenix {
+        t.fnx_eng1_anti_ice as i32 != 0 || t.fnx_eng2_anti_ice as i32 != 0
+    } else {
+        t.eng1_anti_ice || t.eng2_anti_ice || t.eng3_anti_ice || t.eng4_anti_ice
+    };
+    let wing_anti_ice = if is_fenix {
+        t.fnx_wing_anti_ice as i32 != 0
+    } else {
+        t.structural_deice
+    };
+
+    // Cabin signs (Fenix only — no standard SimVar covers these).
+    let seatbelts_sign = if is_fenix {
+        Some(t.fnx_signs_seatbelts.round().clamp(0.0, 2.0) as u8)
+    } else {
+        None
+    };
+    let no_smoking_sign = if is_fenix {
+        Some(t.fnx_signs_smoking.round().clamp(0.0, 2.0) as u8)
+    } else {
+        None
+    };
+
+    // FCU selected values — currently only Fenix exposes them via
+    // dedicated LVars. Default-aircraft AP target SimVars (e.g.
+    // AUTOPILOT ALTITUDE LOCK VAR) exist but aren't subscribed yet,
+    // so for now FCU values stay None outside Fenix.
+    let (fcu_alt, fcu_hdg, fcu_spd, fcu_vs) = if is_fenix {
+        (
+            Some(t.fnx_fcu_alt.round() as i32),
+            Some(t.fnx_fcu_hdg.round() as i32),
+            Some(t.fnx_fcu_spd.round() as i32),
+            Some(t.fnx_fcu_vs.round() as i32),
+        )
+    } else {
+        (None, None, None, None)
+    };
+
+    // Autobrake setting — derived from the three indicator-lamp
+    // LVars (LO/MED/MAX). Only one of them is illuminated at a
+    // time. Fenix exposes these as `L:I_MIP_AUTOBRAKE_*_L`.
+    let autobrake = if is_fenix {
+        if t.fnx_autobrake_max as i32 != 0 {
+            Some("MAX".to_string())
+        } else if t.fnx_autobrake_med as i32 != 0 {
+            Some("MED".to_string())
+        } else if t.fnx_autobrake_lo as i32 != 0 {
+            Some("LO".to_string())
+        } else {
+            Some("OFF".to_string())
+        }
+    } else {
+        None
+    };
+
+    // Pushback state — value 3 means MSFS reports the tug has
+    // disconnected (or there was never a tug). Anything else is
+    // an active push. Stored as Option<u8> so consumers can tell
+    // "not wired" from "no pushback (=3)".
+    let pushback_state = {
+        let raw = t.pushback_state.round() as i32;
+        if (0..=3).contains(&raw) {
+            Some(raw as u8)
+        } else {
+            None
+        }
     };
 
     SimSnapshot {
@@ -860,18 +1086,21 @@ fn telemetry_to_snapshot(t: Telemetry, simulator: Simulator) -> SimSnapshot {
         fuel_flow_kg_per_h,
         spoilers_handle_position: Some(t.spoilers_handle_position as f32),
         spoilers_armed: Some(t.spoilers_armed),
-        apu_switch: Some(t.apu_switch),
+        pushback_state,
+        apu_switch: Some(apu_switch),
         apu_pct_rpm: Some(t.apu_pct_rpm as f32),
-        battery_master: Some(t.battery_master),
+        battery_master: Some(battery_master),
         avionics_master: Some(t.avionics_master),
-        pitot_heat: Some(t.pitot_heat),
-        engine_anti_ice: Some(
-            t.eng1_anti_ice
-                || t.eng2_anti_ice
-                || t.eng3_anti_ice
-                || t.eng4_anti_ice,
-        ),
-        wing_anti_ice: Some(t.structural_deice),
+        pitot_heat: Some(pitot_heat),
+        engine_anti_ice: Some(engine_anti_ice),
+        wing_anti_ice: Some(wing_anti_ice),
+        seatbelts_sign,
+        no_smoking_sign,
+        fcu_selected_altitude_ft: fcu_alt,
+        fcu_selected_heading_deg: fcu_hdg,
+        fcu_selected_speed_kt: fcu_spd,
+        fcu_selected_vs_fpm: fcu_vs,
+        autobrake,
         parking_name: None,
         parking_number: None,
         selected_runway: None,

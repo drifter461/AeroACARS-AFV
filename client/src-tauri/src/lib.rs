@@ -629,6 +629,23 @@ struct FlightStats {
     last_logged_pitot_heat: Option<bool>,
     last_logged_engine_anti_ice: Option<bool>,
     last_logged_wing_anti_ice: Option<bool>,
+    /// Seat belts sign (0=OFF, 1=AUTO, 2=ON). Logged on transitions.
+    last_logged_seatbelts_sign: Option<u8>,
+    /// No smoking sign (0=OFF, 1=AUTO, 2=ON).
+    last_logged_no_smoking_sign: Option<u8>,
+    /// Autobrake setting label ("OFF" / "LO" / "MED" / "MAX") for
+    /// the activity log. Reset on every flight.
+    last_logged_autobrake: Option<String>,
+    /// FCU selected values — debounced so a knob-spin doesn't fire a
+    /// log entry per click.
+    last_logged_fcu_alt: Option<i32>,
+    last_logged_fcu_hdg: Option<i32>,
+    last_logged_fcu_spd: Option<i32>,
+    last_logged_fcu_vs: Option<i32>,
+    pending_fcu_alt: Option<(i32, DateTime<Utc>)>,
+    pending_fcu_hdg: Option<(i32, DateTime<Utc>)>,
+    pending_fcu_spd: Option<(i32, DateTime<Utc>)>,
+    pending_fcu_vs: Option<(i32, DateTime<Utc>)>,
 }
 
 /// Categorised assessment of a touchdown. Computed from peak descent
@@ -2950,14 +2967,34 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
             }
         }
         FlightPhase::Pushback => {
-            // Pushback ends when the aircraft is rolling forward under
-            // its own power: engines running AND moving. Plain GS > 5
-            // wasn't reliable — pushback trucks routinely hit 4–5 kt,
-            // and we don't want to call that "taxi" yet.
-            if snap.on_ground
+            // Pushback → TaxiOut handoff. Three signals, in priority
+            // order, all checked together:
+            //
+            // 1. `PUSHBACK STATE == 3` from MSFS — the sim itself
+            //    reporting "no pushback" (tug disconnected, or the
+            //    pilot used Ctrl+P to stop). This is the
+            //    authoritative signal regardless of whether the
+            //    push was straight, left, right, or even a pull-
+            //    forward maneuver.
+            // 2. Engines running AND ground speed >3 kt — fallback
+            //    for situations where PUSHBACK STATE never reports
+            //    (e.g. pilot pushed by hand without using the tug
+            //    feature). Same trigger as before.
+            //
+            // The PUSHBACK STATE field on the snapshot is Option<u8>;
+            // a value of Some(3) means "tug done", Some(0..=2) means
+            // "still pushing", None means "MSFS hasn't told us".
+            let tug_done = snap.pushback_state == Some(3);
+            let powered_taxi = snap.on_ground
                 && snap.engines_running > 0
-                && snap.groundspeed_kt > 3.0
-            {
+                && snap.groundspeed_kt > 3.0;
+            if tug_done && powered_taxi {
+                next_phase = FlightPhase::TaxiOut;
+            } else if snap.pushback_state.is_none() && powered_taxi {
+                // No pushback-state info from the sim — fall back
+                // to the legacy "moving + engines on" trigger so
+                // we don't get stuck in Pushback indefinitely on
+                // sims / aircraft that don't expose the field.
                 next_phase = FlightPhase::TaxiOut;
             }
         }
@@ -4014,6 +4051,152 @@ fn detect_telemetry_changes(app: &AppHandle, flight: &ActiveFlight, snap: &SimSn
         &mut stats.last_logged_wing_anti_ice,
         "Wing anti-ice",
     );
+
+    // ---- Seat-belts and no-smoking signs (3-state).
+    log_three_state_change(
+        app,
+        snap.seatbelts_sign,
+        &mut stats.last_logged_seatbelts_sign,
+        "Seat belts",
+    );
+    log_three_state_change(
+        app,
+        snap.no_smoking_sign,
+        &mut stats.last_logged_no_smoking_sign,
+        "No smoking",
+    );
+
+    // ---- Autobrake (string label).
+    if let Some(ab) = snap.autobrake.as_ref() {
+        if stats.last_logged_autobrake.as_ref() != Some(ab) {
+            if let Some(prev) = stats.last_logged_autobrake.as_ref() {
+                if prev != ab {
+                    log_activity_handle(
+                        app,
+                        ActivityLevel::Info,
+                        format!("Autobrake {ab}"),
+                        None,
+                    );
+                }
+            }
+            stats.last_logged_autobrake = Some(ab.clone());
+        }
+    }
+
+    // ---- FCU selected values (debounced 2 s).
+    // Reborrow `stats` as an explicit `&mut FlightStats` so the
+    // borrow checker can split-borrow disjoint fields when we
+    // pass two `&mut self.field` arguments to the helper. Without
+    // this it sees the MutexGuard's deref and refuses.
+    let now_ts = Utc::now();
+    let stats: &mut FlightStats = &mut stats;
+    fcu_debounce(
+        app,
+        snap.fcu_selected_altitude_ft,
+        &mut stats.last_logged_fcu_alt,
+        &mut stats.pending_fcu_alt,
+        now_ts,
+        "Selected ALT",
+        "ft",
+    );
+    fcu_debounce(
+        app,
+        snap.fcu_selected_heading_deg,
+        &mut stats.last_logged_fcu_hdg,
+        &mut stats.pending_fcu_hdg,
+        now_ts,
+        "Selected HDG",
+        "°",
+    );
+    fcu_debounce(
+        app,
+        snap.fcu_selected_speed_kt,
+        &mut stats.last_logged_fcu_spd,
+        &mut stats.pending_fcu_spd,
+        now_ts,
+        "Selected SPD",
+        "kt",
+    );
+    fcu_debounce(
+        app,
+        snap.fcu_selected_vs_fpm,
+        &mut stats.last_logged_fcu_vs,
+        &mut stats.pending_fcu_vs,
+        now_ts,
+        "Selected V/S",
+        "fpm",
+    );
+}
+
+/// Activity-log helper for 3-state cabin signs (OFF / AUTO / ON).
+fn log_three_state_change(
+    app: &AppHandle,
+    snap_value: Option<u8>,
+    last_logged: &mut Option<u8>,
+    label: &str,
+) {
+    let Some(v) = snap_value else { return };
+    if *last_logged != Some(v) {
+        if last_logged.is_some() {
+            let state = match v {
+                0 => "OFF",
+                1 => "AUTO",
+                2 => "ON",
+                _ => return,
+            };
+            log_activity_handle(
+                app,
+                ActivityLevel::Info,
+                format!("{label} {state}"),
+                None,
+            );
+        }
+        *last_logged = Some(v);
+    }
+}
+
+/// Debounced logger for FCU encoder displays. Each tick, the pilot
+/// might be turning the knob — we don't want a "Selected ALT 36000"
+/// for every click on the way from 12000 to 36000. We hold the new
+/// value for FCU_DEBOUNCE_SECS, and only emit the log entry once it
+/// has held steady for that long.
+fn fcu_debounce(
+    app: &AppHandle,
+    snap_value: Option<i32>,
+    last_logged: &mut Option<i32>,
+    pending: &mut Option<(i32, DateTime<Utc>)>,
+    now: DateTime<Utc>,
+    label: &str,
+    unit: &str,
+) {
+    const FCU_DEBOUNCE_SECS: i64 = 2;
+    let Some(v) = snap_value else { return };
+    if *last_logged == Some(v) {
+        // No change since last log — drop any pending entry.
+        *pending = None;
+        return;
+    }
+    match *pending {
+        Some((pv, since)) if pv == v => {
+            // Same new value held — has it been steady long enough?
+            if (now - since).num_seconds() >= FCU_DEBOUNCE_SECS {
+                if last_logged.is_some() {
+                    log_activity_handle(
+                        app,
+                        ActivityLevel::Info,
+                        format!("{label} {v} {unit}"),
+                        None,
+                    );
+                }
+                *last_logged = Some(v);
+                *pending = None;
+            }
+        }
+        _ => {
+            // New value (or first change) — start the debounce.
+            *pending = Some((v, now));
+        }
+    }
 }
 
 /// Helper for bool-only telemetry change logging — checks Option,

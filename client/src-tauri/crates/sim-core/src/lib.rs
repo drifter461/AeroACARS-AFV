@@ -130,6 +130,25 @@ pub struct SimSnapshot {
     pub spoilers_handle_position: Option<f32>,
     /// Auto-spoilers armed for landing.
     pub spoilers_armed: Option<bool>,
+    /// MSFS pushback state — 0/1/2 = pushing (straight/left/right),
+    /// 3 = no pushback (tug disconnected). Drives the Pushback →
+    /// TaxiOut FSM transition.
+    pub pushback_state: Option<u8>,
+    /// Cabin SEAT BELTS sign — 0=OFF, 1=AUTO, 2=ON.
+    pub seatbelts_sign: Option<u8>,
+    /// Cabin NO SMOKING sign — 0=OFF, 1=AUTO, 2=ON.
+    pub no_smoking_sign: Option<u8>,
+    /// FCU selected altitude (feet). e.g. 36000.
+    pub fcu_selected_altitude_ft: Option<i32>,
+    /// FCU selected heading (deg).
+    pub fcu_selected_heading_deg: Option<i32>,
+    /// FCU selected airspeed (kt).
+    pub fcu_selected_speed_kt: Option<i32>,
+    /// FCU selected vertical speed (fpm).
+    pub fcu_selected_vs_fpm: Option<i32>,
+    /// Autobrake setting — None means we don't know, "OFF"/"LO"/
+    /// "MED"/"MAX" otherwise.
+    pub autobrake: Option<String>,
 
     // ---- Systems ----
     pub apu_switch: Option<bool>,

@@ -156,6 +156,8 @@ export interface SimSnapshot {
   /** Surfaces */
   spoilers_handle_position: number | null;
   spoilers_armed: boolean | null;
+  /** MSFS PUSHBACK STATE: 0/1/2 = pushing, 3 = no pushback. */
+  pushback_state: number | null;
   /** Systems */
   apu_switch: boolean | null;
   apu_pct_rpm: number | null;
@@ -166,6 +168,17 @@ export interface SimSnapshot {
   engine_anti_ice: boolean | null;
   /** Wing / structural deice. */
   wing_anti_ice: boolean | null;
+  /** Cabin SEAT BELTS sign — 0=OFF, 1=AUTO, 2=ON (Fenix LVar based). */
+  seatbelts_sign: number | null;
+  /** Cabin NO SMOKING sign — same enum semantics. */
+  no_smoking_sign: number | null;
+  /** FCU encoder displays — selected ALT/HDG/SPD/VS. */
+  fcu_selected_altitude_ft: number | null;
+  fcu_selected_heading_deg: number | null;
+  fcu_selected_speed_kt: number | null;
+  fcu_selected_vs_fpm: number | null;
+  /** Autobrake setting label ("OFF"/"LO"/"MED"/"MAX") or null. */
+  autobrake: string | null;
   /** Latched touchdown sample — populated by SimConnect at the moment
    *  the gear hits the ground. null until the first touchdown. */
   touchdown_vs_fpm: number | null;
