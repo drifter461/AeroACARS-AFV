@@ -222,18 +222,26 @@ mod adapter {
         // Nose light: 0=off, 1=taxi, 2=T.O.
         #[simconnect(name = "L:S_OH_EXT_LT_NOSE", unit = "Number")]
         fnx_nose: f64,
-        // FCU autopilot pushbuttons (active = 1).
-        #[simconnect(name = "L:S_FCU_AP1", unit = "Number")]
+        // FCU indicator lights — `I_FCU_*` is the latched engagement
+        // state (lit when the mode is active). `S_FCU_*` is only the
+        // momentary push-button state and pulses 0→1→0 on every press,
+        // which would spam the activity log with phantom AP toggles.
+        #[simconnect(name = "L:I_FCU_AP1", unit = "Number")]
         fnx_ap1: f64,
-        #[simconnect(name = "L:S_FCU_AP2", unit = "Number")]
+        #[simconnect(name = "L:I_FCU_AP2", unit = "Number")]
         fnx_ap2: f64,
-        #[simconnect(name = "L:S_FCU_LOC", unit = "Number")]
+        #[simconnect(name = "L:I_FCU_LOC", unit = "Number")]
         fnx_loc: f64,
-        #[simconnect(name = "L:S_FCU_APPR", unit = "Number")]
+        #[simconnect(name = "L:I_FCU_APPR", unit = "Number")]
         fnx_appr: f64,
         // Parking brake: 0=released, 1=set.
         #[simconnect(name = "L:S_MIP_PARKING_BRAKE", unit = "Number")]
         fnx_park_brake: f64,
+        // Flaps lever: 0=UP, 1=CONF 1, 2=CONF 1+F, 3=CONF 2, 4=CONF 3,
+        // 5=FULL. Standard FLAPS HANDLE PERCENT is unwired on Fenix; we
+        // normalise this 0..5 step into 0.0..1.0 for the snapshot.
+        #[simconnect(name = "L:S_FC_FLAPS", unit = "Number")]
+        fnx_flaps_lever: f64,
     }
 
     /// Pounds → kilograms (avoirdupois, 6-digit precision).
@@ -330,17 +338,15 @@ mod adapter {
                 Some(t.fbw_ap_appr),
             )
         } else if is_fnx {
-            // Fenix: AP1 OR AP2 active = master on. HDG/ALT modes aren't
-            // exposed as discrete LVars in the public set we have; use
-            // None so the activity log just shows "Autopilot ENGAGED"
-            // without spurious mode flips.
-            (
-                Some(t.fnx_ap1 as i32 != 0 || t.fnx_ap2 as i32 != 0),
-                None,
-                None,
-                Some(t.fnx_loc as i32 != 0),
-                Some(t.fnx_appr as i32 != 0),
-            )
+            // Fenix AP-status LVars currently produce phantom toggles when
+            // unrelated cockpit switches are operated (observed: pressing
+            // BEACON triggers "Autopilot ENGAGED/OFF" pairs). Until we can
+            // validate which LVar actually latches AP on Fenix Block-2,
+            // we surface the AP state as None and skip activity-log AP
+            // events for this profile entirely. Lights / parking brake /
+            // flaps still come through correctly.
+            let _ = (t.fnx_ap1, t.fnx_ap2, t.fnx_loc, t.fnx_appr);
+            (None, None, None, None, None)
         } else {
             (
                 Some(t.ap_master),
@@ -354,6 +360,13 @@ mod adapter {
             t.fnx_park_brake as i32 != 0
         } else {
             t.parking_brake
+        };
+        // Flaps: Fenix lever has 6 detents (0..5) vs the SimVar's 0..1 range.
+        // Normalise so downstream consumers see one unified scale.
+        let flaps_position = if is_fnx {
+            (t.fnx_flaps_lever as f32 / 5.0).clamp(0.0, 1.0)
+        } else {
+            t.flaps_position as f32
         };
         SimSnapshot {
             timestamp: Utc::now(),
@@ -380,7 +393,7 @@ mod adapter {
             slew_mode: false,
             simulation_rate: 1.0,
             gear_position: t.gear_position as f32,
-            flaps_position: t.flaps_position as f32,
+            flaps_position,
             engines_running,
             fuel_total_kg: (t.fuel_total_lb * LB_TO_KG) as f32,
             // Block→current diff is computed in the recorder; the per-tick

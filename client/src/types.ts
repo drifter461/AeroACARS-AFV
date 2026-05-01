@@ -190,6 +190,9 @@ export interface ActiveFlightInfo {
   /** ICAO of the operating airline, e.g. "DLH". Combined with
    *  `flight_number` to render the full callsign ("DLH155"). */
   airline_icao: string;
+  /** Planned aircraft registration from phpVMS (e.g. "D-AIUV"). Empty
+   *  when no matching bid / aircraft details could be looked up. */
+  planned_registration: string;
   flight_number: string;
   dpt_airport: string;
   arr_airport: string;

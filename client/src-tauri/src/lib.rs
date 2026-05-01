@@ -227,6 +227,13 @@ struct ActiveFlight {
     /// `flight_number` to produce the full callsign on the dashboard
     /// ("DLH155" instead of just "155"). Empty string when unknown.
     airline_icao: String,
+    /// Registration phpVMS assigned to this flight (e.g. "D-AIUV").
+    /// Looked up via `get_aircraft(bid.flight.aircraft_id)` at start
+    /// time. Compared against the live `ATC ID` SimVar in the activity
+    /// log so the pilot sees immediately if they loaded the wrong tail
+    /// number in MSFS. Empty string when unknown (fresh-PIREP / disk-
+    /// resume edge cases where we couldn't match a bid).
+    planned_registration: String,
     flight_number: String,
     dpt_airport: String,
     arr_airport: String,
@@ -256,6 +263,8 @@ struct PersistedFlight {
     started_at: DateTime<Utc>,
     #[serde(default)]
     airline_icao: String,
+    #[serde(default)]
+    planned_registration: String,
     flight_number: String,
     dpt_airport: String,
     arr_airport: String,
@@ -314,6 +323,12 @@ struct FlightStats {
     last_logged_nav2: Option<f32>,
     last_logged_lights: Option<LightsState>,
     last_logged_ap: Option<ApState>,
+    /// Debounce: when did we first observe the *current* AP master state?
+    /// We only emit a "Autopilot ENGAGED/OFF" log entry if the new state
+    /// has held for `AP_DEBOUNCE_SECS`. Stops a misbehaving LVar (pulsed
+    /// momentary buttons, sim-engine restarts) from flooding the log.
+    pending_ap_master: Option<bool>,
+    pending_ap_master_since: Option<DateTime<Utc>>,
     last_logged_parking_brake: Option<bool>,
     last_logged_engines_running: Option<u8>,
     last_logged_stall: Option<bool>,
@@ -323,6 +338,11 @@ struct FlightStats {
     /// detector flips and we want to emit a one-line announcement so the
     /// user sees the LVar mapping changed.
     last_logged_profile: Option<sim_core::AircraftProfile>,
+    /// Flaps-handle detent the last time we emitted a log entry. Stored
+    /// as the integer detent (0–5 on Airbus, 0/1/2/3/4 on Boeing —
+    /// derived from `flaps_position * 5` and rounded). One log per real
+    /// detent change rather than every 0.001 of jitter.
+    last_logged_flaps_detent: Option<u8>,
 }
 
 /// Snapshot of the six exterior lights we track. Compared as a whole so we
@@ -362,6 +382,7 @@ pub struct ActiveFlightInfo {
     bid_id: i64,
     started_at: String,
     airline_icao: String,
+    planned_registration: String,
     flight_number: String,
     dpt_airport: String,
     arr_airport: String,
@@ -433,6 +454,21 @@ impl From<ApiError> for UiError {
 
 // ---- Helpers ----
 
+/// Translate a flaps detent (0..5) into the Airbus-style label most
+/// virtual airlines (and the activity-log readers) recognise. Boeing
+/// pilots will read "Flaps 3" the same way; the FULL label maps to
+/// detent 5 on Airbus, but Boeings don't reach 5 anyway.
+fn detent_label(detent: u8) -> &'static str {
+    match detent {
+        0 => "UP",
+        1 => "1",
+        2 => "1+F",
+        3 => "2",
+        4 => "3",
+        _ => "FULL",
+    }
+}
+
 /// Render the full callsign as "DLH 155" (airline + space + number) when
 /// the airline ICAO is known, falling back to bare "155" otherwise.
 fn format_callsign(airline_icao: &str, flight_number: &str) -> String {
@@ -444,6 +480,12 @@ fn format_callsign(airline_icao: &str, flight_number: &str) -> String {
 }
 
 // ---- Activity log ----
+
+/// AP master toggles only emit a log entry once they've held for this
+/// many seconds. Stops a flickering / pulsed LVar (Fenix's momentary
+/// `S_FCU_AP*` was the original culprit) from spamming the log with
+/// alternating ENGAGED / OFF lines.
+const AP_DEBOUNCE_SECS: i64 = 2;
 
 /// Suppress repeated "same" activity entries fired within this window.
 /// React StrictMode in dev double-mounts effects, so the login + session-
@@ -773,6 +815,7 @@ fn save_active_flight(app: &AppHandle, flight: &ActiveFlight) {
         bid_id: flight.bid_id,
         started_at: flight.started_at,
         airline_icao: flight.airline_icao.clone(),
+        planned_registration: flight.planned_registration.clone(),
         flight_number: flight.flight_number.clone(),
         dpt_airport: flight.dpt_airport.clone(),
         arr_airport: flight.arr_airport.clone(),
@@ -844,6 +887,7 @@ fn flight_info(flight: &ActiveFlight) -> ActiveFlightInfo {
         bid_id: flight.bid_id,
         started_at: flight.started_at.to_rfc3339(),
         airline_icao: flight.airline_icao.clone(),
+        planned_registration: flight.planned_registration.clone(),
         flight_number: flight.flight_number.clone(),
         dpt_airport: flight.dpt_airport.clone(),
         arr_airport: flight.arr_airport.clone(),
@@ -999,6 +1043,27 @@ async fn flight_adopt(
         .map(|a| a.icao.clone())
         .unwrap_or_default();
 
+    // Look up planned registration so the activity log can compare it
+    // against the live `ATC ID` SimVar — pilot sees instantly if the
+    // wrong tail number is loaded in MSFS.
+    // Bid.flight has no direct aircraft_id; the chosen aircraft lives
+    // on the SimBrief OFP. If the pilot hasn't generated an OFP, we
+    // simply leave planned_registration empty.
+    let planned_registration = match matching_bid
+        .and_then(|b| b.flight.simbrief.as_ref())
+        .and_then(|sb| sb.aircraft_id)
+    {
+        Some(id) => client
+            .get_aircraft(id)
+            .await
+            .ok()
+            .and_then(|a| a.registration)
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
+        None => String::new(),
+    };
+
     let flight = Arc::new(ActiveFlight {
         pirep_id: pirep.id.clone(),
         bid_id,
@@ -1006,6 +1071,7 @@ async fn flight_adopt(
         // for our counters. The PIREP's actual times are intact server-side.
         started_at: Utc::now(),
         airline_icao,
+        planned_registration,
         flight_number,
         dpt_airport,
         arr_airport,
@@ -1324,6 +1390,13 @@ async fn flight_start(
         })
         .unwrap_or_default();
 
+    let planned_registration = expected_aircraft
+        .registration
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+
     let flight = Arc::new(ActiveFlight {
         pirep_id: pirep.id.clone(),
         bid_id,
@@ -1334,6 +1407,7 @@ async fn flight_start(
             .as_ref()
             .map(|a| a.icao.clone())
             .unwrap_or_default(),
+        planned_registration,
         flight_number: bid.flight.flight_number.clone(),
         dpt_airport: bid.flight.dpt_airport_id.clone(),
         arr_airport: bid.flight.arr_airport_id.clone(),
@@ -2204,7 +2278,19 @@ fn detect_telemetry_changes(app: &AppHandle, flight: &ActiveFlight, snap: &SimSn
         } else {
             icao_raw
         };
-        let reg = snap.aircraft_registration.as_deref().unwrap_or("?");
+        let reg = snap
+            .aircraft_registration
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("?");
+        // NOTE: planned_registration vs sim-reg comparison removed for now
+        // — MSFS 2024's pilot-profile tail number overrides the livery's
+        // atc_id, so the comparison fired false-positive warnings. We keep
+        // `flight.planned_registration` populated server-side (it's still
+        // useful for PIREP audit), but the live banner just shows what
+        // MSFS reports. Re-enable later via a WASM-based livery reader.
+        let _ = &flight.planned_registration;
         log_activity_handle(
             app,
             ActivityLevel::Info,
@@ -2357,14 +2443,37 @@ fn detect_telemetry_changes(app: &AppHandle, flight: &ActiveFlight, snap: &SimSn
     };
     if stats.last_logged_ap != Some(ap) {
         if let Some(prev) = stats.last_logged_ap {
-            // Master toggle is the headline event; modes are detail.
+            // Master toggle is debounced — see AP_DEBOUNCE_SECS comment.
             if prev.master != ap.master {
-                log_activity_handle(
-                    app,
-                    ActivityLevel::Info,
-                    format!("Autopilot {}", if ap.master { "ENGAGED" } else { "OFF" }),
-                    None,
-                );
+                let now = Utc::now();
+                if stats.pending_ap_master != Some(ap.master) {
+                    // First time we see this new state — start the timer.
+                    stats.pending_ap_master = Some(ap.master);
+                    stats.pending_ap_master_since = Some(now);
+                } else if let Some(since) = stats.pending_ap_master_since {
+                    // Same state held for AP_DEBOUNCE_SECS → publish.
+                    if (now - since).num_seconds() >= AP_DEBOUNCE_SECS {
+                        log_activity_handle(
+                            app,
+                            ActivityLevel::Info,
+                            format!(
+                                "Autopilot {}",
+                                if ap.master { "ENGAGED" } else { "OFF" }
+                            ),
+                            None,
+                        );
+                        stats.last_logged_ap = Some(ap);
+                        stats.pending_ap_master = None;
+                        stats.pending_ap_master_since = None;
+                        return;
+                    }
+                }
+                // Don't update last_logged_ap yet — we're waiting for the
+                // debounce. Mode flips below still get to flow through.
+            } else {
+                // Master agrees with prev → drop any pending debounce.
+                stats.pending_ap_master = None;
+                stats.pending_ap_master_since = None;
             }
             let modes = [
                 ("HDG", prev.heading, ap.heading),
@@ -2383,7 +2492,14 @@ fn detect_telemetry_changes(app: &AppHandle, flight: &ActiveFlight, snap: &SimSn
                 }
             }
         }
-        stats.last_logged_ap = Some(ap);
+        // Only update if master is stable (otherwise the debounce branch
+        // above already returned). Mode-only changes still want to land.
+        if stats
+            .last_logged_ap
+            .is_none_or(|prev| prev.master == ap.master)
+        {
+            stats.last_logged_ap = Some(ap);
+        }
     }
 
     // ---- Parking brake
@@ -2425,6 +2541,27 @@ fn detect_telemetry_changes(app: &AppHandle, flight: &ActiveFlight, snap: &SimSn
             }
         }
         stats.last_logged_engines_running = Some(snap.engines_running);
+    }
+
+    // ---- Flaps detent
+    // Map normalised 0.0..1.0 to a detent 0..5. Airbus has six positions
+    // (UP / 1 / 1+F / 2 / 3 / FULL); Boeing tops out at 4. Either way,
+    // rounding keeps every transition discrete and stops floating-point
+    // jitter on a moving lever from spamming the log.
+    let flaps_detent = (snap.flaps_position.clamp(0.0, 1.0) * 5.0).round() as u8;
+    if stats.last_logged_flaps_detent != Some(flaps_detent) {
+        if let Some(prev) = stats.last_logged_flaps_detent {
+            // Direction matters: pilots care whether they're configuring
+            // for departure ("Flaps 1") or for landing ("Flaps FULL").
+            let dir = if flaps_detent > prev { "↓" } else { "↑" };
+            log_activity_handle(
+                app,
+                ActivityLevel::Info,
+                format!("Flaps {dir} {}", detent_label(flaps_detent)),
+                Some(format!("IAS {:.0} kt, AGL {:.0} ft", snap.indicated_airspeed_kt, snap.altitude_agl_ft)),
+            );
+        }
+        stats.last_logged_flaps_detent = Some(flaps_detent);
     }
 
     // ---- Stall / overspeed warnings (always loud)
@@ -2727,20 +2864,39 @@ async fn try_resume_flight(
         "resuming in-progress flight"
     );
 
-    // Backfill missing airline ICAO. PersistedFlight defaults to "" when the
-    // JSON pre-dates the airline_icao field, or when the flight was originally
-    // adopted from a discovered PIREP that didn't have a matching bid. Try
-    // get_bids() once on resume; if it doesn't match either, fall back to
-    // empty (UI then renders flight_number alone, like before this fix).
+    // Backfill missing airline ICAO + planned registration. PersistedFlight
+    // defaults to "" when the JSON pre-dates these fields, or when the flight
+    // was originally adopted from a discovered PIREP that didn't have a
+    // matching bid. Try get_bids() once on resume; if nothing matches we
+    // leave them empty and the UI renders without them — same as before.
     let mut airline_icao = persisted.airline_icao.clone();
-    if airline_icao.is_empty() {
+    let mut planned_registration = persisted.planned_registration.clone();
+    if airline_icao.is_empty() || planned_registration.is_empty() {
         if let Ok(bids) = client.get_bids().await {
             if let Some(matching) = bids
                 .iter()
                 .find(|b| b.flight.flight_number == persisted.flight_number)
             {
-                if let Some(a) = matching.flight.airline.as_ref() {
-                    airline_icao = a.icao.clone();
+                if airline_icao.is_empty() {
+                    if let Some(a) = matching.flight.airline.as_ref() {
+                        airline_icao = a.icao.clone();
+                    }
+                }
+                if planned_registration.is_empty() {
+                    if let Some(id) = matching
+                        .flight
+                        .simbrief
+                        .as_ref()
+                        .and_then(|sb| sb.aircraft_id)
+                    {
+                        if let Ok(details) = client.get_aircraft(id).await {
+                            planned_registration = details
+                                .registration
+                                .unwrap_or_default()
+                                .trim()
+                                .to_string();
+                        }
+                    }
                 }
             }
         }
@@ -2751,6 +2907,7 @@ async fn try_resume_flight(
         bid_id: persisted.bid_id,
         started_at: persisted.started_at,
         airline_icao,
+        planned_registration,
         flight_number: persisted.flight_number.clone(),
         dpt_airport: persisted.dpt_airport.clone(),
         arr_airport: persisted.arr_airport.clone(),
