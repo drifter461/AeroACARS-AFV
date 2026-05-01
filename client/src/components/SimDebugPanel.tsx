@@ -42,6 +42,20 @@ function fmtHeading(deg: number): string {
   return `${Math.round(norm).toString().padStart(3, "0")}°`;
 }
 
+function fmtKg(kg: number, locale: string): string {
+  return `${new Intl.NumberFormat(locale, { maximumFractionDigits: 0 }).format(
+    kg,
+  )} kg`;
+}
+
+function fmtKgLb(kg: number, locale: string): string {
+  // Show kg + raw lb so we can spot conversion / unit issues at a glance.
+  const lb = kg / 0.45359237;
+  return `${fmtKg(kg, locale)} (${new Intl.NumberFormat(locale, {
+    maximumFractionDigits: 0,
+  }).format(lb)} lb)`;
+}
+
 export function SimDebugPanel({ status }: Props) {
   const { t, i18n } = useTranslation();
   if (!status) {
@@ -74,9 +88,83 @@ export function SimDebugPanel({ status }: Props) {
         </p>
       )}
       {snapshot && state === "connected" && (
-        <SnapshotGrid snap={snapshot} locale={i18n.language} />
+        <>
+          <SnapshotGrid snap={snapshot} locale={i18n.language} />
+          <MassFuelGrid snap={snapshot} locale={i18n.language} />
+          <TouchdownGrid snap={snapshot} locale={i18n.language} />
+        </>
       )}
     </section>
+  );
+}
+
+/**
+ * Live Mass & Fuel readout. Surfaces the values that get written into
+ * the PIREP custom fields so the pilot can see *before* filing whether
+ * the aircraft addon actually wires them. If you see "—" here, the
+ * field will be dropped from the PIREP rather than written as "0 kg".
+ */
+function MassFuelGrid({ snap, locale }: { snap: SimSnapshot; locale: string }) {
+  const { t } = useTranslation();
+  return (
+    <>
+      <h3 className="sim-panel__section">{t("sim.sections.mass_fuel")}</h3>
+      <dl className="sim-panel__grid">
+        <Row label={t("sim.fields.fuel_total")}>
+          {snap.fuel_total_kg > 0
+            ? fmtKgLb(snap.fuel_total_kg, locale)
+            : <em className="sim-panel__muted">{t("sim.fields.not_wired")}</em>}
+        </Row>
+        <Row label={t("sim.fields.total_weight")}>
+          {snap.total_weight_kg !== null && snap.total_weight_kg > 0
+            ? fmtKgLb(snap.total_weight_kg, locale)
+            : <em className="sim-panel__muted">{t("sim.fields.not_wired")}</em>}
+        </Row>
+      </dl>
+    </>
+  );
+}
+
+/**
+ * Last-touchdown grid. These values are populated by the simulation
+ * itself the moment the gear hits the ground and stay frozen until the
+ * next takeoff. If "—" is shown, no touchdown has been recorded yet
+ * this session.
+ */
+function TouchdownGrid({ snap, locale }: { snap: SimSnapshot; locale: string }) {
+  const { t } = useTranslation();
+  const hasData = snap.touchdown_vs_fpm !== null;
+  if (!hasData) {
+    return (
+      <>
+        <h3 className="sim-panel__section">{t("sim.sections.touchdown")}</h3>
+        <p className="sim-panel__hint">{t("sim.fields.no_touchdown_yet")}</p>
+      </>
+    );
+  }
+  return (
+    <>
+      <h3 className="sim-panel__section">{t("sim.sections.touchdown")}</h3>
+      <dl className="sim-panel__grid">
+        <Row label={t("sim.fields.touchdown_vs")}>
+          {fmtFpm(snap.touchdown_vs_fpm ?? 0, locale)}
+        </Row>
+        <Row label={t("sim.fields.touchdown_pitch")}>
+          {fmtNumber(snap.touchdown_pitch_deg ?? 0, 1, locale)}°
+        </Row>
+        <Row label={t("sim.fields.touchdown_bank")}>
+          {fmtNumber(snap.touchdown_bank_deg ?? 0, 1, locale)}°
+        </Row>
+        <Row label={t("sim.fields.touchdown_heading")}>
+          {fmtHeading(snap.touchdown_heading_mag_deg ?? 0)}
+        </Row>
+        {snap.touchdown_lat !== null && snap.touchdown_lon !== null && (
+          <Row label={t("sim.fields.position")}>
+            {fmtCoord(snap.touchdown_lat)} · {fmtCoord(snap.touchdown_lon)}
+          </Row>
+        )}
+      </dl>
+    </>
   );
 }
 

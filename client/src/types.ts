@@ -129,6 +129,17 @@ export interface SimSnapshot {
   fuel_used_kg: number;
   zfw_kg: number | null;
   payload_kg: number | null;
+  /** Gross weight (`TOTAL WEIGHT` SimVar). null when the aircraft addon
+   *  doesn't wire it (e.g. Fenix). Already in kg. */
+  total_weight_kg: number | null;
+  /** Latched touchdown sample — populated by SimConnect at the moment
+   *  the gear hits the ground. null until the first touchdown. */
+  touchdown_vs_fpm: number | null;
+  touchdown_pitch_deg: number | null;
+  touchdown_bank_deg: number | null;
+  touchdown_heading_mag_deg: number | null;
+  touchdown_lat: number | null;
+  touchdown_lon: number | null;
   wind_direction_deg: number | null;
   wind_speed_kt: number | null;
   qnh_hpa: number | null;

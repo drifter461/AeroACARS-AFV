@@ -553,6 +553,13 @@ struct FlightStats {
     pending_ap_master_since: Option<DateTime<Utc>>,
     last_logged_parking_brake: Option<bool>,
     last_logged_engines_running: Option<u8>,
+    /// Pending engine-count change waiting for stability — same
+    /// debounce trick as AP_DEBOUNCE_SECS. Fenix in particular
+    /// flashes the GENERAL ENG COMBUSTION SimVar during engine
+    /// starts and at idle, which fired phantom "Engine shutdown /
+    /// started" pairs in the log.
+    pending_engines_running: Option<u8>,
+    pending_engines_running_since: Option<DateTime<Utc>>,
     last_logged_stall: Option<bool>,
     last_logged_overspeed: Option<bool>,
     /// Last aircraft profile we logged. If the pilot loads a different
@@ -2179,11 +2186,15 @@ async fn flight_end(
                     flight.dpt_airport,
                     flight.arr_airport
                 ),
-                Some(format!(
-                    "Distance {:.1} nm, fuel {:.0} lb",
-                    body.distance.unwrap_or(0.0),
-                    body.fuel_used.unwrap_or(0.0)
-                )),
+                {
+                    let dist = body.distance.unwrap_or(0.0);
+                    let fuel = body.fuel_used.unwrap_or(0.0);
+                    if fuel > 0.0 {
+                        Some(format!("Distance {dist:.1} nm, fuel {fuel:.0} lb"))
+                    } else {
+                        Some(format!("Distance {dist:.1} nm"))
+                    }
+                },
             );
             record_event(
                 &app,
@@ -2611,7 +2622,12 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                 let stats = flight.stats.lock().expect("flight stats");
                 stats.position_count % STATS_PERSIST_EVERY_TICKS == 0
             };
-            if should_persist {
+            // Re-check stop *before* writing — `flight_end` may have run
+            // since the top-of-loop check, taken the flight, called
+            // `clear_persisted_flight`, and we'd otherwise resurrect the
+            // disk file. Without this, the resume banner pops on the next
+            // launch for a flight the user already filed.
+            if should_persist && !flight.stop.load(Ordering::Relaxed) {
                 save_active_flight(&app, &flight);
             }
 
@@ -2783,10 +2799,16 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
                 next_phase = FlightPhase::Takeoff;
                 stats.takeoff_at = Some(now);
                 stats.takeoff_fuel_kg = Some(snap.fuel_total_kg);
-                let zfw = snap.zfw_kg.unwrap_or(0.0);
-                let weight = zfw as f64 + snap.fuel_total_kg as f64;
-                if weight > 0.0 {
-                    stats.takeoff_weight_kg = Some(weight);
+                // Prefer TOTAL WEIGHT (fuel + payload + empty); fall
+                // back to ZFW + fuel only when the SimVar isn't wired.
+                if let Some(tw) = snap.total_weight_kg {
+                    stats.takeoff_weight_kg = Some(tw as f64);
+                } else {
+                    let zfw = snap.zfw_kg.unwrap_or(0.0);
+                    let weight = zfw as f64 + snap.fuel_total_kg as f64;
+                    if weight > 0.0 {
+                        stats.takeoff_weight_kg = Some(weight);
+                    }
                 }
             }
         }
@@ -2861,23 +2883,45 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
             if !was_on_ground && snap.on_ground {
                 next_phase = FlightPhase::Landing;
                 stats.landing_at = Some(now);
-                stats.landing_rate_fpm = Some(snap.vertical_speed_fpm);
+                // Prefer the sim-latched touchdown sample over our own
+                // tick-rate sample. SimConnect's `PLANE TOUCHDOWN *`
+                // SimVars are filled by the simulation core at the
+                // exact subframe the gear hits the ground — orders of
+                // magnitude more accurate than catching the right
+                // 200ms tick. Falls back to the live snapshot when the
+                // touchdown values aren't ready yet (e.g. immediately
+                // after teleport / slew).
+                stats.landing_rate_fpm =
+                    Some(snap.touchdown_vs_fpm.unwrap_or(snap.vertical_speed_fpm));
+                stats.landing_pitch_deg =
+                    Some(snap.touchdown_pitch_deg.unwrap_or(snap.pitch_deg));
+                stats.landing_heading_deg =
+                    Some(snap.touchdown_heading_mag_deg.unwrap_or(snap.heading_deg_magnetic));
+                // G is *not* latched by the sim — sample it live, the
+                // touchdown-window refinement loop will improve it.
                 stats.landing_g_force = Some(snap.g_force);
-                stats.landing_pitch_deg = Some(snap.pitch_deg);
                 stats.landing_speed_kt = Some(snap.indicated_airspeed_kt);
-                stats.landing_heading_deg = Some(snap.heading_deg_magnetic);
                 stats.landing_fuel_kg = Some(snap.fuel_total_kg);
                 // Seed the landing-analyzer peaks with the initial
                 // touchdown sample. Subsequent ticks within the window
                 // (TOUCHDOWN_WINDOW_SECS) refine these to the worst
                 // observed value.
-                stats.landing_peak_vs_fpm = Some(snap.vertical_speed_fpm);
+                stats.landing_peak_vs_fpm = stats.landing_rate_fpm;
                 stats.landing_peak_g_force = Some(snap.g_force);
                 stats.bounce_count = 0;
-                let zfw = snap.zfw_kg.unwrap_or(0.0);
-                let weight = zfw as f64 + snap.fuel_total_kg as f64;
-                if weight > 0.0 {
-                    stats.landing_weight_kg = Some(weight);
+                // Prefer TOTAL WEIGHT (fuel + payload + empty); only
+                // fall back to ZFW + fuel if the SimVar is missing.
+                // Fenix returns 0 for both → snapshot mapping converted
+                // it to None, so the field stays unset and the PIREP
+                // filter drops it.
+                if let Some(tw) = snap.total_weight_kg {
+                    stats.landing_weight_kg = Some(tw as f64);
+                } else {
+                    let zfw = snap.zfw_kg.unwrap_or(0.0);
+                    let weight = zfw as f64 + snap.fuel_total_kg as f64;
+                    if weight > 0.0 {
+                        stats.landing_weight_kg = Some(weight);
+                    }
                 }
             }
         }
@@ -3000,7 +3044,10 @@ fn build_pirep_fields(
         f.insert("Blocks On Time".into(), t.to_rfc3339());
     }
 
-    if let Some(w) = stats.takeoff_weight_kg {
+    // Skip 0-value weight/fuel fields — Fenix and some addons don't wire the
+    // SimVars reliably and we'd otherwise spam phpVMS custom fields with
+    // "0 kg" placeholders that look broken to dispatchers.
+    if let Some(w) = stats.takeoff_weight_kg.filter(|v| *v > 0.0) {
         f.insert("Takeoff Weight".into(), format!("{:.0} kg", w));
     }
     if let Some(rate) = stats.landing_rate_fpm {
@@ -3013,23 +3060,23 @@ fn build_pirep_fields(
     if let Some(p) = stats.landing_pitch_deg {
         f.insert("Landing Pitch".into(), format!("{:.1}°", p));
     }
-    if let Some(s) = stats.landing_speed_kt {
+    if let Some(s) = stats.landing_speed_kt.filter(|v| *v > 0.0) {
         f.insert("Landing Speed".into(), format!("{:.0} kt", s));
     }
     if let Some(h) = stats.landing_heading_deg {
         f.insert("Landing Heading".into(), format!("{:03.0}°", h));
     }
-    if let Some(w) = stats.landing_weight_kg {
+    if let Some(w) = stats.landing_weight_kg.filter(|v| *v > 0.0) {
         f.insert("Landing Weight".into(), format!("{:.0} kg", w));
     }
-    if let Some(fuel) = stats.landing_fuel_kg {
+    if let Some(fuel) = stats.landing_fuel_kg.filter(|v| *v > 0.0) {
         f.insert("Landing Fuel".into(), format!("{:.0} kg", fuel));
     }
-    if let Some(b) = stats.block_fuel_kg {
+    if let Some(b) = stats.block_fuel_kg.filter(|v| *v > 0.0) {
         f.insert("Block Fuel".into(), format!("{:.0} kg", b));
     }
     if let (Some(b), Some(c)) = (stats.block_fuel_kg, stats.last_fuel_kg) {
-        if b > c {
+        if b > 0.0 && b > c {
             f.insert("Fuel Used".into(), format!("{:.0} kg", b - c));
         }
     }
@@ -3557,28 +3604,49 @@ fn detect_telemetry_changes(app: &AppHandle, flight: &ActiveFlight, snap: &SimSn
     }
 
     // ---- Engines (count only — per-engine N1/N2 is a future extension)
+    // Debounce 5 s: Fenix's GENERAL ENG COMBUSTION SimVar pulses
+    // 0/1/0/1 during engine start and at idle, which produced phantom
+    // "Engine shutdown / started" pairs in the activity log. We only
+    // commit the change once the new count has held steady.
     if stats.last_logged_engines_running != Some(snap.engines_running) {
-        if let Some(prev) = stats.last_logged_engines_running {
-            if prev < snap.engines_running {
-                log_activity_handle(
-                    app,
-                    ActivityLevel::Info,
-                    format!(
-                        "Engine started — {} of {} running",
-                        snap.engines_running, snap.engines_running
-                    ),
-                    None,
-                );
-            } else if prev > snap.engines_running {
-                log_activity_handle(
-                    app,
-                    ActivityLevel::Info,
-                    format!("Engine shutdown — {} running", snap.engines_running),
-                    None,
-                );
+        let now = Utc::now();
+        if stats.pending_engines_running != Some(snap.engines_running) {
+            stats.pending_engines_running = Some(snap.engines_running);
+            stats.pending_engines_running_since = Some(now);
+        } else if let Some(since) = stats.pending_engines_running_since {
+            if (now - since).num_seconds() >= 5 {
+                if let Some(prev) = stats.last_logged_engines_running {
+                    if prev < snap.engines_running {
+                        log_activity_handle(
+                            app,
+                            ActivityLevel::Info,
+                            format!(
+                                "Engine started — {} running",
+                                snap.engines_running
+                            ),
+                            None,
+                        );
+                    } else if prev > snap.engines_running {
+                        log_activity_handle(
+                            app,
+                            ActivityLevel::Info,
+                            format!(
+                                "Engine shutdown — {} running",
+                                snap.engines_running
+                            ),
+                            None,
+                        );
+                    }
+                }
+                stats.last_logged_engines_running = Some(snap.engines_running);
+                stats.pending_engines_running = None;
+                stats.pending_engines_running_since = None;
             }
         }
-        stats.last_logged_engines_running = Some(snap.engines_running);
+    } else {
+        // Snap matches last logged again — drop any pending change.
+        stats.pending_engines_running = None;
+        stats.pending_engines_running_since = None;
     }
 
     // ---- Flaps detent

@@ -194,7 +194,20 @@
       "pitch": "Pitch",
       "bank": "Bank",
       "g_force": "G-load",
-      "on_ground": "On ground"
+      "on_ground": "On ground",
+      "fuel_total": "Fuel on board",
+      "total_weight": "Gross weight",
+      "fuel_flow": "Fuel flow",
+      "touchdown_vs": "Touchdown V/S",
+      "touchdown_pitch": "Touchdown pitch",
+      "touchdown_bank": "Touchdown bank",
+      "touchdown_heading": "Touchdown heading",
+      "no_touchdown_yet": "no touchdown recorded yet",
+      "not_wired": "not wired by this aircraft"
+    },
+    "sections": {
+      "mass_fuel": "Mass & Fuel",
+      "touchdown": "Last Touchdown (sim-latched)"
     }
   },
   "resume": {

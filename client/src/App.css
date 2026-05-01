@@ -1092,6 +1092,20 @@ button:disabled {
   font-feature-settings: "tnum" 1;
 }
 
+.sim-panel__section {
+  margin: 14px 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.sim-panel__muted {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
 /* ===== Login form ===== */
 
 .login {

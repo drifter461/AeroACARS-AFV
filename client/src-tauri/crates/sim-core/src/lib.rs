@@ -55,6 +55,24 @@ pub struct SimSnapshot {
     pub fuel_used_kg: f32,
     pub zfw_kg: Option<f32>,
     pub payload_kg: Option<f32>,
+    /// Gross weight in kg (`TOTAL WEIGHT` SimVar). Includes fuel + payload.
+    /// `None` for aircraft addons that don't wire it (notably Fenix —
+    /// then we fall back to addon LVars or leave the PIREP field blank).
+    pub total_weight_kg: Option<f32>,
+
+    // ---- Touchdown sample (latched by MSFS at the moment the gear
+    // touches the ground; values stay valid until the next takeoff).
+    // Reading these is more reliable than sampling V/S continuously
+    // and trying to guess which frame was the actual touchdown — the
+    // sim itself takes the snapshot for us. ----
+    /// Vertical velocity at touchdown, fpm. Negative on a real landing
+    /// (we mirror MSFS' sign convention).
+    pub touchdown_vs_fpm: Option<f32>,
+    pub touchdown_pitch_deg: Option<f32>,
+    pub touchdown_bank_deg: Option<f32>,
+    pub touchdown_heading_mag_deg: Option<f32>,
+    pub touchdown_lat: Option<f64>,
+    pub touchdown_lon: Option<f64>,
 
     // Environment
     pub wind_direction_deg: Option<f32>,

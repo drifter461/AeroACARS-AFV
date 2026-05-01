@@ -194,7 +194,20 @@
       "pitch": "Pitch",
       "bank": "Bank",
       "g_force": "G-Belastung",
-      "on_ground": "Am Boden"
+      "on_ground": "Am Boden",
+      "fuel_total": "Kraftstoff an Bord",
+      "total_weight": "Bruttogewicht",
+      "fuel_flow": "Verbrauchsrate",
+      "touchdown_vs": "Touchdown V/S",
+      "touchdown_pitch": "Touchdown Pitch",
+      "touchdown_bank": "Touchdown Bank",
+      "touchdown_heading": "Touchdown Heading",
+      "no_touchdown_yet": "noch keine Landung erfasst",
+      "not_wired": "von diesem Flugzeug nicht geliefert"
+    },
+    "sections": {
+      "mass_fuel": "Masse & Kraftstoff",
+      "touchdown": "Letzter Touchdown (vom Sim erfasst)"
     }
   },
   "resume": {
