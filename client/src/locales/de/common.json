@@ -19,6 +19,18 @@
     "empty_hint": "Wechseln Sie ins Briefing, um einen gebuchten Flug zu starten oder einen offenen PIREP zu adoptieren.",
     "go_briefing": "Zum Briefing"
   },
+  "phase_timeline": {
+    "title": "Flug-Phasen",
+    "nodes": {
+      "boarding": "Boarding",
+      "taxi_out": "Taxi",
+      "takeoff": "Start",
+      "cruise": "Reise",
+      "approach": "Anflug",
+      "landing": "Landung",
+      "arrived": "Gate"
+    }
+  },
   "briefing": {
     "active_flight_hint": "{{callsign}} ist gerade aktiv — wechseln Sie in den Cockpit-Tab, um ihn zu beenden."
   },

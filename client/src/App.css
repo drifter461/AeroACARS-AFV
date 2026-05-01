@@ -207,6 +207,110 @@ button:disabled {
   color: var(--warning);
 }
 
+/* ===== Phase timeline (Cockpit) — animated SVG plane on a track ===== */
+
+.phase-timeline {
+  width: 100%;
+  padding: 16px 8px 28px;
+}
+
+.phase-timeline__track {
+  position: relative;
+  height: 4px;
+  background: var(--surface-2);
+  border-radius: 2px;
+  margin: 0 18px;
+}
+
+/* Filled portion of the track — grows with progress, smooth anim. */
+.phase-timeline__track-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  background: linear-gradient(
+    90deg,
+    var(--accent),
+    color-mix(in srgb, var(--accent) 70%, var(--success, #22c55e))
+  );
+  border-radius: 2px;
+  transition: width 0.6s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.phase-timeline__node {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.phase-timeline__dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 2px solid var(--border);
+  transition: background 0.3s ease, border-color 0.3s ease, transform 0.3s ease;
+}
+
+.phase-timeline__node--reached .phase-timeline__dot {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.phase-timeline__node--current .phase-timeline__dot {
+  background: var(--accent);
+  border-color: var(--accent);
+  transform: scale(1.4);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+.phase-timeline__label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  white-space: nowrap;
+  position: absolute;
+  top: 18px;
+}
+
+.phase-timeline__node--reached .phase-timeline__label {
+  color: var(--text);
+}
+
+.phase-timeline__node--current .phase-timeline__label {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+/* The plane glyph — sits on the current checkpoint and rides the
+   track as phases advance. Smooth left-transition gives it the "the
+   aircraft is moving forward" feel rather than a teleport. */
+.phase-timeline__plane {
+  position: absolute;
+  left: 0;
+  top: -16px;
+  transform: translateX(-50%);
+  color: var(--accent);
+  filter: drop-shadow(0 2px 6px color-mix(in srgb, var(--accent) 50%, transparent));
+  transition: left 0.8s cubic-bezier(0.22, 1, 0.36, 1);
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+@media (max-width: 600px) {
+  .phase-timeline__label {
+    display: none;
+  }
+}
+
 /* ===== Pilot header (Briefing tab) ===== */
 
 .pilot-header {
@@ -1580,8 +1684,10 @@ input:disabled {
 }
 
 .active-flight__phase {
-  display: inline-block;
-  padding: 4px 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px 4px 10px;
   border-radius: 999px;
   background: color-mix(in srgb, var(--accent) 20%, var(--surface-2));
   color: var(--accent);
@@ -1590,14 +1696,72 @@ input:disabled {
   text-transform: uppercase;
   letter-spacing: 0.06em;
   white-space: nowrap;
+  position: relative;
+  border: 1px solid color-mix(in srgb, currentColor 35%, transparent);
 }
 
-/* Phase-specific colour cues so the badge is scannable at a glance. */
-.active-flight__phase--boarding,
+/* Pulsing indicator dot ahead of the phase label — pulses on phases
+   that are mid-action ("something is happening right now"), steady on
+   stable / parked phases. */
+.active-flight__phase::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: 0 0 auto;
+  box-shadow: 0 0 0 0 currentColor;
+}
+
+/* Active / dynamic phases pulse so the user feels the live state. */
+.active-flight__phase--pushback::before,
+.active-flight__phase--taxi_out::before,
+.active-flight__phase--takeoff_roll::before,
+.active-flight__phase--takeoff::before,
+.active-flight__phase--climb::before,
+.active-flight__phase--descent::before,
+.active-flight__phase--approach::before,
+.active-flight__phase--final::before,
+.active-flight__phase--landing::before,
+.active-flight__phase--taxi_in::before {
+  animation: phase-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes phase-pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 60%, transparent);
+  }
+  70% {
+    box-shadow: 0 0 0 8px color-mix(in srgb, currentColor 0%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 0%, transparent);
+  }
+}
+
+/* Phase-specific colour cues so the badge is scannable at a glance.
+   Boarding (waiting at the gate) — neutral accent.
+   Pushback / taxi — accent (active ground movement).
+   Takeoff / liftoff — orange-warning (high-energy event).
+   Climb / cruise — green (steady-state cruise).
+   Descent — green→amber (active phase but not critical yet).
+   Approach / final — orange (configuration matters).
+   Landing / blocks-on / arrived — strong green (success).
+   Preflight (legacy persisted-stats fallback) — muted grey. */
+.active-flight__phase--preflight {
+  background: var(--surface-2);
+  color: var(--text-muted);
+}
+
+.active-flight__phase--boarding {
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface-2));
+  color: var(--accent);
+}
+
 .active-flight__phase--pushback,
 .active-flight__phase--taxi_out,
 .active-flight__phase--taxi_in {
-  background: color-mix(in srgb, var(--accent) 18%, var(--surface-2));
+  background: color-mix(in srgb, var(--accent) 22%, var(--surface-2));
   color: var(--accent);
 }
 
@@ -1609,10 +1773,14 @@ input:disabled {
 }
 
 .active-flight__phase--climb,
-.active-flight__phase--cruise,
-.active-flight__phase--descent {
+.active-flight__phase--cruise {
   background: color-mix(in srgb, var(--success, #22c55e) 18%, var(--surface-2));
   color: var(--success, #22c55e);
+}
+
+.active-flight__phase--descent {
+  background: color-mix(in srgb, var(--success, #22c55e) 14%, var(--surface-2));
+  color: color-mix(in srgb, var(--success, #22c55e) 70%, var(--warning, orange));
 }
 
 .active-flight__phase--approach,
@@ -1624,7 +1792,7 @@ input:disabled {
 .active-flight__phase--blocks_on,
 .active-flight__phase--arrived,
 .active-flight__phase--pirep_submitted {
-  background: color-mix(in srgb, var(--success, #22c55e) 22%, var(--surface-2));
+  background: color-mix(in srgb, var(--success, #22c55e) 26%, var(--surface-2));
   color: var(--success, #22c55e);
 }
 

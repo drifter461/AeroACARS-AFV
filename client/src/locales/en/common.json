@@ -19,6 +19,18 @@
     "empty_hint": "Head to Briefing to start a booked flight or adopt an in-progress PIREP.",
     "go_briefing": "Open briefing"
   },
+  "phase_timeline": {
+    "title": "Flight phases",
+    "nodes": {
+      "boarding": "Boarding",
+      "taxi_out": "Taxi",
+      "takeoff": "Takeoff",
+      "cruise": "Cruise",
+      "approach": "Approach",
+      "landing": "Landing",
+      "arrived": "Gate"
+    }
+  },
   "briefing": {
     "active_flight_hint": "{{callsign}} is in progress — switch to the Cockpit tab to manage it."
   },

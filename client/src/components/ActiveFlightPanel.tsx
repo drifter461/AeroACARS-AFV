@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTranslation } from "react-i18next";
-import type { ActiveFlightInfo } from "../types";
+import type { ActiveFlightInfo, FlightPhase } from "../types";
 import { ManualFileDialog } from "./ManualFileDialog";
+import { PhaseTimeline } from "./PhaseTimeline";
 import { WeatherBriefing } from "./WeatherBriefing";
 
 interface Props {
@@ -203,6 +204,8 @@ export function ActiveFlightPanel({ info, onEnded }: Props) {
           </button>
         </div>
       </header>
+
+      <PhaseTimeline phase={info.phase as FlightPhase} />
 
       <dl className="active-flight__stats">
         <div className="active-flight__stat">
