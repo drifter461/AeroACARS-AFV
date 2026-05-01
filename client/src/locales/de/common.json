@@ -191,7 +191,8 @@
         "position_count": "Zu wenige Positions-Datenpunkte (mindestens 5)",
         "fuel": "Treibstoff-Daten fehlen (Block- oder Restwert nicht erfasst)",
         "not_arrived": "Flugzeug nicht am Ziel geparkt — keine Triebwerks-/Parkbremse-Sequenz erkannt",
-        "no_bid": "Keine Buchung verknüpft — ohne Bid darf der PIREP nicht als reiner ACARS-Bericht eingereicht werden"
+        "no_bid": "Keine Buchung verknüpft — ohne Bid darf der PIREP nicht als reiner ACARS-Bericht eingereicht werden",
+        "not_at_arrival": "Sie sind nicht am Ankunftsflughafen — bei einem Divert bitte über „Manuell einreichen“ mit Begründung filen"
       },
       "options_title": "Wie weiter?",
       "option_manual": "Manuell einreichen",

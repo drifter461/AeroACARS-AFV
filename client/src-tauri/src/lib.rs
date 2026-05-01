@@ -83,6 +83,13 @@ const KG_TO_LB: f64 = 2.20462262;
 /// stands; tight enough to reject "I'm at EDDF instead of EDDP".
 const MAX_START_DISTANCE_NM: f64 = 5.0;
 
+/// Symmetric to MAX_START_DISTANCE_NM but applied at touchdown / file:
+/// the pilot has to actually be on (or at) the planned arrival airport,
+/// not somewhere random. Diverts are still possible via
+/// `flight_end_manual` with a divert ICAO + reason. EDDP→EDDP plans are
+/// fine — same airport, same check.
+const MAX_FILE_DISTANCE_NM: f64 = 5.0;
+
 /// MSFS often returns SimVar values as localization keys, not plain text.
 /// The ATC MODEL var is one of them — e.g. `TT:ATCCOM.AC_MODEL_A320.0.text`
 /// or `ATCCOM.AC_MODEL A320.0.text`. Pull out the readable code, or return
@@ -1764,6 +1771,49 @@ fn validate_for_filing(
     missing
 }
 
+/// Compute the great-circle distance (nm) from the live sim position to
+/// the airport with the given ICAO. Returns `None` when we don't have
+/// a sim snapshot yet, can't resolve the airport, or the airport
+/// coordinates are zero (typical for stub records). Used by
+/// `flight_end` to enforce the "you have to actually be there to file"
+/// rule. Reads the airport from the in-memory cache first; only goes
+/// to the network if we haven't seen the ICAO yet.
+async fn compute_distance_to_airport(
+    app: &AppHandle,
+    state: &tauri::State<'_, AppState>,
+    icao: &str,
+) -> Option<f64> {
+    let snap = current_snapshot(app)?;
+    let key = icao.trim().to_uppercase();
+
+    // Cache hit: synchronous lookup, no network call.
+    let cached: Option<Airport> = {
+        let guard = state.airports.lock().expect("airports lock");
+        guard.get(&key).cloned()
+    };
+    let airport = match cached {
+        Some(a) => a,
+        None => {
+            // Cache miss: fetch via phpVMS. Best-effort — if the lookup
+            // fails (network down, airport not in DB) we skip the check
+            // rather than blocking the file.
+            let client = state.client.lock().expect("client mutex").clone()?;
+            let fetched = client.get_airport(&key).await.ok()?;
+            let mut guard = state.airports.lock().expect("airports lock");
+            guard.insert(key.clone(), fetched.clone());
+            fetched
+        }
+    };
+
+    let lat = airport.lat?;
+    let lon = airport.lon?;
+    if lat == 0.0 && lon == 0.0 {
+        return None;
+    }
+    let meters = ::geo::distance_m(snap.lat, snap.lon, lat, lon);
+    Some(meters / 1852.0)
+}
+
 /// File the active PIREP with computed final stats. Refuses to file if any
 /// of the minimum-quality checks in `validate_for_filing` fail — the UI then
 /// surfaces a dialog letting the user cancel the flight or file as a manual
@@ -1773,6 +1823,21 @@ async fn flight_end(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), UiError> {
+    // Pull the arrival ICAO so we can resolve its coords without holding
+    // the active_flight lock across the network call.
+    let arr_icao = {
+        let guard = state.active_flight.lock().expect("active_flight lock");
+        let flight = guard
+            .as_ref()
+            .ok_or_else(|| UiError::new("no_active_flight", "no flight is active"))?;
+        flight.arr_airport.clone()
+    };
+    // Compute distance to the planned arrival. Used as an extra
+    // pre-flight-filing gate ("not_at_arrival") so the pilot can't
+    // file a flight from 200 nm out — they have to taxi to the gate or
+    // file as a manual divert via flight_end_manual.
+    let distance_to_arr_nm = compute_distance_to_airport(&app, &state, &arr_icao).await;
+
     // Validate WITHOUT removing the flight from state, so a failed validation
     // leaves the user able to retry, edit-and-file-manual, or cancel.
     {
@@ -1782,11 +1847,17 @@ async fn flight_end(
             .ok_or_else(|| UiError::new("no_active_flight", "no flight is active"))?;
         let stats = flight.stats.lock().expect("flight stats");
         let elapsed_minutes = (Utc::now() - flight.started_at).num_minutes() as i32;
-        let missing = validate_for_filing(flight, &stats, elapsed_minutes);
+        let mut missing = validate_for_filing(flight, &stats, elapsed_minutes);
+        if let Some(d) = distance_to_arr_nm {
+            if d > MAX_FILE_DISTANCE_NM {
+                missing.push("not_at_arrival");
+            }
+        }
         if !missing.is_empty() {
             tracing::warn!(
                 pirep_id = %flight.pirep_id,
                 missing = ?missing,
+                distance_to_arr_nm,
                 "rejecting PIREP filing — validation failed"
             );
             return Err(UiError::new(

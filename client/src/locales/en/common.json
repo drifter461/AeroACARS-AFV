@@ -191,7 +191,8 @@
         "position_count": "Too few position datapoints (at least 5 required)",
         "fuel": "Fuel data missing (block or remaining fuel not captured)",
         "not_arrived": "Aircraft is not parked at the destination — engines-shutdown / parking-brake sequence not detected",
-        "no_bid": "No booking attached — without a bid the PIREP can't be filed as a pure ACARS report"
+        "no_bid": "No booking attached — without a bid the PIREP can't be filed as a pure ACARS report",
+        "not_at_arrival": "You're not at the arrival airport — file as a manual divert with a reason instead"
       },
       "options_title": "What do you want to do?",
       "option_manual": "File manually",
