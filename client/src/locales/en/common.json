@@ -260,6 +260,9 @@
     "tat": "TAT",
     "mach": "Mach"
   },
+  "info_strip": {
+    "trip": "Trip"
+  },
   "diff": {
     "title": "Switch Detective (snapshot diff)",
     "hint": "Take Snapshot A → flip a switch in the cockpit → take Snapshot B. The table lists only the fields that changed.",

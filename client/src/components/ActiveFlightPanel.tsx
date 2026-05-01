@@ -2,10 +2,9 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTranslation } from "react-i18next";
 import type { ActiveFlightInfo, FlightPhase, SimSnapshot } from "../types";
-import { FlightInfoPanel } from "./FlightInfoPanel";
+import { InfoStrip } from "./InfoStrip";
 import { LiveTapes } from "./LiveTapes";
 import { ManualFileDialog } from "./ManualFileDialog";
-import { MassPanel } from "./MassPanel";
 import { PhaseTimeline } from "./PhaseTimeline";
 import { RouteMap } from "./RouteMap";
 import { WeatherBriefing } from "./WeatherBriefing";
@@ -17,18 +16,6 @@ interface Props {
   simSnapshot?: SimSnapshot | null;
   /** Notify parent when the flight ends so it can refresh bids etc. */
   onEnded?: () => void;
-}
-
-function fmtDuration(startedIso: string, locale: string): string {
-  const started = new Date(startedIso).getTime();
-  const ms = Date.now() - started;
-  const minutes = Math.max(0, Math.floor(ms / 60000));
-  const h = Math.floor(minutes / 60);
-  const m = minutes % 60;
-  if (h === 0) return `${m}m`;
-  return locale.startsWith("de")
-    ? `${h}h ${m.toString().padStart(2, "0")}m`
-    : `${h}h ${m}m`;
 }
 
 function fmtDistance(nm: number, locale: string): string {
@@ -224,23 +211,14 @@ export function ActiveFlightPanel({ info, simSnapshot, onEnded }: Props) {
 
       <LiveTapes snapshot={simSnapshot ?? null} />
 
-      <MassPanel snapshot={simSnapshot ?? null} />
-      <FlightInfoPanel snapshot={simSnapshot ?? null} />
-
-      <dl className="active-flight__stats">
-        <div className="active-flight__stat">
-          <dt>{t("active_flight.elapsed")}</dt>
-          <dd>{fmtDuration(info.started_at, i18n.language)}</dd>
-        </div>
-        <div className="active-flight__stat">
-          <dt>{t("active_flight.distance")}</dt>
-          <dd>{fmtDistance(info.distance_nm, i18n.language)}</dd>
-        </div>
-        <div className="active-flight__stat">
-          <dt>{t("active_flight.positions")}</dt>
-          <dd>{info.position_count}</dd>
-        </div>
-      </dl>
+      <InfoStrip
+        info={info}
+        snapshot={simSnapshot ?? null}
+        elapsedMinutes={Math.max(
+          0,
+          Math.floor((Date.now() - new Date(info.started_at).getTime()) / 60000),
+        )}
+      />
 
       <WeatherBriefing dptIcao={info.dpt_airport} arrIcao={info.arr_airport} />
 

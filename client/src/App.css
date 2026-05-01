@@ -1299,6 +1299,90 @@ button:disabled {
   font-weight: 600;
 }
 
+/* ----- Compact InfoStrip (Cockpit tab) ----- */
+/* Replaces the old MassPanel + FlightInfoPanel + stats grid trio
+   with a single dense band split into three logical groups. */
+
+.info-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 14px;
+  padding: 10px 14px;
+  margin-top: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.info-strip__group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.info-strip__group + .info-strip__group {
+  border-left: 1px solid var(--border);
+  padding-left: 14px;
+}
+
+.info-strip__group-label {
+  margin: 0;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+.info-strip__cells {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+}
+
+.info-strip__cell {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.info-strip__cell-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.info-strip__cell-value {
+  font-family: "SF Mono", "Cascadia Code", "Source Code Pro", Menlo, Consolas,
+    monospace;
+  font-feature-settings: "tnum" 1;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.info-strip__cell--primary .info-strip__cell-value {
+  color: var(--accent, #5eead4);
+  font-weight: 600;
+}
+
+/* On narrow widths the auto-fit drops groups onto new rows; remove
+   the left border on the first group of each row visually by keeping
+   it only when the group is *not* at the start of a row. */
+@media (max-width: 720px) {
+  .info-strip__group + .info-strip__group {
+    border-left: none;
+    padding-left: 0;
+    border-top: 1px solid var(--border);
+    padding-top: 10px;
+    margin-top: 4px;
+  }
+}
+
 /* ----- SimVar / LVar Inspector (Settings → Debug) ----- */
 
 .inspector-add {

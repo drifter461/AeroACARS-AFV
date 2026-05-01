@@ -260,6 +260,9 @@
     "tat": "TAT",
     "mach": "Mach"
   },
+  "info_strip": {
+    "trip": "Trip"
+  },
   "diff": {
     "title": "Schalter-Detektor (Snapshot-Diff)",
     "hint": "Snapshot A nehmen → Schalter im Cockpit umlegen → Snapshot B nehmen. Die Tabelle zeigt nur die Felder, die sich geändert haben.",
