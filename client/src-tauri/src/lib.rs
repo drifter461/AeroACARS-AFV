@@ -404,6 +404,13 @@ struct PersistedFlightStats {
     /// `AIRCRAFT WIND X` (positive X is crosswind from right per MSFS).
     #[serde(default)]
     landing_crosswind_kt: Option<f32>,
+    // ---- Landing Analyzer (Stage 1) ----
+    #[serde(default)]
+    approach_vs_stddev_fpm: Option<f32>,
+    #[serde(default)]
+    approach_bank_stddev_deg: Option<f32>,
+    #[serde(default)]
+    rollout_distance_m: Option<f64>,
 }
 
 impl PersistedFlightStats {
@@ -448,6 +455,9 @@ impl PersistedFlightStats {
             landing_heading_true_deg: stats.landing_heading_true_deg,
             landing_headwind_kt: stats.landing_headwind_kt,
             landing_crosswind_kt: stats.landing_crosswind_kt,
+            approach_vs_stddev_fpm: stats.approach_vs_stddev_fpm,
+            approach_bank_stddev_deg: stats.approach_bank_stddev_deg,
+            rollout_distance_m: stats.rollout_distance_m,
         }
     }
 
@@ -498,6 +508,9 @@ impl PersistedFlightStats {
         stats.landing_heading_true_deg = self.landing_heading_true_deg;
         stats.landing_headwind_kt = self.landing_headwind_kt;
         stats.landing_crosswind_kt = self.landing_crosswind_kt;
+        stats.approach_vs_stddev_fpm = self.approach_vs_stddev_fpm;
+        stats.approach_bank_stddev_deg = self.approach_bank_stddev_deg;
+        stats.rollout_distance_m = self.rollout_distance_m;
     }
 }
 
@@ -668,6 +681,33 @@ struct FlightStats {
     /// Crosswind at touchdown in knots. Positive = from the right.
     /// Sourced from `AIRCRAFT WIND X`.
     landing_crosswind_kt: Option<f32>,
+
+    // ---- Landing Analyzer (Stage 1) ----
+    /// Rolling buffer of (V/S, bank) samples collected during the
+    /// Approach + Final phases. Capped at ~120 entries (≈ 10-15 min
+    /// of data at the position-streamer's 5-8 s cadence). Drained
+    /// at the touchdown edge into stddev metrics.
+    approach_buffer: std::collections::VecDeque<(f32, f32)>,
+    /// V/S standard deviation (fpm) over the approach window.
+    /// Lower = more stable. Computed once at touchdown.
+    approach_vs_stddev_fpm: Option<f32>,
+    /// Bank-angle standard deviation (degrees) over the approach
+    /// window. Lower = smoother flying.
+    approach_bank_stddev_deg: Option<f32>,
+    /// Rollout distance in meters: accumulated great-circle distance
+    /// from the touchdown point until groundspeed first drops below
+    /// 5 kt. None until first touchdown; finalised once GS<5 kt is
+    /// observed. Resumed flights mid-rollout finalise on next
+    /// stop or never (we accept the imprecision).
+    rollout_distance_m: Option<f64>,
+    /// True once `rollout_distance_m` has been finalised. Stops the
+    /// per-tick accumulation in step_flight from continuing past
+    /// the actual stop.
+    rollout_finalized: bool,
+    /// Last (lat, lon) we accumulated into the rollout distance.
+    /// Used to compute the great-circle delta to the next position.
+    rollout_last_lat: Option<f64>,
+    rollout_last_lon: Option<f64>,
 
     // ---- METAR snapshots (Phase J.2) ----
     /// Raw METAR text captured at takeoff for the departure airport.
@@ -1076,6 +1116,69 @@ fn detent_label(detent: u8) -> &'static str {
 // the floating-point precision MSFS reports them at, no need to
 // reconstruct anything from successive lat/lon.)
 
+/// Push the current snapshot's V/S + bank into the approach buffer.
+/// Called every step_flight tick during Approach + Final phases. The
+/// buffer is capped at APPROACH_BUFFER_MAX so a 30-min hold doesn't
+/// blow up memory; oldest entries get dropped first.
+fn push_approach_sample(stats: &mut FlightStats, snap: &SimSnapshot) {
+    stats
+        .approach_buffer
+        .push_back((snap.vertical_speed_fpm, snap.bank_deg));
+    while stats.approach_buffer.len() > APPROACH_BUFFER_MAX {
+        stats.approach_buffer.pop_front();
+    }
+}
+
+/// Compute population standard deviations of V/S and bank over the
+/// approach buffer. Returns `(None, None)` when fewer than 3 samples
+/// (insufficient signal). Single-pass formula (Welford's algorithm
+/// would be marginally more numerically stable but at this scale it
+/// makes no difference).
+fn compute_approach_stddev(
+    buf: &std::collections::VecDeque<(f32, f32)>,
+) -> (Option<f32>, Option<f32>) {
+    let n = buf.len();
+    if n < 3 {
+        return (None, None);
+    }
+    let mut sum_vs = 0.0_f64;
+    let mut sum_bank = 0.0_f64;
+    for (vs, bank) in buf.iter() {
+        sum_vs += *vs as f64;
+        sum_bank += *bank as f64;
+    }
+    let mean_vs = sum_vs / n as f64;
+    let mean_bank = sum_bank / n as f64;
+    let mut sq_vs = 0.0_f64;
+    let mut sq_bank = 0.0_f64;
+    for (vs, bank) in buf.iter() {
+        let dv = *vs as f64 - mean_vs;
+        let db = *bank as f64 - mean_bank;
+        sq_vs += dv * dv;
+        sq_bank += db * db;
+    }
+    let var_vs = sq_vs / n as f64;
+    let var_bank = sq_bank / n as f64;
+    (Some(var_vs.sqrt() as f32), Some(var_bank.sqrt() as f32))
+}
+
+/// Map a numeric landing score (0-100, finer granularity than the
+/// 5-tier `LandingScore`) to a letter grade. Same A+/A/B+/B/C/D/F
+/// scale as the Landing Analyzer reference tool. Boundaries chosen
+/// so a clean butter touchdown (LandingScore::Smooth = 100) earns
+/// A+, an Acceptable (80) earns B, Firm (60) earns C, etc.
+fn letter_grade(numeric: i32) -> &'static str {
+    match numeric {
+        95..=100 => "A+",
+        88..=94 => "A",
+        82..=87 => "B+",
+        75..=81 => "B",
+        65..=74 => "C",
+        50..=64 => "D",
+        _ => "F",
+    }
+}
+
 /// Render the full callsign as "DLH 155" (airline + space + number) when
 /// the airline ICAO is known, falling back to bare "155" otherwise.
 fn format_callsign(airline_icao: &str, flight_number: &str) -> String {
@@ -1261,6 +1364,17 @@ const BOUNCE_AGL_THRESHOLD_FT: f64 = 35.0;
 /// and fires when it crosses back down through RETURN. Matches
 /// BeatMyLanding's `BounceRadioAltReturnFeet`.
 const BOUNCE_AGL_RETURN_FT: f64 = 5.0;
+
+/// Max samples retained in `FlightStats::approach_buffer`. Position
+/// streamer ticks every 5-8 s during Approach/Final, so 120 samples
+/// ≈ 10-15 min — plenty to cover even a long ILS approach.
+const APPROACH_BUFFER_MAX: usize = 120;
+
+/// Groundspeed (kt) at which we consider the rollout finished. Used
+/// to finalise `rollout_distance_m`. Aircraft don't spend time
+/// between 5 kt and full stop on the runway — they exit to taxi or
+/// brake to a halt.
+const ROLLOUT_STOP_GS_KT: f32 = 5.0;
 
 /// Hard-landing thresholds, ordered worst-first. The first row that
 /// the peak |V/S| or G-force breaches wins; combined with
@@ -3701,6 +3815,10 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
             }
         }
         FlightPhase::Approach => {
+            // Collect approach-stability samples on every tick. V/S
+            // and bank stddev over this window become the "Approach
+            // Stability" sub-score in the Landing Analyzer.
+            push_approach_sample(&mut stats, snap);
             // 1500 ft AGL was too eager — pilots reported a 3 min
             // "Final" segment because most aircraft intercept the
             // ILS at that altitude and still have several miles to
@@ -3711,6 +3829,11 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
             }
         }
         FlightPhase::Final => {
+            // Continue collecting approach-stability samples through
+            // the final segment too. Lots of pilots stabilise late;
+            // measuring only Approach would underweight the truly
+            // important last 700 ft AGL.
+            push_approach_sample(&mut stats, snap);
             // Approach runway: snapshot whatever ATC currently has us
             // cleared for. May still change before touchdown, so we
             // refresh until wheels are down.
@@ -3872,6 +3995,25 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
                 // Reset bounce state for the new analyzer window.
                 stats.bounce_armed_above_threshold = false;
                 stats.bounce_count = 0;
+
+                // ---- Landing Analyzer (Stage 1) ----
+
+                // Compute approach-stability stddev from the buffer
+                // accumulated during Approach + Final. None when we
+                // have fewer than 3 samples (resumed flight,
+                // ultra-fast approach).
+                let (vs_sd, bank_sd) = compute_approach_stddev(&stats.approach_buffer);
+                stats.approach_vs_stddev_fpm = vs_sd;
+                stats.approach_bank_stddev_deg = bank_sd;
+
+                // Reset rollout tracking. The Landing-phase arm below
+                // accumulates haversine distance from `(landing_lat,
+                // landing_lon)` until groundspeed drops below
+                // ROLLOUT_STOP_GS_KT, then sets `rollout_finalized`.
+                stats.rollout_distance_m = Some(0.0);
+                stats.rollout_finalized = false;
+                stats.rollout_last_lat = Some(snap.lat);
+                stats.rollout_last_lon = Some(snap.lon);
                 // Prefer TOTAL WEIGHT (fuel + payload + empty); only
                 // fall back to ZFW + fuel if the SimVar is missing.
                 // Fenix returns 0 for both → snapshot mapping converted
@@ -3889,6 +4031,30 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
             }
         }
         FlightPhase::Landing => {
+            // Rollout-distance accumulator: from `landing_lat/lon`
+            // until groundspeed drops below ROLLOUT_STOP_GS_KT, sum
+            // haversine deltas tick-by-tick. Survives a Tauri restart
+            // because we persist (last_lat, last_lon, distance,
+            // finalized) in PersistedFlightStats.
+            if !stats.rollout_finalized {
+                if let (Some(prev_lat), Some(prev_lon)) =
+                    (stats.rollout_last_lat, stats.rollout_last_lon)
+                {
+                    let delta = ::geo::distance_m(prev_lat, prev_lon, snap.lat, snap.lon);
+                    stats.rollout_distance_m =
+                        Some(stats.rollout_distance_m.unwrap_or(0.0) + delta);
+                }
+                stats.rollout_last_lat = Some(snap.lat);
+                stats.rollout_last_lon = Some(snap.lon);
+                if snap.groundspeed_kt < ROLLOUT_STOP_GS_KT && snap.on_ground {
+                    stats.rollout_finalized = true;
+                    tracing::info!(
+                        meters = stats.rollout_distance_m.unwrap_or(0.0),
+                        "rollout finalised"
+                    );
+                }
+            }
+
             // Touchdown analyzer windows (BeatMyLanding-aligned):
             //   * Peak G refined for TOUCHDOWN_G_WINDOW_MS (1500 ms)
             //   * Peak |V/S| refined for TOUCHDOWN_WINDOW_SECS (5 s) —
@@ -4105,9 +4271,12 @@ fn build_pirep_fields(
 
     // ---- Touchdown analysis ----
     if let Some(score) = stats.landing_score {
+        let grade = letter_grade(score.numeric());
         f.insert("Landing Score".into(), score.label().to_string());
+        f.insert("Landing Grade".into(), grade.to_string());
         f.insert("landing_score".into(), score.numeric().to_string());
         f.insert("landing_score_label".into(), score.label().to_string());
+        f.insert("landing_grade_letter".into(), grade.to_string());
     }
     if let Some(rate) = stats.landing_rate_fpm {
         // SIGNED — negative on descent. Matches both LandingToast and
@@ -4161,6 +4330,23 @@ fn build_pirep_fields(
     }
     f.insert("Bounces".into(), stats.bounce_count.to_string());
     f.insert("bounce_count".into(), stats.bounce_count.to_string());
+
+    // ---- Approach Stability + Rollout (Landing Analyzer Stage 1) ----
+    if let Some(sd) = stats.approach_vs_stddev_fpm {
+        f.insert("Approach V/S Stddev".into(), format!("{:.0} fpm", sd));
+        f.insert("approach_vs_stddev_fpm".into(), format!("{:.1}", sd));
+    }
+    if let Some(sd) = stats.approach_bank_stddev_deg {
+        f.insert("Approach Bank Stddev".into(), format!("{:.1}°", sd));
+        f.insert("approach_bank_stddev_deg".into(), format!("{:.2}", sd));
+    }
+    if let Some(meters) = stats.rollout_distance_m {
+        f.insert(
+            "Rollout Distance".into(),
+            format!("{:.0} m ({:.0} ft)", meters, meters * 3.2808),
+        );
+        f.insert("rollout_distance_m".into(), format!("{:.0}", meters));
+    }
 
     // ---- Runway correlation (Tier 2) ----
     if let Some(rw) = &stats.runway_match {
@@ -4358,10 +4544,21 @@ fn build_pirep_notes(flight: &ActiveFlight, stats: &FlightStats) -> String {
             let _ = writeln!(s, "  Crosswind     {:.0} kt {}", xw.abs(), side);
         }
         let _ = writeln!(s, "  Bounces       {}", stats.bounce_count);
+        if let Some(sd) = stats.approach_vs_stddev_fpm {
+            let _ = writeln!(s, "  Apr V/S σ     {:.0} fpm", sd);
+        }
+        if let Some(sd) = stats.approach_bank_stddev_deg {
+            let _ = writeln!(s, "  Apr Bank σ    {:.1}°", sd);
+        }
+        if let Some(m) = stats.rollout_distance_m {
+            let _ = writeln!(s, "  Rollout       {:.0} m", m);
+        }
         if let Some(score) = stats.landing_score {
+            let grade = letter_grade(score.numeric());
             let _ = writeln!(
                 s,
-                "  Score         {} ({})",
+                "  Grade         {} ({}, {}/100)",
+                grade,
                 score.label().to_uppercase(),
                 score.numeric()
             );
@@ -4589,15 +4786,17 @@ fn announce_landing_score(app: &AppHandle, flight: &ActiveFlight) {
             // grab the activity_log mutex without deadlocking via
             // re-entrant borrow.
             drop(stats);
+            let grade = letter_grade(score.numeric());
             log_activity_handle(
                 app,
                 level,
-                format!("Touchdown: {}", score.label()),
+                format!("Touchdown: {} ({})", grade, score.label()),
                 Some(format!(
-                    "V/S {:.0} fpm, G {:.2}{}",
+                    "V/S {:.0} fpm, G {:.2}{} — Score {}/100",
                     peak_vs,  // signed: negative = descent, matches the PIREP
                     peak_g,
                     bounce_part,
+                    score.numeric(),
                 )),
             );
             record_event(
