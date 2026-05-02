@@ -227,7 +227,7 @@ export function ActiveFlightPanel({ info, simSnapshot, onEnded }: Props) {
 
       {validationMissing !== null && (
         <ManualFileDialog
-          plannedArrival={info.arr_airport}
+          info={info}
           missing={validationMissing}
           onFiled={() => {
             setValidationMissing(null);

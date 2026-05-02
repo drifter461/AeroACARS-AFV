@@ -3440,16 +3440,32 @@ async fn consume_bid_best_effort(client: &Client, bid_id: i64) {
 ///   * Divert: planned EDDP→EDDF, actually landed EDDV. The pilot supplies
 ///     `divert_to = "EDDV"` and a `reason`; admin sees the divert tag in the
 ///     notes and adjusts the PIREP airports manually.
+///   * Sim disconnect mid-flight: the FSM never saw landing, so flight_time /
+///     fuel_used / landing_rate are all wrong. Pilot supplies the override
+///     fields below and we ship those instead of the (broken) FSM values.
 ///
-/// All optional fields end up in the PIREP notes with clear `[MANUAL]` /
-/// `[DIVERT]` tags so the admin reviewing the flight can act on them.
+/// Every override field is `Option<...>`; `None` falls back to whatever the
+/// FSM captured. All overrides also get tagged in the notes so the admin
+/// can see WHICH fields the pilot edited by hand.
+///
+/// `block_off_at_iso` / `block_on_at_iso` accept any RFC-3339 timestamp
+/// (typically `2026-05-02T15:30:00Z`); blank uses the FSM-captured time.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn flight_end_manual(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
     notes_override: Option<String>,
     divert_to: Option<String>,
     reason: Option<String>,
+    flight_time_minutes: Option<i32>,
+    block_fuel_kg: Option<f32>,
+    fuel_used_kg: Option<f32>,
+    distance_nm: Option<f64>,
+    cruise_level_ft: Option<i32>,
+    landing_rate_fpm: Option<f32>,
+    block_off_at_iso: Option<String>,
+    block_on_at_iso: Option<String>,
 ) -> Result<(), UiError> {
     let flight = {
         let mut guard = state.active_flight.lock().expect("active_flight lock");
@@ -3460,17 +3476,59 @@ async fn flight_end_manual(
     flight.stop.store(true, Ordering::Relaxed);
     let client = current_client(&state)?;
 
+    // Parse RFC-3339 block-off/on overrides if present. Anything that
+    // doesn't parse cleanly is dropped — we don't want a typo to
+    // silently file a PIREP with a bogus "1970" timestamp.
+    let block_off_override: Option<DateTime<Utc>> = block_off_at_iso
+        .as_deref()
+        .and_then(|s| {
+            if s.trim().is_empty() {
+                None
+            } else {
+                DateTime::parse_from_rfc3339(s.trim())
+                    .ok()
+                    .map(|dt| dt.with_timezone(&Utc))
+            }
+        });
+    let block_on_override: Option<DateTime<Utc>> = block_on_at_iso
+        .as_deref()
+        .and_then(|s| {
+            if s.trim().is_empty() {
+                None
+            } else {
+                DateTime::parse_from_rfc3339(s.trim())
+                    .ok()
+                    .map(|dt| dt.with_timezone(&Utc))
+            }
+        });
+
     let body = {
-        let stats = flight.stats.lock().expect("flight stats");
+        let mut stats = flight.stats.lock().expect("flight stats");
+
+        // Apply block-time overrides BEFORE building the body so the
+        // notes block + custom fields pick them up.
+        if let Some(off) = block_off_override {
+            stats.block_off_at = Some(off);
+        }
+        if let Some(on) = block_on_override {
+            stats.block_on_at = Some(on);
+        }
+        if let Some(kg) = block_fuel_kg.filter(|v| *v > 0.0) {
+            stats.block_fuel_kg = Some(kg);
+        }
+
         // Same flight-time / block-fuel / level / landing-rate / score
-        // mapping as the regular file path in `flight_end`. Manual
-        // filing intentionally still ships these even if some are
-        // None — phpVMS skips missing values cleanly thanks to
-        // `skip_serializing_if`.
-        let flight_time = match (stats.takeoff_at, stats.landing_at) {
-            (Some(t), Some(l)) if l > t => Some((l - t).num_minutes() as i32),
-            _ => Some(((Utc::now() - flight.started_at).num_minutes() as i32).max(0)),
-        };
+        // mapping as the regular file path, with manual-overrides
+        // taking precedence. phpVMS skips missing values cleanly
+        // thanks to `skip_serializing_if`.
+        let flight_time = flight_time_minutes
+            .filter(|m| *m >= 0)
+            .or_else(|| match (stats.takeoff_at, stats.landing_at) {
+                (Some(t), Some(l)) if l > t => Some((l - t).num_minutes() as i32),
+                _ => Some(
+                    ((Utc::now() - flight.started_at).num_minutes() as i32).max(0),
+                ),
+            });
         let fares = if flight.fares.is_empty() {
             None
         } else {
@@ -3486,21 +3544,31 @@ async fn flight_end_manual(
             )
         };
         // Block→remaining diff in kg, converted to pounds for phpVMS.
-        let fuel_used = match (stats.block_fuel_kg, stats.last_fuel_kg) {
-            (Some(b), Some(c)) if b > c => Some((b - c) as f64 * KG_TO_LB),
-            _ => None,
-        };
+        // Manual override (kg) wins over the FSM-derived diff.
+        let fuel_used = fuel_used_kg
+            .filter(|v| *v > 0.0)
+            .map(|kg| (kg as f64) * KG_TO_LB)
+            .or_else(|| match (stats.block_fuel_kg, stats.last_fuel_kg) {
+                (Some(b), Some(c)) if b > c => Some((b - c) as f64 * KG_TO_LB),
+                _ => None,
+            });
         let block_fuel = stats
             .block_fuel_kg
             .filter(|kg| *kg > 0.0)
             .map(|kg| (kg as f64) * KG_TO_LB);
-        let level = stats.peak_altitude_ft.map(|ft| {
-            let rounded = ((ft / 100.0).round() * 100.0) as i32;
-            rounded.max(0)
+        let level = cruise_level_ft.filter(|ft| *ft > 0).or_else(|| {
+            stats.peak_altitude_ft.map(|ft| {
+                let rounded = ((ft / 100.0).round() * 100.0) as i32;
+                rounded.max(0)
+            })
         });
-        let landing_rate = stats.landing_rate_fpm.map(|v| v as f64);
+        let landing_rate = landing_rate_fpm
+            .map(|v| v as f64)
+            .or_else(|| stats.landing_rate_fpm.map(|v| v as f64));
         let score = stats.landing_score.map(|s| s.numeric());
-        let distance_nm = stats.distance_nm;
+        let resolved_distance = distance_nm
+            .filter(|d| *d > 0.0)
+            .unwrap_or(stats.distance_nm);
         let fields = build_pirep_fields(&flight, &stats);
         let mut notes = build_pirep_notes(&flight, &stats);
         notes.push_str("\n\n[MANUAL FILE — auto-validation bypassed by pilot.]");
@@ -3523,6 +3591,42 @@ async fn flight_end_manual(
             notes.push_str("\n\nReason: ");
             notes.push_str(r);
         }
+
+        // List which fields the pilot manually overrode so the admin
+        // can review at a glance. Helps avoid silently mis-attributing
+        // FSM stats to manual entry.
+        let mut overrides: Vec<&'static str> = Vec::new();
+        if flight_time_minutes.is_some() {
+            overrides.push("flight_time");
+        }
+        if block_fuel_kg.is_some() {
+            overrides.push("block_fuel");
+        }
+        if fuel_used_kg.is_some() {
+            overrides.push("fuel_used");
+        }
+        if distance_nm.is_some() {
+            overrides.push("distance");
+        }
+        if cruise_level_ft.is_some() {
+            overrides.push("cruise_level");
+        }
+        if landing_rate_fpm.is_some() {
+            overrides.push("landing_rate");
+        }
+        if block_off_override.is_some() {
+            overrides.push("block_off_time");
+        }
+        if block_on_override.is_some() {
+            overrides.push("block_on_time");
+        }
+        if !overrides.is_empty() {
+            notes.push_str(&format!(
+                "\n\n[MANUAL OVERRIDES] {}",
+                overrides.join(", ")
+            ));
+        }
+
         if let Some(extra) = notes_override
             .as_ref()
             .map(|s| s.trim())
@@ -3535,7 +3639,7 @@ async fn flight_end_manual(
             flight_time,
             fuel_used,
             block_fuel,
-            distance: Some(distance_nm),
+            distance: Some(resolved_distance),
             level,
             landing_rate,
             score,
