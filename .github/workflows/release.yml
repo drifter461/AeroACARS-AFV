@@ -1,0 +1,89 @@
+name: Release
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  # ---- Per-platform build job ----
+  # Each runner builds the installer for its OS, signs it with our
+  # Ed25519 updater key, and uploads the artifacts (.exe / .dmg /
+  # .app.tar.gz, plus the matching .sig) to the GitHub release that
+  # `tauri-action` creates / updates for this tag.
+  build:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            args: --bundles nsis
+            runner-label: 'Windows x64 (NSIS)'
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+            args: --target aarch64-apple-darwin --bundles app,dmg
+            runner-label: 'macOS Apple Silicon (DMG)'
+
+    runs-on: ${{ matrix.platform }}
+    name: Build — ${{ matrix.runner-label }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: client/src-tauri -> target
+
+      - name: Install frontend deps
+        working-directory: client
+        run: npm ci
+
+      - name: Build + sign (Tauri)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: client
+          tagName: ${{ github.ref_name }}
+          releaseName: 'AeroACARS ${{ github.ref_name }}'
+          releaseBody: |
+            Auto-generated release. See [latest.json](https://github.com/MANFahrer-GF/AeroACARS/releases/latest/download/latest.json) for the updater manifest.
+
+            Pilots already on AeroACARS just see the in-app update banner — no manual download needed.
+          releaseDraft: true
+          prerelease: false
+          includeUpdaterJson: true
+          args: ${{ matrix.args }}
+
+  # ---- Finalise the release ----
+  # Once both per-platform builds finish, flip the draft release to
+  # public. `tauri-action` already merged the `latest.json` for both
+  # platforms thanks to `includeUpdaterJson: true`.
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Promote draft → public
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release edit "${{ github.ref_name }}" --draft=false --latest
