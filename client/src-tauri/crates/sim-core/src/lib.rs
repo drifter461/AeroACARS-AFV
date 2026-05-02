@@ -112,6 +112,11 @@ pub struct SimSnapshot {
     pub light_taxi: Option<bool>,
     pub light_nav: Option<bool>,
     pub light_logo: Option<bool>,
+    /// 3-state strobe selector: 0 = OFF, 1 = AUTO, 2 = ON. Set on
+    /// aircraft profiles whose LVar exposes the position (Fenix).
+    /// `None` when only the binary `light_strobe` is available, so
+    /// the activity log can fall back to ON/OFF labels.
+    pub strobe_state: Option<u8>,
 
     // ---- Autopilot ----
     pub autopilot_master: Option<bool>,

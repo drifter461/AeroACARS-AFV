@@ -885,7 +885,11 @@ fn telemetry_to_snapshot(t: Telemetry, simulator: Simulator) -> SimSnapshot {
 
     // Lights: Fenix uses overhead-LVars instead of the standard
     // SimVars, with selector positions (off / auto / on; nav-only /
-    // nav+logo). Translate to bools.
+    // nav+logo). Translate to bools for the binary pills, plus a
+    // separate `strobe_state` carrying the full 0/1/2 enum so the
+    // activity log can distinguish AUTO from ON (real pilots flip
+    // between those at runway entry/exit, and we'd lose the event
+    // if we collapsed everything to "Strobe lights ON").
     let (light_beacon, light_strobe, light_nav, light_logo) = if is_fenix {
         (
             t.fnx_beacon as i32 != 0,
@@ -895,6 +899,11 @@ fn telemetry_to_snapshot(t: Telemetry, simulator: Simulator) -> SimSnapshot {
         )
     } else {
         (t.light_beacon, t.light_strobe, t.light_nav, t.light_logo)
+    };
+    let strobe_state = if is_fenix {
+        Some(t.fnx_strobe.round().clamp(0.0, 2.0) as u8)
+    } else {
+        None
     };
 
     // Parking brake: Fenix routes through L:S_MIP_PARKING_BRAKE
@@ -1090,6 +1099,7 @@ fn telemetry_to_snapshot(t: Telemetry, simulator: Simulator) -> SimSnapshot {
         light_taxi: Some(t.light_taxi),
         light_nav: Some(light_nav),
         light_logo: Some(light_logo),
+        strobe_state,
         autopilot_master: Some(ap_master),
         autopilot_heading: Some(ap_hdg),
         autopilot_altitude: Some(ap_alt),

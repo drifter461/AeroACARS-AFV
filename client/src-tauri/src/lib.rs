@@ -592,6 +592,13 @@ struct FlightStats {
     last_logged_nav1: Option<f32>,
     last_logged_nav2: Option<f32>,
     last_logged_lights: Option<LightsState>,
+    /// 3-state strobe selector (0=OFF, 1=AUTO, 2=ON) for aircraft
+    /// addons that distinguish AUTO from ON. Lives separate from
+    /// `last_logged_lights.strobe` so we don't log a "Strobe lights
+    /// ON" entry on top of the more informative "Strobe lights AUTO"
+    /// one. Not persisted across resumes — change-detection state
+    /// always rebuilds from the first post-resume tick.
+    last_logged_strobe_state: Option<u8>,
     last_logged_ap: Option<ApState>,
     /// Debounce: when did we first observe the *current* AP master state?
     /// We only emit a "Autopilot ENGAGED/OFF" log entry if the new state
@@ -3824,9 +3831,39 @@ fn detect_telemetry_changes(app: &AppHandle, flight: &ActiveFlight, snap: &SimSn
     );
 
     // ---- Exterior lights
+    // Strobe is special: when the aircraft profile gives us the
+    // 3-state selector (`snap.strobe_state`), we log OFF/AUTO/ON so
+    // the AUTO ↔ ON transition at runway entry/exit is preserved.
+    // For aircraft that only expose the binary `light_strobe`, we
+    // fall through to the LightsState path below with plain ON/OFF
+    // labels.
+    let strobe_three_state_active = snap.strobe_state.is_some();
+    if let Some(state) = snap.strobe_state {
+        if stats.last_logged_strobe_state != Some(state) {
+            if stats.last_logged_strobe_state.is_some() {
+                let label = match state {
+                    0 => "OFF",
+                    1 => "AUTO",
+                    2 => "ON",
+                    _ => return,
+                };
+                log_activity_handle(
+                    app,
+                    ActivityLevel::Info,
+                    format!("Strobe lights {label}"),
+                    None,
+                );
+            }
+            stats.last_logged_strobe_state = Some(state);
+        }
+    }
+
     let lights = LightsState {
         landing: snap.light_landing.unwrap_or(false),
         beacon: snap.light_beacon.unwrap_or(false),
+        // Keep the binary state in the struct so the pill UI still
+        // works; the activity-log path below skips Strobe when the
+        // 3-state path is active to avoid double entries.
         strobe: snap.light_strobe.unwrap_or(false),
         taxi: snap.light_taxi.unwrap_or(false),
         nav: snap.light_nav.unwrap_or(false),
@@ -3835,14 +3872,19 @@ fn detect_telemetry_changes(app: &AppHandle, flight: &ActiveFlight, snap: &SimSn
     if stats.last_logged_lights != Some(lights) {
         if let Some(prev) = stats.last_logged_lights {
             // Log per-light transitions so the pilot sees exactly what changed.
-            let changes = [
+            let mut changes: Vec<(&str, bool, bool)> = vec![
                 ("Landing", prev.landing, lights.landing),
                 ("Beacon", prev.beacon, lights.beacon),
-                ("Strobe", prev.strobe, lights.strobe),
                 ("Taxi", prev.taxi, lights.taxi),
                 ("Nav", prev.nav, lights.nav),
                 ("Logo", prev.logo, lights.logo),
             ];
+            // Only include Strobe in the binary path when the 3-state
+            // selector isn't available; otherwise the dedicated
+            // OFF/AUTO/ON log entry above already covers it.
+            if !strobe_three_state_active {
+                changes.push(("Strobe", prev.strobe, lights.strobe));
+            }
             for (name, old, new) in changes {
                 if old != new {
                     log_activity_handle(

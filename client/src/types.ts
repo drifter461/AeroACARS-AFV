@@ -147,6 +147,9 @@ export interface SimSnapshot {
   light_taxi: boolean | null;
   light_nav: boolean | null;
   light_logo: boolean | null;
+  /** 3-state strobe selector — 0=OFF, 1=AUTO, 2=ON. null when only
+   *  the binary `light_strobe` is available. */
+  strobe_state: number | null;
   /** Autopilot state — same null semantics as lights. */
   autopilot_master: boolean | null;
   autopilot_heading: boolean | null;
