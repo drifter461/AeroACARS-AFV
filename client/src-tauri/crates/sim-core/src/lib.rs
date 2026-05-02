@@ -29,11 +29,26 @@ pub struct SimSnapshot {
     pub pitch_deg: f32,
     pub bank_deg: f32,
     pub vertical_speed_fpm: f32,
+    /// Body-frame velocity components in feet per second.
+    /// X = right (+) / left (−) component; Z = forward (+) / aft (−).
+    /// Used to compute touchdown sideslip natively
+    /// (`atan2(VEL_BODY_X, VEL_BODY_Z) × 180/π`) — same approach as
+    /// GEES. None for sims/addons that don't wire them.
+    pub velocity_body_x_fps: Option<f32>,
+    pub velocity_body_z_fps: Option<f32>,
 
     // Speeds
     pub groundspeed_kt: f32,
     pub indicated_airspeed_kt: f32,
     pub true_airspeed_kt: f32,
+    /// Body-frame wind components in knots. Positive
+    /// `aircraft_wind_x_kt` = wind from the right (= crosswind from
+    /// the right side). Positive `aircraft_wind_z_kt` = tailwind.
+    /// MSFS gives us these natively rotated to airframe axes —
+    /// saves us computing wind-vs-heading at PIREP time. None when
+    /// the SimVar isn't wired.
+    pub aircraft_wind_x_kt: Option<f32>,
+    pub aircraft_wind_z_kt: Option<f32>,
 
     // Forces & flags
     pub g_force: f32,

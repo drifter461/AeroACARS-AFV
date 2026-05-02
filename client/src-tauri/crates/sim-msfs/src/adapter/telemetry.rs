@@ -61,11 +61,23 @@ pub const TELEMETRY_FIELDS: &[TelemetryField] = &[
     F::f64("PLANE PITCH DEGREES", "degrees"),
     F::f64("PLANE BANK DEGREES", "degrees"),
     F::f64("VERTICAL SPEED", "feet per minute"),
+    /// Body-frame velocity. Used at touchdown to derive sideslip /
+    /// crab natively (atan2(VEL_BODY_X, VEL_BODY_Z) × 180/π) which is
+    /// what GEES does. Way more accurate than computing track from
+    /// successive lat/lon.
+    F::f64("VELOCITY BODY X", "feet per second"),
+    F::f64("VELOCITY BODY Z", "feet per second"),
     // ---- Speeds ----
     F::f64("GROUND VELOCITY", "knots"),
     F::f64("AIRSPEED INDICATED", "knots"),
     F::f64("AIRSPEED TRUE", "knots"),
     F::f64("G FORCE", "GForce"),
+    /// Body-frame wind components. Positive AIRCRAFT WIND X = wind
+    /// from the aircraft's right (= crosswind from the right side).
+    /// Positive AIRCRAFT WIND Z = tailwind. Sign convention per MSFS
+    /// SDK; we surface absolute headwind/crosswind in the PIREP.
+    F::f64("AIRCRAFT WIND X", "knots"),
+    F::f64("AIRCRAFT WIND Z", "knots"),
     // ---- Aircraft state ----
     F::bool("SIM ON GROUND"),
     F::bool("BRAKE PARKING POSITION"),
@@ -289,11 +301,19 @@ pub struct Telemetry {
     pub pitch_deg: f64,
     pub bank_deg: f64,
     pub vertical_speed_fpm: f64,
+    /// Body-frame velocity components in feet per second. Used to
+    /// compute sideslip / crab angle natively at touchdown.
+    pub velocity_body_x_fps: f64,
+    pub velocity_body_z_fps: f64,
 
     pub groundspeed_kt: f64,
     pub indicated_airspeed_kt: f64,
     pub true_airspeed_kt: f64,
     pub g_force: f64,
+    /// Body-frame wind components in knots. Positive aircraft_wind_x
+    /// = crosswind from the right; positive aircraft_wind_z = tailwind.
+    pub aircraft_wind_x_kt: f64,
+    pub aircraft_wind_z_kt: f64,
 
     pub on_ground: bool,
     pub parking_brake: bool,
@@ -632,11 +652,15 @@ impl Telemetry {
         pull_f64!(t.pitch_deg);
         pull_f64!(t.bank_deg);
         pull_f64!(t.vertical_speed_fpm);
+        pull_f64!(t.velocity_body_x_fps);
+        pull_f64!(t.velocity_body_z_fps);
 
         pull_f64!(t.groundspeed_kt);
         pull_f64!(t.indicated_airspeed_kt);
         pull_f64!(t.true_airspeed_kt);
         pull_f64!(t.g_force);
+        pull_f64!(t.aircraft_wind_x_kt);
+        pull_f64!(t.aircraft_wind_z_kt);
 
         pull_i32!(t.on_ground);
         pull_i32!(t.parking_brake);
@@ -1030,9 +1054,13 @@ fn telemetry_to_snapshot(t: Telemetry, simulator: Simulator) -> SimSnapshot {
         pitch_deg: t.pitch_deg as f32,
         bank_deg: t.bank_deg as f32,
         vertical_speed_fpm: t.vertical_speed_fpm as f32,
+        velocity_body_x_fps: Some(t.velocity_body_x_fps as f32),
+        velocity_body_z_fps: Some(t.velocity_body_z_fps as f32),
         groundspeed_kt: t.groundspeed_kt as f32,
         indicated_airspeed_kt: t.indicated_airspeed_kt as f32,
         true_airspeed_kt: t.true_airspeed_kt as f32,
+        aircraft_wind_x_kt: Some(t.aircraft_wind_x_kt as f32),
+        aircraft_wind_z_kt: Some(t.aircraft_wind_z_kt as f32),
         g_force: t.g_force as f32,
         on_ground: t.on_ground,
         parking_brake,

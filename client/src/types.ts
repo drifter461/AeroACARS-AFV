@@ -111,9 +111,17 @@ export interface SimSnapshot {
   pitch_deg: number;
   bank_deg: number;
   vertical_speed_fpm: number;
+  /** Body-frame velocity components (fps). Used for native sideslip
+   *  at touchdown. None when the SimVar isn't wired. */
+  velocity_body_x_fps: number | null;
+  velocity_body_z_fps: number | null;
   groundspeed_kt: number;
   indicated_airspeed_kt: number;
   true_airspeed_kt: number;
+  /** Body-frame wind components (knots). Positive aircraft_wind_x_kt
+   *  = crosswind from the right; positive aircraft_wind_z_kt = tailwind. */
+  aircraft_wind_x_kt: number | null;
+  aircraft_wind_z_kt: number | null;
   g_force: number;
   on_ground: boolean;
   parking_brake: boolean;

@@ -389,6 +389,17 @@ struct PersistedFlightStats {
     landing_lon: Option<f64>,
     #[serde(default)]
     landing_heading_true_deg: Option<f32>,
+    /// Headwind component at touchdown (knots). Positive = wind from
+    /// the front (= reduces required ground roll). Negative = tailwind.
+    /// Sourced from `AIRCRAFT WIND Z` (negated, since +Z is tailwind
+    /// in MSFS body-axis convention).
+    #[serde(default)]
+    landing_headwind_kt: Option<f32>,
+    /// Crosswind component at touchdown (knots). Positive = from the
+    /// right side; negative = from the left. Sourced from
+    /// `AIRCRAFT WIND X` (positive X is crosswind from right per MSFS).
+    #[serde(default)]
+    landing_crosswind_kt: Option<f32>,
 }
 
 impl PersistedFlightStats {
@@ -431,6 +442,8 @@ impl PersistedFlightStats {
             landing_lat: stats.landing_lat,
             landing_lon: stats.landing_lon,
             landing_heading_true_deg: stats.landing_heading_true_deg,
+            landing_headwind_kt: stats.landing_headwind_kt,
+            landing_crosswind_kt: stats.landing_crosswind_kt,
         }
     }
 
@@ -479,6 +492,8 @@ impl PersistedFlightStats {
         stats.landing_lat = self.landing_lat;
         stats.landing_lon = self.landing_lon;
         stats.landing_heading_true_deg = self.landing_heading_true_deg;
+        stats.landing_headwind_kt = self.landing_headwind_kt;
+        stats.landing_crosswind_kt = self.landing_crosswind_kt;
     }
 }
 
@@ -632,6 +647,13 @@ struct FlightStats {
     /// True heading at touchdown (used for runway-end disambiguation
     /// in the runway lookup; `landing_heading_deg` is *magnetic*).
     landing_heading_true_deg: Option<f32>,
+    /// Headwind (positive) / tailwind (negative) at touchdown in knots.
+    /// Sourced from `AIRCRAFT WIND Z` (negated). None when the SimVar
+    /// isn't wired or the flight resumed after touchdown.
+    landing_headwind_kt: Option<f32>,
+    /// Crosswind at touchdown in knots. Positive = from the right.
+    /// Sourced from `AIRCRAFT WIND X`.
+    landing_crosswind_kt: Option<f32>,
 
     // ---- METAR snapshots (Phase J.2) ----
     /// Raw METAR text captured at takeoff for the departure airport.
@@ -1023,62 +1045,11 @@ fn detent_label(detent: u8) -> &'static str {
     }
 }
 
-/// Compute sideslip / crab angle at touchdown by reconstructing the
-/// ground track from buffered samples and subtracting it from the
-/// reported true heading. Positive = aircraft nose right of track
-/// (right-crosswind crab), negative = nose left.
-///
-/// Returns `None` when the buffer doesn't have enough recent airborne
-/// samples spanning at least 200 ms — that happens on a resumed
-/// flight, on touch-and-go captures with already-on-ground samples,
-/// or when groundspeed is below 30 kt (vector noise dominates).
-///
-/// The track baseline is bounded to the last 500 ms of the buffer
-/// (`TOUCHDOWN_VS_WINDOW_MS`); a longer baseline is more stable but
-/// would average across the flare maneuver and bias the result.
-fn compute_sideslip_at_touchdown(
-    buffer: &std::collections::VecDeque<TelemetrySample>,
-    heading_true_deg: f32,
-    now: DateTime<Utc>,
-) -> Option<f32> {
-    let window_start = now - chrono::Duration::milliseconds(TOUCHDOWN_VS_WINDOW_MS);
-    // Use only airborne samples — once on the ground, "ground track"
-    // is just where the wheels point, so it'd cancel sideslip out.
-    let recent: Vec<&TelemetrySample> = buffer
-        .iter()
-        .filter(|s| s.at >= window_start && !s.on_ground)
-        .collect();
-    if recent.len() < 2 {
-        return None;
-    }
-    let first = recent.first()?;
-    let last = recent.last()?;
-    if (last.at - first.at).num_milliseconds() < 200 {
-        return None;
-    }
-    // Skip noise-dominated low-speed cases.
-    if last.groundspeed_kt < 30.0 {
-        return None;
-    }
-    // Initial bearing from `first` to `last` is the ground track
-    // direction over the window.
-    let lat1 = (first.lat).to_radians();
-    let lat2 = (last.lat).to_radians();
-    let dlon = (last.lon - first.lon).to_radians();
-    let y = dlon.sin() * lat2.cos();
-    let x = lat1.cos() * lat2.sin() - lat1.sin() * lat2.cos() * dlon.cos();
-    let track_deg = y.atan2(x).to_degrees();
-    let track_norm = ((track_deg % 360.0) + 360.0) % 360.0;
-    // Sideslip = heading − track, normalised to (−180..+180].
-    let mut diff = heading_true_deg as f64 - track_norm;
-    while diff > 180.0 {
-        diff -= 360.0;
-    }
-    while diff <= -180.0 {
-        diff += 360.0;
-    }
-    Some(diff as f32)
-}
+// (Old position-derived sideslip helper deleted — replaced by direct
+// `atan2(VEL_BODY_X, VEL_BODY_Z)` computation at the touchdown edge,
+// matching GEES. The native body-frame velocities are accurate to
+// the floating-point precision MSFS reports them at, no need to
+// reconstruct anything from successive lat/lon.)
 
 /// Render the full callsign as "DLH 155" (airline + space + number) when
 /// the airline ICAO is known, falling back to bare "155" otherwise.
@@ -3107,9 +3078,13 @@ fn spawn_touchdown_sampler(app: AppHandle, flight: Arc<ActiveFlight>) {
     tauri::async_runtime::spawn(async move {
         tracing::info!(pirep_id = %flight.pirep_id, "touchdown sampler started");
         loop {
-            // 33 ms ≈ 30 Hz target. The actual upper bound comes
-            // from how fast `current_snapshot` returns fresh data.
-            tokio::time::sleep(Duration::from_millis(33)).await;
+            // 20 ms = 50 Hz target — matches GEES (`SAMPLE_RATE = 20`),
+            // the only open-source reference impl that publishes its
+            // sample cadence. The actual upper bound comes from how
+            // fast `current_snapshot` returns fresh data; on a
+            // typical PC the SimConnect adapter ticks at the rendered
+            // frame rate (60-120 fps) so we never under-sample here.
+            tokio::time::sleep(Duration::from_millis(20)).await;
             if flight.stop.load(Ordering::Relaxed) {
                 break;
             }
@@ -3651,50 +3626,38 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
                     .unwrap_or(now);
                 stats.landing_at = Some(actual_td_at);
 
-                // V/S capture — BeatMyLanding-aligned (TouchdownWindowMs=500):
-                // pick the most-negative V/S from buffered samples
-                // within ±TOUCHDOWN_VS_WINDOW_MS/2 of the *actual*
-                // touchdown timestamp. NO airborne-only filter here:
-                // the strut-compression spike at first contact gives
-                // the most negative V/S, and that IS the touchdown
-                // firmness signal we want to surface. Within ±250 ms
-                // the gear hasn't rebounded yet, so we never pick up
-                // a positive bounce value.
+                // V/S capture — GEES-aligned: prefer the latched
+                // SimVar `PLANE TOUCHDOWN NORMAL VELOCITY` (already
+                // sign-corrected in the adapter). It's the cleanest
+                // signal because MSFS itself latches it at the
+                // physics frame of contact. Fallback chain only
+                // kicks in when the addon doesn't wire it:
                 //
-                // The latched SimVar `PLANE TOUCHDOWN NORMAL VELOCITY`
-                // is folded in alongside as the primary signal — our
-                // adapter inverts the sign so a stronger touchdown
-                // produces a more negative number, matching the
-                // VERTICAL SPEED convention. Live snapshot V/S is
-                // last-resort for resumed flights with empty buffer.
-                let half_window =
-                    chrono::Duration::milliseconds(TOUCHDOWN_VS_WINDOW_MS / 2);
-                let vs_window_start = actual_td_at - half_window;
-                let vs_window_end = actual_td_at + half_window;
-                let buffered_vs_min: f32 = stats
-                    .snapshot_buffer
-                    .iter()
-                    .filter(|s| s.at >= vs_window_start && s.at <= vs_window_end)
-                    .map(|s| s.vs_fpm)
-                    .fold(f32::INFINITY, f32::min);
-                let candidates = [
-                    snap.touchdown_vs_fpm.unwrap_or(f32::INFINITY),
+                //   1. Latched touchdown SimVar (primary, GEES uses this)
+                //   2. Most-negative V/S from buffered samples within
+                //      ±TOUCHDOWN_VS_WINDOW_MS/2 of the actual TD
+                //      timestamp (fallback for non-Fenix-style addons)
+                //   3. Live `vertical_speed_fpm` at the edge tick
+                //      (last resort, e.g. resumed flight with empty
+                //      buffer)
+                let touchdown_vs = if let Some(latched) = snap.touchdown_vs_fpm {
+                    latched
+                } else {
+                    let half_window =
+                        chrono::Duration::milliseconds(TOUCHDOWN_VS_WINDOW_MS / 2);
+                    let vs_window_start = actual_td_at - half_window;
+                    let vs_window_end = actual_td_at + half_window;
+                    let buffered_vs_min: f32 = stats
+                        .snapshot_buffer
+                        .iter()
+                        .filter(|s| s.at >= vs_window_start && s.at <= vs_window_end)
+                        .map(|s| s.vs_fpm)
+                        .fold(f32::INFINITY, f32::min);
                     if buffered_vs_min.is_finite() {
                         buffered_vs_min
                     } else {
-                        f32::INFINITY
-                    },
-                    snap.vertical_speed_fpm,
-                ];
-                let touchdown_vs = candidates
-                    .iter()
-                    .copied()
-                    .filter(|v| v.is_finite())
-                    .fold(f32::INFINITY, f32::min);
-                let touchdown_vs = if touchdown_vs.is_finite() {
-                    touchdown_vs
-                } else {
-                    snap.vertical_speed_fpm
+                        snap.vertical_speed_fpm
+                    }
                 };
                 stats.landing_rate_fpm = Some(touchdown_vs);
                 stats.landing_peak_vs_fpm = Some(touchdown_vs);
@@ -3747,14 +3710,33 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
                     })
                     .collect();
 
-                // Sideslip / crab angle at touchdown — heading_true minus
-                // ground track (computed from the last 500 ms of buffered
-                // lat/lon). Positive = aircraft nose right of track.
-                stats.touchdown_sideslip_deg = compute_sideslip_at_touchdown(
-                    &stats.snapshot_buffer,
-                    snap.heading_deg_true,
-                    actual_td_at,
-                );
+                // Sideslip / crab angle at touchdown — GEES-aligned:
+                //   sideslip = atan2(VEL_BODY_X, VEL_BODY_Z) × 180/π
+                // VEL_BODY_X is the right component of velocity in the
+                // aircraft's body frame; VEL_BODY_Z is the forward
+                // component. The ratio's arctangent IS the angle
+                // between the velocity vector and the nose. Native
+                // and exact — much better than reconstructing track
+                // from successive lat/lon. None when the SimVar isn't
+                // wired or the aircraft is essentially stopped (Z<3 fps
+                // ≈ 1.8 kt, vector noise dominates below that).
+                stats.touchdown_sideslip_deg = match (
+                    snap.velocity_body_x_fps,
+                    snap.velocity_body_z_fps,
+                ) {
+                    (Some(x), Some(z)) if z.abs() > 3.0 => {
+                        Some(x.atan2(z).to_degrees())
+                    }
+                    _ => None,
+                };
+
+                // Headwind / crosswind components at the touchdown
+                // frame, native from `AIRCRAFT WIND X/Z`. Z is signed
+                // such that positive = tailwind (wind blowing into the
+                // aircraft from behind), so headwind = -Z. X positive
+                // = wind from the right side.
+                stats.landing_headwind_kt = snap.aircraft_wind_z_kt.map(|z| -z);
+                stats.landing_crosswind_kt = snap.aircraft_wind_x_kt;
 
                 // Runway correlation. None when no runway lies within
                 // ~3 km of the touchdown coordinate. Sits next to
@@ -4072,6 +4054,20 @@ fn build_pirep_notes(flight: &ActiveFlight, stats: &FlightStats) -> String {
         }
         if let Some(slip) = stats.touchdown_sideslip_deg {
             let _ = writeln!(s, "  Sideslip      {:+.1}°", slip);
+        }
+        if let Some(hw) = stats.landing_headwind_kt {
+            // Positive = headwind, negative = tailwind. We swap the
+            // label rather than printing a negative number.
+            if hw >= 0.0 {
+                let _ = writeln!(s, "  Headwind      {:.0} kt", hw);
+            } else {
+                let _ = writeln!(s, "  Tailwind      {:.0} kt", -hw);
+            }
+        }
+        if let Some(xw) = stats.landing_crosswind_kt {
+            // Positive = from right, negative = from left.
+            let side = if xw >= 0.0 { "from right" } else { "from left" };
+            let _ = writeln!(s, "  Crosswind     {:.0} kt {}", xw.abs(), side);
         }
         let _ = writeln!(s, "  Bounces       {}", stats.bounce_count);
         if let Some(score) = stats.landing_score {
