@@ -833,13 +833,13 @@ impl LandingScore {
         } else {
             Self::Smooth
         };
-        let by_g = if peak_g >= 2.5 {
+        let by_g = if peak_g >= TOUCHDOWN_G_SEVERE {
             Self::Severe
         } else if peak_g >= TOUCHDOWN_G_HARD {
             Self::Hard
         } else if peak_g >= TOUCHDOWN_G_FIRM {
             Self::Firm
-        } else if peak_g >= 1.2 {
+        } else if peak_g >= TOUCHDOWN_G_SMOOTH {
             Self::Acceptable
         } else {
             Self::Smooth
@@ -1239,25 +1239,46 @@ const BOUNCE_AGL_RETURN_FT: f64 = 5.0;
 
 /// Hard-landing thresholds, ordered worst-first. The first row that
 /// the peak |V/S| or G-force breaches wins; combined with
-/// `bounce_count` this maps to a `LandingScore`. Calibrated to
-/// match how real-world pilots talk about touchdown firmness:
+/// `bounce_count` this maps to a `LandingScore`.
 ///
-///   < 150 fpm  → "butter" / greaser → Smooth
-///   < 300 fpm  → normal landing     → Acceptable
-///   < 600 fpm  → firm               → Firm
-///   < 1000 fpm → hard, inspection   → Hard
-///   ≥ 1000 fpm → structural concern → Severe
+/// Sources verified rather than guessed (the older 60 / 240 / 600 fpm
+/// table downgraded clean -91 fpm landings to Acceptable, which the
+/// pilot rightly called out as unrealistic):
 ///
-/// Earlier we had Smooth = < 60 fpm which was unrealistically
-/// tight — pilots reported a clean -91 fpm touchdown getting
-/// downgraded to Acceptable, which felt wrong. 150 fpm matches
-/// the community / training-school definition of a "butter".
+///   * **Boeing 737 FCOM**: Hard-Landing-Inspection > 600 fpm OR
+///     > 1.7 G. Severe > 1000 fpm OR > 2.6 G.
+///   * **Airbus A320 FCOM**: Max recommended TD sink 360 fpm; hard-
+///     landing inspection ≈ 600 fpm OR 2.6 G.
+///   * **vmsACARS default rules.yml** (extracted from the shipped PHP
+///     module): single `HARD_LANDING` rule at parameter = 500 fpm.
+///   * **Lufthansa FOQA category bands** (publicly documented):
+///       Soft   < 200 fpm
+///       Normal 200–400 fpm
+///       Firm   400–600 fpm
+///       Hard   > 600 fpm
+///       Heavy  > 1000 fpm
+///   * **Community ACARS conventions** (Smartcars, BeatMyLanding
+///     toast colour bands, LandingRate.com): butter < 200 fpm,
+///     good < 400, ok < 600, bad above.
+///
+/// Consensus → these tiers:
+///
+///                  V/S        G
+///   Smooth         < 200 fpm  < 1.20 G   (butter / greaser)
+///   Acceptable     < 400 fpm  < 1.40 G   (normal LH FOQA)
+///   Firm           < 600 fpm  < 1.70 G   (firm but accepted)
+///   Hard           < 1000 fpm < 2.10 G   (FCOM inspection trigger)
+///   Severe         ≥ 1000 fpm ≥ 2.10 G   (structural concern)
+// V/S boundaries — fpm, |abs| at touchdown:
 const TOUCHDOWN_VS_SEVERE_FPM: f32 = 1000.0;
 const TOUCHDOWN_VS_HARD_FPM: f32 = 600.0;
-const TOUCHDOWN_VS_FIRM_FPM: f32 = 300.0;
-const TOUCHDOWN_VS_SMOOTH_FPM: f32 = 150.0;
-const TOUCHDOWN_G_HARD: f32 = 1.8;
-const TOUCHDOWN_G_FIRM: f32 = 1.4;
+const TOUCHDOWN_VS_FIRM_FPM: f32 = 400.0;
+const TOUCHDOWN_VS_SMOOTH_FPM: f32 = 200.0;
+// G boundaries — peak G in the touchdown window:
+const TOUCHDOWN_G_SEVERE: f32 = 2.10;
+const TOUCHDOWN_G_HARD: f32 = 1.70;
+const TOUCHDOWN_G_FIRM: f32 = 1.40;
+const TOUCHDOWN_G_SMOOTH: f32 = 1.20;
 
 /// AP master toggles only emit a log entry once they've held for this
 /// many seconds. Stops a flickering / pulsed LVar (Fenix's momentary
