@@ -7,8 +7,11 @@ license.workspace = true
 description = "X-Plane 11/12 adapter — native UDP DataRef streaming (no plugin needed)"
 
 [dependencies]
+# Synchronous std::net + std::thread implementation — sim-xplane
+# does NOT depend on tokio. The Tauri side calls into us from sync
+# command handlers (where no async runtime is bound to the calling
+# thread) and an early tokio-based version crashed on sim switch.
 sim-core.workspace = true
-tokio = { workspace = true, features = ["net", "rt", "rt-multi-thread", "sync", "time", "macros"] }
 serde.workspace = true
 chrono.workspace = true
 thiserror.workspace = true

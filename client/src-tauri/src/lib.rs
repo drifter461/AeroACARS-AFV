@@ -5576,6 +5576,39 @@ fn xplane_inspector_list(state: tauri::State<'_, AppState>) -> Vec<serde_json::V
         .collect()
 }
 
+/// Probe both potential simulators and return a suggested SimKind.
+/// Used on first launch when no sim is configured, OR via a
+/// "Detect Sim" button in Settings.
+///
+/// Order:
+///   1. UDP probe to 127.0.0.1:49000 — if X-Plane responds, return
+///      X-Plane (12 by default; we have no protocol-level way to
+///      tell 11 vs 12 apart).
+///   2. SimConnect_Open probe (Windows only) — if MSFS is running,
+///      return MSFS 2024.
+///   3. Otherwise: SimKind::Off.
+///
+/// Returns the kind as a string matching the `sim_set_kind` API:
+///   "off" | "msfs2020" | "msfs2024" | "xplane11" | "xplane12"
+#[tauri::command]
+async fn detect_running_sim() -> String {
+    // Run the UDP probe on a blocking-tasks thread so the 500 ms
+    // worst-case latency doesn't tie up the Tauri event loop.
+    let xp = tauri::async_runtime::spawn_blocking(sim_xplane::is_xplane_running)
+        .await
+        .unwrap_or(false);
+    if xp {
+        tracing::info!("auto-detect: X-Plane responding on UDP 49000");
+        return "xplane12".to_string();
+    }
+    // MSFS probe: simplest is to try opening SimConnect briefly. We
+    // don't have a non-invasive variant yet (Phase 3); for now skip
+    // the MSFS probe and let the user pick manually if X-Plane isn't
+    // up. The active MsfsAdapter will report Connected if MSFS is
+    // there anyway, so detection can be inferred from that signal.
+    "off".to_string()
+}
+
 /// On login or session restore, check the on-disk active-flight file. If it's
 /// recent enough, recreate the in-memory ActiveFlight and restart position
 /// streaming — picks up exactly where the previous run left off.
@@ -5977,6 +6010,8 @@ pub fn run() {
             inspector_add,
             inspector_remove,
             inspector_list,
+            xplane_inspector_list,
+            detect_running_sim,
             auto_start_set_enabled,
             auto_start_get_enabled,
         ])

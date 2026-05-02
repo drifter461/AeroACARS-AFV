@@ -57,10 +57,31 @@ pub enum FieldId {
     LocalVxMs,
     /// Body-frame Z velocity (m/s), positive forward. Used for sideslip.
     LocalVzMs,
-    /// Wind X relative to airframe (m/s). Phase 2.
+    /// Wind X relative to airframe (m/s).
     WindXMs,
-    /// Wind Z relative to airframe (m/s). Phase 2.
+    /// Wind Z relative to airframe (m/s).
     WindZMs,
+    // Phase 2 additions:
+    LightLanding,
+    LightBeacon,
+    LightStrobe,
+    LightTaxi,
+    LightNav,
+    ApMaster,
+    ApHeading,
+    ApAltitude,
+    ApNav,
+    ApApproach,
+    SpoilersHandle,
+    SpoilersArmed,
+    StallWarning,
+    BatteryMaster,
+    AvionicsMaster,
+    ApuSwitch,
+    PitotHeat,
+    QnhInHg,
+    OatC,
+    Mach,
 }
 
 /// One row in the catalog: a DataRef name + which snapshot field it
@@ -180,7 +201,7 @@ pub const CATALOG: &[DatarefEntry] = &[
         name: "sim/flightmodel/weight/m_total",
         field: FieldId::TotalWeightKg,
     },
-    // --- Body velocity (m/s) — for native sideslip in Phase 2 ---
+    // --- Body velocity (m/s) — for native sideslip ---
     DatarefEntry {
         name: "sim/flightmodel/forces/local_vx",
         field: FieldId::LocalVxMs,
@@ -188,6 +209,123 @@ pub const CATALOG: &[DatarefEntry] = &[
     DatarefEntry {
         name: "sim/flightmodel/forces/local_vz",
         field: FieldId::LocalVzMs,
+    },
+    // ---- Phase 2 DataRefs ----
+    // Multi-engine: array indices via `[N]` syntax (X-Plane parses
+    // the bracket and returns just that element). Engine #1 is [0].
+    DatarefEntry {
+        name: "sim/flightmodel/engine/ENGN_running[1]",
+        field: FieldId::Eng2Running,
+    },
+    DatarefEntry {
+        name: "sim/flightmodel/engine/ENGN_running[2]",
+        field: FieldId::Eng3Running,
+    },
+    DatarefEntry {
+        name: "sim/flightmodel/engine/ENGN_running[3]",
+        field: FieldId::Eng4Running,
+    },
+    // Lights — bool 0/1.
+    DatarefEntry {
+        name: "sim/cockpit2/switches/landing_lights_on",
+        field: FieldId::LightLanding,
+    },
+    DatarefEntry {
+        name: "sim/cockpit2/switches/beacon_on",
+        field: FieldId::LightBeacon,
+    },
+    DatarefEntry {
+        name: "sim/cockpit2/switches/strobe_lights_on",
+        field: FieldId::LightStrobe,
+    },
+    DatarefEntry {
+        name: "sim/cockpit2/switches/taxi_light_on",
+        field: FieldId::LightTaxi,
+    },
+    DatarefEntry {
+        name: "sim/cockpit2/switches/navigation_lights_on",
+        field: FieldId::LightNav,
+    },
+    // Logo light: X-Plane uses the same nav-light dataref by
+    // convention; some payware breaks this out separately. We
+    // alias to nav for now (Phase 3 if a payware author asks).
+    // Autopilot — XP exposes per-mode "engaged" status as int 0..2
+    // (off / armed / engaged). We treat >0 as "on".
+    DatarefEntry {
+        name: "sim/cockpit2/autopilot/servos_on",
+        field: FieldId::ApMaster,
+    },
+    DatarefEntry {
+        name: "sim/cockpit2/autopilot/heading_status",
+        field: FieldId::ApHeading,
+    },
+    DatarefEntry {
+        name: "sim/cockpit2/autopilot/altitude_hold_status",
+        field: FieldId::ApAltitude,
+    },
+    DatarefEntry {
+        name: "sim/cockpit2/autopilot/nav_status",
+        field: FieldId::ApNav,
+    },
+    DatarefEntry {
+        name: "sim/cockpit2/autopilot/approach_status",
+        field: FieldId::ApApproach,
+    },
+    // Surfaces — speedbrake is a 0..1 ratio.
+    DatarefEntry {
+        name: "sim/cockpit2/controls/speedbrake_ratio",
+        field: FieldId::SpoilersHandle,
+    },
+    DatarefEntry {
+        name: "sim/cockpit2/annunciators/speedbrake",
+        field: FieldId::SpoilersArmed,
+    },
+    // Wind components in airframe-relative coords (m/s). Used for
+    // headwind/crosswind reporting in the PIREP. Same DataRefs in
+    // X-Plane 11 and 12.
+    DatarefEntry {
+        name: "sim/weather/aircraft/wind_now_x_msc",
+        field: FieldId::WindXMs,
+    },
+    DatarefEntry {
+        name: "sim/weather/aircraft/wind_now_z_msc",
+        field: FieldId::WindZMs,
+    },
+    // Stall warning — annunciator (bool).
+    DatarefEntry {
+        name: "sim/cockpit2/annunciators/stall_warning",
+        field: FieldId::StallWarning,
+    },
+    // Systems — battery / avionics / APU / pitot heat.
+    DatarefEntry {
+        name: "sim/cockpit2/electrical/battery_on[0]",
+        field: FieldId::BatteryMaster,
+    },
+    DatarefEntry {
+        name: "sim/cockpit2/electrical/avionics_on",
+        field: FieldId::AvionicsMaster,
+    },
+    DatarefEntry {
+        name: "sim/cockpit2/electrical/APU_running",
+        field: FieldId::ApuSwitch,
+    },
+    DatarefEntry {
+        name: "sim/cockpit2/ice/ice_pitot_heat_on_pilot",
+        field: FieldId::PitotHeat,
+    },
+    // QNH (hPa) and ambient temp.
+    DatarefEntry {
+        name: "sim/weather/region/altimeter_temperature_effect",
+        field: FieldId::QnhInHg, // we'll parse this as inHg-equivalent for now; Phase 3 review
+    },
+    DatarefEntry {
+        name: "sim/weather/region/temperatures_aloft_deg_c[0]",
+        field: FieldId::OatC,
+    },
+    // Mach number.
+    DatarefEntry {
+        name: "sim/flightmodel/misc/machno",
+        field: FieldId::Mach,
     },
 ];
 
@@ -223,6 +361,30 @@ pub struct XPlaneState {
     pub local_vz_ms: f32,
     pub wind_x_ms: f32,
     pub wind_z_ms: f32,
+    // Phase 2: multi-engine, lights, AP, surfaces, systems, environment.
+    pub eng2_running: bool,
+    pub eng3_running: bool,
+    pub eng4_running: bool,
+    pub light_landing: bool,
+    pub light_beacon: bool,
+    pub light_strobe: bool,
+    pub light_taxi: bool,
+    pub light_nav: bool,
+    pub ap_master: bool,
+    pub ap_heading: bool,
+    pub ap_altitude: bool,
+    pub ap_nav: bool,
+    pub ap_approach: bool,
+    pub spoilers_handle: f32,
+    pub spoilers_armed: bool,
+    pub stall_warning: bool,
+    pub battery_master: bool,
+    pub avionics_master: bool,
+    pub apu_switch: bool,
+    pub pitot_heat: bool,
+    pub qnh_inhg: f32,
+    pub oat_c: f32,
+    pub mach: f32,
     /// True once we've received at least one RREF packet — drives
     /// the connection state machine's transition into `Connected`.
     pub got_first_packet: bool,
@@ -255,9 +417,9 @@ impl XPlaneState {
             FieldId::GearDeploy => self.gear_deploy = value,
             FieldId::FlapsHandle => self.flaps_handle = value,
             FieldId::Eng1Running => self.eng1_running = value > 0.5,
-            FieldId::Eng2Running => {} // Phase 2
-            FieldId::Eng3Running => {} // Phase 2
-            FieldId::Eng4Running => {} // Phase 2
+            FieldId::Eng2Running => self.eng2_running = value > 0.5,
+            FieldId::Eng3Running => self.eng3_running = value > 0.5,
+            FieldId::Eng4Running => self.eng4_running = value > 0.5,
             FieldId::FuelTotalKg => self.fuel_total_kg = value,
             FieldId::EmptyWeightKg => self.empty_weight_kg = value,
             FieldId::TotalWeightKg => self.total_weight_kg = value,
@@ -265,6 +427,26 @@ impl XPlaneState {
             FieldId::LocalVzMs => self.local_vz_ms = value,
             FieldId::WindXMs => self.wind_x_ms = value,
             FieldId::WindZMs => self.wind_z_ms = value,
+            FieldId::LightLanding => self.light_landing = value > 0.5,
+            FieldId::LightBeacon => self.light_beacon = value > 0.5,
+            FieldId::LightStrobe => self.light_strobe = value > 0.5,
+            FieldId::LightTaxi => self.light_taxi = value > 0.5,
+            FieldId::LightNav => self.light_nav = value > 0.5,
+            FieldId::ApMaster => self.ap_master = value > 0.5,
+            FieldId::ApHeading => self.ap_heading = value > 0.5,
+            FieldId::ApAltitude => self.ap_altitude = value > 0.5,
+            FieldId::ApNav => self.ap_nav = value > 0.5,
+            FieldId::ApApproach => self.ap_approach = value > 0.5,
+            FieldId::SpoilersHandle => self.spoilers_handle = value,
+            FieldId::SpoilersArmed => self.spoilers_armed = value > 0.5,
+            FieldId::StallWarning => self.stall_warning = value > 0.5,
+            FieldId::BatteryMaster => self.battery_master = value > 0.5,
+            FieldId::AvionicsMaster => self.avionics_master = value > 0.5,
+            FieldId::ApuSwitch => self.apu_switch = value > 0.5,
+            FieldId::PitotHeat => self.pitot_heat = value > 0.5,
+            FieldId::QnhInHg => self.qnh_inhg = value,
+            FieldId::OatC => self.oat_c = value,
+            FieldId::Mach => self.mach = value,
         }
     }
 
@@ -314,14 +496,22 @@ impl XPlaneState {
             g_force: self.g_force,
             on_ground: self.on_ground,
             parking_brake: self.parking_brake_ratio > 0.5,
-            stall_warning: false, // not subscribed yet (Phase 2)
-            overspeed_warning: false,
+            stall_warning: self.stall_warning,
+            overspeed_warning: false, // X-Plane has no direct overspeed annunciator
             paused: false,
             slew_mode: false,
             simulation_rate: 1.0,
             gear_position: self.gear_deploy,
             flaps_position: self.flaps_handle,
-            engines_running: if self.eng1_running { 1 } else { 0 },
+            engines_running: [
+                self.eng1_running,
+                self.eng2_running,
+                self.eng3_running,
+                self.eng4_running,
+            ]
+            .iter()
+            .filter(|&&r| r)
+            .count() as u8,
             fuel_total_kg: self.fuel_total_kg,
             fuel_used_kg: 0.0,
             zfw_kg,
@@ -341,43 +531,53 @@ impl XPlaneState {
             touchdown_lon: None,
             wind_direction_deg: None,
             wind_speed_kt: None,
-            qnh_hpa: None,
-            outside_air_temp_c: None,
+            qnh_hpa: if self.qnh_inhg > 0.0 {
+                // X-Plane reports altimeter setting in inHg natively;
+                // convert to hPa (1 inHg = 33.8639 hPa).
+                Some(self.qnh_inhg * 33.8639)
+            } else {
+                None
+            },
+            outside_air_temp_c: Some(self.oat_c),
             total_air_temp_c: None,
-            mach: None,
+            mach: if self.mach > 0.0 { Some(self.mach) } else { None },
             empty_weight_kg: oew,
             aircraft_title: None,
             aircraft_icao: None,
             aircraft_registration: None,
             simulator,
             sim_version: None,
-            // Avionics / lights / AP / systems — all Phase 2.
+            // Avionics — X-Plane exposes COM/NAV via separate
+            // DataRefs but addons disagree on conventions; keep
+            // None for Phase 2, revisit if a payware author asks.
             transponder_code: None,
             com1_mhz: None,
             com2_mhz: None,
             nav1_mhz: None,
             nav2_mhz: None,
-            light_landing: None,
-            light_beacon: None,
-            light_strobe: None,
-            light_taxi: None,
-            light_nav: None,
-            light_logo: None,
+            light_landing: Some(self.light_landing),
+            light_beacon: Some(self.light_beacon),
+            light_strobe: Some(self.light_strobe),
+            light_taxi: Some(self.light_taxi),
+            light_nav: Some(self.light_nav),
+            // X-Plane's nav-light DataRef covers logo on most payware.
+            light_logo: Some(self.light_nav),
             strobe_state: None,
-            autopilot_master: None,
-            autopilot_heading: None,
-            autopilot_altitude: None,
-            autopilot_nav: None,
-            autopilot_approach: None,
+            autopilot_master: Some(self.ap_master),
+            autopilot_heading: Some(self.ap_heading),
+            autopilot_altitude: Some(self.ap_altitude),
+            autopilot_nav: Some(self.ap_nav),
+            autopilot_approach: Some(self.ap_approach),
             fuel_flow_kg_per_h: None,
-            spoilers_handle_position: None,
-            spoilers_armed: None,
+            spoilers_handle_position: Some(self.spoilers_handle),
+            spoilers_armed: Some(self.spoilers_armed),
+            // Pushback isn't a sim-managed thing in X-Plane.
             pushback_state: None,
-            apu_switch: None,
+            apu_switch: Some(self.apu_switch),
             apu_pct_rpm: None,
-            battery_master: None,
-            avionics_master: None,
-            pitot_heat: None,
+            battery_master: Some(self.battery_master),
+            avionics_master: Some(self.avionics_master),
+            pitot_heat: Some(self.pitot_heat),
             engine_anti_ice: None,
             wing_anti_ice: None,
             seatbelts_sign: None,

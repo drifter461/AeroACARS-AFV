@@ -2,6 +2,7 @@ import { useTranslation } from "react-i18next";
 import type { SimSnapshot, SimStatus } from "../types";
 import { SimInspector } from "./SimInspector";
 import { SimDiffSnapshot } from "./SimDiffSnapshot";
+import { XPlaneInspector } from "./XPlaneInspector";
 
 /**
  * Display-only sim telemetry panel for the Settings tab's debug
@@ -95,7 +96,14 @@ export function SimDebugPanel({ status }: Props) {
           <MassFuelGrid snap={snapshot} locale={i18n.language} />
           <SwitchStatePanel snap={snapshot} />
           <TouchdownGrid snap={snapshot} locale={i18n.language} />
-          <SimInspector />
+          {/* Sim-specific inspector. MSFS uses an add-watch list of
+              SimVars/LVars; X-Plane uses a fixed-at-compile-time
+              catalog of subscribed DataRefs (see XPlaneInspector). */}
+          {kind && kind.startsWith("xplane") ? (
+            <XPlaneInspector />
+          ) : (
+            <SimInspector />
+          )}
           <SimDiffSnapshot snapshot={snapshot} />
         </>
       )}

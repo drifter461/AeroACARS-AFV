@@ -44,9 +44,11 @@
 
 mod adapter;
 mod dataref;
+mod probe;
 mod rref;
 
 pub use adapter::{ConnectionState, XPlaneAdapter};
+pub use probe::is_xplane_running;
 
 /// Default UDP port X-Plane listens on. Subscriptions get sent here.
 pub const XPLANE_LISTEN_PORT: u16 = 49000;
