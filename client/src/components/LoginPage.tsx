@@ -91,14 +91,7 @@ export function LoginPage({ initialUrl: _initialUrl = "", onSuccess }: Props) {
             value={LOCKED_HOST}
             readOnly
             disabled
-            aria-describedby="locked-host-hint"
           />
-          <small id="locked-host-hint" className="field__hint">
-            🔒 Diese Build-Variante ist auf <code>german-sky-group.eu</code>{" "}
-            gesperrt. Forke das Repo und ändere{" "}
-            <code>ALLOWED_PHPVMS_HOST</code> in <code>src/lib.rs</code> für
-            deine eigene VA.
-          </small>
         </label>
 
         <label className="field">
