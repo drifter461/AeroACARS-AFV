@@ -180,6 +180,19 @@ async fn fetch_metar_once(icao: &str) -> Result<MetarSnapshot, MetarError> {
         Some(WindDir::Numeric(n)) => Some(n),
         _ => None,
     };
+    // CAVOK = "Ceiling And Visibility OK" = visibility ≥ 10 km AND
+    // no relevant clouds AND no significant weather. The aviation-
+    // weather API doesn't decode it into the structured `visib`
+    // field, so we string-match the raw METAR. 9999 m is the
+    // standard ICAO encoding for ≥ 10 km. Same fallback for "10SM"
+    // / "10+" which also mean "≥ 10 sm" (already handled in the
+    // Text branch but doubled here so addons / cleaner METAR
+    // sources don't regress).
+    let cavok = raw
+        .raw_ob
+        .as_deref()
+        .map(|s| s.contains("CAVOK"))
+        .unwrap_or(false);
     let visibility_m = match raw.visib {
         Some(Visibility::Numeric(n)) => Some((n * STATUTE_MILE_M) as u32),
         Some(Visibility::Text(t)) => {
@@ -192,6 +205,7 @@ async fn fetch_metar_once(icao: &str) -> Result<MetarSnapshot, MetarError> {
                 None
             }
         }
+        None if cavok => Some(9999),
         None => None,
     };
 
