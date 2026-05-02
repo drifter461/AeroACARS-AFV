@@ -1890,7 +1890,23 @@ async fn phpvms_get_bids(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<Bid>, UiError> {
     let client = current_client(&state)?;
-    Ok(client.get_bids().await?)
+    match client.get_bids().await {
+        Ok(bids) => Ok(bids),
+        Err(e) => {
+            // Log to the activity feed so the pilot can paste the
+            // technical detail without having to dig through console
+            // logs. Particularly useful for the BadResponse case where
+            // a single malformed bid breaks the whole list — we show
+            // exactly which field/path tripped the decoder.
+            log_activity(
+                &state,
+                ActivityLevel::Error,
+                "Bids konnten nicht geladen werden",
+                Some(format!("{e}")),
+            );
+            Err(e.into())
+        }
+    }
 }
 
 // ---- Active-flight persistence (for resume after crash/restart) ----

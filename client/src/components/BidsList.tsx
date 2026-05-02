@@ -290,9 +290,19 @@ export function BidsList({
       {state.kind === "empty" && <p className="bids__hint">{t("bids.empty")}</p>}
 
       {state.kind === "error" && (
-        <p className="bids__error" role="alert">
-          {t(errorKey(state.error.code))}
-        </p>
+        <div className="bids__error" role="alert">
+          <p>{t(errorKey(state.error.code))}</p>
+          {/* For decode failures the technical message tells us *which*
+              bid / field broke parsing — Ralf hit this on the Eurowings
+              test instance. Surface it in a <details> so the pilot can
+              copy/paste the snippet without it dominating the panel. */}
+          {state.error.code === "bad_response" && state.error.message && (
+            <details className="bids__error-details">
+              <summary>{t("bids.error.details_summary")}</summary>
+              <code>{state.error.message}</code>
+            </details>
+          )}
+        </div>
       )}
 
       {state.kind === "ready" && (

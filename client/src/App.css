@@ -2824,6 +2824,35 @@ input:disabled {
   font-size: 13px;
 }
 
+.bids__error p {
+  margin: 0;
+}
+
+.bids__error-details {
+  margin-top: 8px;
+  font-size: 12px;
+  opacity: 0.85;
+}
+
+.bids__error-details summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+.bids__error-details code {
+  display: block;
+  margin-top: 6px;
+  padding: 8px 10px;
+  background: color-mix(in srgb, var(--danger) 6%, var(--surface));
+  border-radius: 6px;
+  font-family: "SF Mono", "Cascadia Code", "Source Code Pro", Menlo, Consolas,
+    monospace;
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
+}
+
 .bids__list {
   list-style: none;
   margin: 0;

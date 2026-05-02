@@ -46,6 +46,38 @@ fn de_str_or_int<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
     d.deserialize_any(V)
 }
 
+/// Mirror of `de_str_or_int` for fields we want as `i64`. phpVMS encodes
+/// numeric ids inconsistently — sometimes as JSON numbers, sometimes as
+/// strings (notably on the Eurowings test instance). Tolerating both
+/// stops the entire bids list from failing to parse on a single bad row.
+fn de_int_or_str<'de, D: Deserializer<'de>>(d: D) -> Result<i64, D::Error> {
+    struct V;
+    impl<'de> Visitor<'de> for V {
+        type Value = i64;
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("integer or numeric string")
+        }
+        fn visit_i64<E: de::Error>(self, v: i64) -> Result<i64, E> {
+            Ok(v)
+        }
+        fn visit_u64<E: de::Error>(self, v: u64) -> Result<i64, E> {
+            Ok(v as i64)
+        }
+        fn visit_f64<E: de::Error>(self, v: f64) -> Result<i64, E> {
+            Ok(v as i64)
+        }
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<i64, E> {
+            v.trim()
+                .parse::<i64>()
+                .map_err(|_| E::custom(format!("not an integer: {v:?}")))
+        }
+        fn visit_string<E: de::Error>(self, v: String) -> Result<i64, E> {
+            self.visit_str(&v)
+        }
+    }
+    d.deserialize_any(V)
+}
+
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Error)]
@@ -155,9 +187,20 @@ pub struct Rank {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Airline {
+    /// phpVMS occasionally encodes integer ids as JSON strings on certain
+    /// resources (Eurowings test instance observed 2026-05-02). Use the
+    /// permissive int-or-string helper and convert to i64 here so the rest
+    /// of the codebase keeps an integer.
+    #[serde(deserialize_with = "de_int_or_str")]
     pub id: i64,
+    /// May be missing on legacy installs that haven't run the airline
+    /// migration — default to empty so the bid still loads.
+    #[serde(default)]
     pub icao: String,
+    #[serde(default)]
     pub iata: Option<String>,
+    /// Same defensive default as `icao`.
+    #[serde(default)]
     pub name: String,
     /// Optional URL to the airline's logo, exposed by phpVMS Airline resources.
     /// May be absent or empty depending on VA configuration.
@@ -318,8 +361,14 @@ pub struct Fare {
 /// `GET /api/user/bids` returns a list of these.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bid {
+    #[serde(deserialize_with = "de_int_or_str")]
     pub id: i64,
+    /// phpVMS sometimes returns the user id as a string (Eurowings test
+    /// instance, 2026-05-02). Be permissive on the wire.
+    #[serde(deserialize_with = "de_int_or_str")]
     pub user_id: i64,
+    /// Always a string in canonical phpVMS, but tolerant to int just in case.
+    #[serde(deserialize_with = "de_str_or_int")]
     pub flight_id: String,
     pub flight: Flight,
 }

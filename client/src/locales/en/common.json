@@ -459,7 +459,8 @@
       "rate_limited": "Too many requests — please wait a moment.",
       "server": "Server error while fetching bids.",
       "bad_response": "The server response could not be understood.",
-      "unknown": "Unexpected error while loading bids."
+      "unknown": "Unexpected error while loading bids.",
+      "details_summary": "Show technical details"
     }
   },
   "flight": {

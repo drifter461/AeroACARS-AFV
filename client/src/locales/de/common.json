@@ -459,7 +459,8 @@
       "rate_limited": "Zu viele Anfragen — bitte kurz warten.",
       "server": "Server-Fehler beim Abruf der Bids.",
       "bad_response": "Antwort konnte nicht verstanden werden.",
-      "unknown": "Unerwarteter Fehler beim Laden der Bids."
+      "unknown": "Unerwarteter Fehler beim Laden der Bids.",
+      "details_summary": "Technische Details anzeigen"
     }
   },
   "flight": {
