@@ -3615,26 +3615,49 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
             }
             if !was_on_ground && snap.on_ground {
                 next_phase = FlightPhase::Landing;
-                stats.landing_at = Some(now);
+
+                // CRITICAL: anchor the window around the ACTUAL
+                // touchdown moment, not `now`. The position-streamer
+                // ticks every 5 s during Landing phase, so the on-
+                // ground edge is detected up to 5 s after the wheels
+                // actually touched. The 30 Hz touchdown-sampler has
+                // been faithfully recording samples in the meantime,
+                // so the first on-ground sample in the buffer IS the
+                // touchdown moment. Using `now` instead would give a
+                // window over the rollout, where V/S is near zero —
+                // exactly the "-48 fpm" bug.
+                let actual_td_at = stats
+                    .snapshot_buffer
+                    .iter()
+                    .find(|s| s.on_ground)
+                    .map(|s| s.at)
+                    .unwrap_or(now);
+                stats.landing_at = Some(actual_td_at);
 
                 // V/S capture — BeatMyLanding-aligned (TouchdownWindowMs=500):
-                // pick the most-negative V/S from buffered samples within
-                // ±TOUCHDOWN_VS_WINDOW_MS/2 of the on-ground edge, filtered
-                // to airborne-only frames so we don't grab post-bounce
-                // positives. The latched SimVar `PLANE TOUCHDOWN NORMAL
-                // VELOCITY` is folded in alongside as a redundant signal —
-                // we take whichever is worst. Live snapshot VS is the
-                // last-resort fallback when the buffer is empty (resumed
-                // flight mid-rollout).
+                // pick the most-negative V/S from buffered samples
+                // within ±TOUCHDOWN_VS_WINDOW_MS/2 of the *actual*
+                // touchdown timestamp. NO airborne-only filter here:
+                // the strut-compression spike at first contact gives
+                // the most negative V/S, and that IS the touchdown
+                // firmness signal we want to surface. Within ±250 ms
+                // the gear hasn't rebounded yet, so we never pick up
+                // a positive bounce value.
+                //
+                // The latched SimVar `PLANE TOUCHDOWN NORMAL VELOCITY`
+                // is folded in alongside as the primary signal — our
+                // adapter inverts the sign so a stronger touchdown
+                // produces a more negative number, matching the
+                // VERTICAL SPEED convention. Live snapshot V/S is
+                // last-resort for resumed flights with empty buffer.
                 let half_window =
                     chrono::Duration::milliseconds(TOUCHDOWN_VS_WINDOW_MS / 2);
-                let vs_window_start = now - half_window;
-                let vs_window_end = now + half_window;
+                let vs_window_start = actual_td_at - half_window;
+                let vs_window_end = actual_td_at + half_window;
                 let buffered_vs_min: f32 = stats
                     .snapshot_buffer
                     .iter()
                     .filter(|s| s.at >= vs_window_start && s.at <= vs_window_end)
-                    .filter(|s| !s.on_ground)
                     .map(|s| s.vs_fpm)
                     .fold(f32::INFINITY, f32::min);
                 let candidates = [
@@ -3694,7 +3717,7 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
                     .snapshot_buffer
                     .iter()
                     .map(|s| TouchdownProfilePoint {
-                        t_ms: (s.at - now).num_milliseconds() as i32,
+                        t_ms: (s.at - actual_td_at).num_milliseconds() as i32,
                         vs_fpm: s.vs_fpm,
                         g_force: s.g_force,
                         agl_ft: s.agl_ft,
@@ -3713,7 +3736,7 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
                 stats.touchdown_sideslip_deg = compute_sideslip_at_touchdown(
                     &stats.snapshot_buffer,
                     snap.heading_deg_true,
-                    now,
+                    actual_td_at,
                 );
 
                 // Runway correlation. None when no runway lies within

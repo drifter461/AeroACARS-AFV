@@ -293,8 +293,18 @@ fn run_dispatch(
                             // so consumers see a unified snapshot.
                             if let Some(td) = *shared.touchdown.lock().unwrap() {
                                 if !td.is_uninitialised() {
+                                    // PLANE TOUCHDOWN NORMAL VELOCITY in MSFS
+                                    // returns the touchdown impact velocity as
+                                    // a POSITIVE magnitude (verified against
+                                    // LandingToast: pilot lands at -234 fpm,
+                                    // SimVar reports +234). Conventional V/S
+                                    // notation is negative for descent, so we
+                                    // negate. Take the absolute value first to
+                                    // be defensive against odd addons that
+                                    // might report signed — we always want a
+                                    // descent (negative) value at touchdown.
                                     snap.touchdown_vs_fpm =
-                                        Some((td.vs_fps * 60.0) as f32);
+                                        Some(-((td.vs_fps * 60.0).abs()) as f32);
                                     snap.touchdown_pitch_deg = Some(td.pitch_deg as f32);
                                     snap.touchdown_bank_deg = Some(td.bank_deg as f32);
                                     snap.touchdown_heading_mag_deg =
