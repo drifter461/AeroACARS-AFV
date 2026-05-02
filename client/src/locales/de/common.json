@@ -104,7 +104,7 @@
     "debug_mode_hint": "Zeigt im Dashboard die vollständige Telemetrie (Position, Höhe, Speeds, Lage, G-Belastung). Im normalen Betrieb nicht nötig."
   },
   "status": {
-    "phpvms": "phpVMS",
+    "phpvms": "GSG",
     "phpvms_connected": "Verbunden",
     "phpvms_disconnected": "Nicht verbunden",
     "simulator": "Simulator",
@@ -128,9 +128,9 @@
     "commit_unknown": "(Entwicklungs-Build)"
   },
   "login": {
-    "title": "Mit phpVMS verbinden",
-    "description": "Geben Sie die URL Ihrer phpVMS-Seite und Ihren API-Key ein. Der Schlüssel wird sicher im Anmeldeinformationsspeicher Ihres Betriebssystems hinterlegt und niemals im Klartext auf der Festplatte gespeichert.",
-    "url_label": "phpVMS-Seiten-URL",
+    "title": "Mit German Sky Group verbinden",
+    "description": "Gib deinen phpVMS-API-Key ein. Der Schlüssel wird sicher im Anmeldeinformationsspeicher von Windows hinterlegt — nicht im Klartext auf der Festplatte.",
+    "url_label": "Server",
     "url_placeholder": "https://meine-va.example.com",
     "api_key_label": "API-Schlüssel",
     "api_key_placeholder": "Zu finden in Ihrem Pilotenprofil",
@@ -378,7 +378,7 @@
   "bids": {
     "title": "Meine gebuchten Flüge",
     "loading": "Flüge werden geladen…",
-    "empty": "Sie haben aktuell keine gebuchten Flüge. Buchen Sie einen Flug auf Ihrer phpVMS-Seite und klicken Sie hier auf „Aktualisieren“, dann erscheint er.",
+    "empty": "Du hast aktuell keine gebuchten Flüge. Buche einen Flug auf german-sky-group.eu und klicke hier auf „Aktualisieren“, dann erscheint er.",
     "refresh": "Aktualisieren",
     "flight_time": "Geplante Flugzeit",
     "distance": "Distanz",

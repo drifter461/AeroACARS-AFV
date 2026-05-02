@@ -11,7 +11,7 @@ import { AboutPanel } from "./components/AboutPanel";
 import { UpdateBanner } from "./components/UpdateBanner";
 import { LiveRecordingIndicator } from "./components/LiveRecordingIndicator";
 import { useSimSession } from "./hooks/useSimSession";
-import type { ActiveFlightInfo, LoginResult } from "./types";
+import type { ActiveFlightInfo, AppInfo, LoginResult } from "./types";
 
 type SessionStatus =
   | { kind: "loading" }
@@ -57,6 +57,27 @@ function saveAutoStart(value: boolean) {
   localStorage.setItem(AUTO_START_STORAGE_KEY, value ? "1" : "0");
 }
 
+/**
+ * Map a SimKind string to the brand label shown on the top-right
+ * status pill. Pilots want to see WHICH sim is connected, not the
+ * generic word "Simulator". Falls back to "SIM" when nothing is
+ * selected so the pill never goes blank.
+ */
+function simKindLabel(kind: string | undefined): string {
+  switch (kind) {
+    case "msfs2024":
+    case "msfs2020":
+      return "MSFS";
+    case "xplane11":
+    case "xplane12":
+      return "X-PLANE";
+    case "off":
+      return "SIM OFF";
+    default:
+      return "SIM";
+  }
+}
+
 function App() {
   const { t } = useTranslation();
   const [theme, setTheme] = useState<Theme>(() => getInitialTheme());
@@ -65,7 +86,26 @@ function App() {
   const [debugMode, setDebugMode] = useState<boolean>(() => loadDebugMode());
   const [autoFile, setAutoFile] = useState<boolean>(() => loadAutoFile());
   const [autoStart, setAutoStart] = useState<boolean>(() => loadAutoStart());
+  const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
   const { status: simStatus, snapshot: simSnapshot } = useSimSession();
+
+  // Fetch the version string once on mount so the header can display
+  // it next to the title (with a red separator). Non-critical — falls
+  // back to silently hiding the version label if the call fails.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const info = await invoke<AppInfo>("app_info");
+        if (!cancelled) setAppInfo(info);
+      } catch {
+        // ignore
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Sync the persisted auto-start flag to the Rust backend on every
   // mount/change. Backend default is OFF; localStorage is the source
@@ -180,7 +220,15 @@ function App() {
       <UpdateBanner />
       <header className="app__header">
         <div className="app__brand">
-          <h1>{t("app.name")}</h1>
+          <h1>
+            {t("app.name")}
+            {appInfo && (
+              <>
+                <span className="app__version-divider" aria-hidden="true" />
+                <span className="app__version">v{appInfo.version}</span>
+              </>
+            )}
+          </h1>
           <p className="tagline">{t("app.tagline")}</p>
         </div>
         <div className="app__status-pills">
@@ -210,7 +258,7 @@ function App() {
             }
           >
             <span className="status-pill__dot" />
-            {t("status.simulator")}
+            {simKindLabel(simStatus?.kind)}
           </span>
           {activeFlight && (
             <LiveRecordingIndicator
