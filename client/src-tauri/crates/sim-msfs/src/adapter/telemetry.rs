@@ -61,10 +61,10 @@ pub const TELEMETRY_FIELDS: &[TelemetryField] = &[
     F::f64("PLANE PITCH DEGREES", "degrees"),
     F::f64("PLANE BANK DEGREES", "degrees"),
     F::f64("VERTICAL SPEED", "feet per minute"),
-    /// Body-frame velocity. Used at touchdown to derive sideslip /
-    /// crab natively (atan2(VEL_BODY_X, VEL_BODY_Z) × 180/π) which is
-    /// what GEES does. Way more accurate than computing track from
-    /// successive lat/lon.
+    // Body-frame velocity. Used at touchdown to derive sideslip /
+    // crab natively (atan2(VEL_BODY_X, VEL_BODY_Z) × 180/π) which is
+    // what GEES does. Way more accurate than computing track from
+    // successive lat/lon.
     F::f64("VELOCITY BODY X", "feet per second"),
     F::f64("VELOCITY BODY Z", "feet per second"),
     // ---- Speeds ----
@@ -72,10 +72,10 @@ pub const TELEMETRY_FIELDS: &[TelemetryField] = &[
     F::f64("AIRSPEED INDICATED", "knots"),
     F::f64("AIRSPEED TRUE", "knots"),
     F::f64("G FORCE", "GForce"),
-    /// Body-frame wind components. Positive AIRCRAFT WIND X = wind
-    /// from the aircraft's right (= crosswind from the right side).
-    /// Positive AIRCRAFT WIND Z = tailwind. Sign convention per MSFS
-    /// SDK; we surface absolute headwind/crosswind in the PIREP.
+    // Body-frame wind components. Positive AIRCRAFT WIND X = wind
+    // from the aircraft's right (= crosswind from the right side).
+    // Positive AIRCRAFT WIND Z = tailwind. Sign convention per MSFS
+    // SDK; we surface absolute headwind/crosswind in the PIREP.
     F::f64("AIRCRAFT WIND X", "knots"),
     F::f64("AIRCRAFT WIND Z", "knots"),
     // ---- Aircraft state ----
@@ -99,10 +99,10 @@ pub const TELEMETRY_FIELDS: &[TelemetryField] = &[
     F::f64("AMBIENT WIND VELOCITY", "knots"),
     F::f64("KOHLSMAN SETTING MB", "millibars"),
     F::f64("AMBIENT TEMPERATURE", "celsius"),
-    /// Total Air Temperature — what an aircraft thermometer measures
-    /// (TAT > OAT in flight due to compression heating).
+    // Total Air Temperature — what an aircraft thermometer measures
+    // (TAT > OAT in flight due to compression heating).
     F::f64("TOTAL AIR TEMPERATURE", "celsius"),
-    /// Mach number — current aircraft Mach. 0..1 transonic, >1 supersonic.
+    // Mach number — current aircraft Mach. 0..1 transonic, >1 supersonic.
     F::f64("AIRSPEED MACH", "mach"),
     // ---- Avionics (Phase 5 / SU2-safe standard SimVars) ----
     // All wired by Asobo's simulation core regardless of aircraft;
@@ -136,38 +136,38 @@ pub const TELEMETRY_FIELDS: &[TelemetryField] = &[
     F::f64("ENG FUEL FLOW PPH:4", "pounds per hour"),
 
     // ---- Surfaces ----
-    /// 0..1, position of the spoiler / speed-brake handle.
+    // 0..1, position of the spoiler / speed-brake handle.
     F::f64("SPOILERS HANDLE POSITION", "percent over 100"),
-    /// Auto-spoilers armed for landing (separate from physical handle).
+    // Auto-spoilers armed for landing (separate from physical handle).
     F::bool("SPOILERS ARMED"),
 
     // ---- Pushback ----
-    /// Enum: 0 = Straight, 1 = Left, 2 = Right, 3 = No Pushback.
-    /// MSFS itself drives this — we use it as the authoritative
-    /// "pushback finished" signal in the FSM, since the simple
-    /// "moving + engines on = TaxiOut" trigger fires while the tug
-    /// is still pushing the aircraft. Value 3 means the tug has
-    /// disconnected (or the pilot used Ctrl+P to stop), which is
-    /// when we should advance to TaxiOut.
+    // Enum: 0 = Straight, 1 = Left, 2 = Right, 3 = No Pushback.
+    // MSFS itself drives this — we use it as the authoritative
+    // "pushback finished" signal in the FSM, since the simple
+    // "moving + engines on = TaxiOut" trigger fires while the tug
+    // is still pushing the aircraft. Value 3 means the tug has
+    // disconnected (or the pilot used Ctrl+P to stop), which is
+    // when we should advance to TaxiOut.
     F::f64("PUSHBACK STATE", "Enum"),
 
     // ---- Systems ----
-    /// APU master switch (0 = off, 1 = on).
+    // APU master switch (0 = off, 1 = on).
     F::bool("APU SWITCH"),
-    /// APU N (RPM) percentage 0..100. Useful to distinguish "starting"
-    /// from "running" — the switch is on long before the APU is up.
+    // APU N (RPM) percentage 0..100. Useful to distinguish "starting"
+    // from "running" — the switch is on long before the APU is up.
     F::f64("APU PCT RPM", "percent"),
-    /// Battery #1 master. Most aircraft only have one battery exposed.
+    // Battery #1 master. Most aircraft only have one battery exposed.
     F::bool("ELECTRICAL MASTER BATTERY:1"),
     F::bool("AVIONICS MASTER SWITCH"),
     F::bool("PITOT HEAT"),
-    /// Engine anti-ice — sampled per engine, combined to "any-on" in
-    /// the snapshot mapping so the UI just shows one indicator.
+    // Engine anti-ice — sampled per engine, combined to "any-on" in
+    // the snapshot mapping so the UI just shows one indicator.
     F::bool("ENG ANTI ICE:1"),
     F::bool("ENG ANTI ICE:2"),
     F::bool("ENG ANTI ICE:3"),
     F::bool("ENG ANTI ICE:4"),
-    /// Wing / structural deice (Airbus calls this WING ANTI ICE).
+    // Wing / structural deice (Airbus calls this WING ANTI ICE).
     F::bool("STRUCTURAL DEICE SWITCH"),
 
     // ---- FBW A32NX LVars ----

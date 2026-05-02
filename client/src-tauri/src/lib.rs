@@ -509,6 +509,16 @@ impl PersistedFlightStats {
 /// correlation). Sampled at ~30 Hz so a 5-second buffer holds ~150
 /// entries — cheap, but rich enough to produce a per-Touchdown-ms
 /// V/S curve identical to what BeatMyLanding ships.
+// Several fields here aren't read post-Tier-3 refactor — they were
+// the inputs to the old `compute_sideslip_at_touchdown` helper which
+// we replaced with the native `atan2(VEL_BODY_X, VEL_BODY_Z)` path.
+// We keep them in the buffer because the touchdown_profile mapping
+// in step_flight reads them when freezing the profile points (see
+// `t_ms`, `vs_fpm`, `g_force`, `agl_ft` etc. all consumed there),
+// and `lat`/`lon` are kept as a fallback hook in case we ever need
+// to derive sideslip from successive positions for a sim that
+// doesn't expose body velocity.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 struct TelemetrySample {
     at: DateTime<Utc>,
@@ -791,15 +801,26 @@ struct FlightStats {
     /// Autobrake setting label ("OFF" / "LO" / "MED" / "MAX") for
     /// the activity log. Reset on every flight.
     last_logged_autobrake: Option<String>,
-    /// FCU selected values — debounced so a knob-spin doesn't fire a
-    /// log entry per click.
+    // FCU debounce state — kept around for the planned switch to the
+    // standard `AUTOPILOT * VAR` SimVars (the Fenix LVar variant
+    // proved unreliable as encoder click counters; we don't log
+    // them for now). The four `last_logged_*` + `pending_*` fields
+    // get re-wired when fcu_debounce() is called again.
+    #[allow(dead_code)]
     last_logged_fcu_alt: Option<i32>,
+    #[allow(dead_code)]
     last_logged_fcu_hdg: Option<i32>,
+    #[allow(dead_code)]
     last_logged_fcu_spd: Option<i32>,
+    #[allow(dead_code)]
     last_logged_fcu_vs: Option<i32>,
+    #[allow(dead_code)]
     pending_fcu_alt: Option<(i32, DateTime<Utc>)>,
+    #[allow(dead_code)]
     pending_fcu_hdg: Option<(i32, DateTime<Utc>)>,
+    #[allow(dead_code)]
     pending_fcu_spd: Option<(i32, DateTime<Utc>)>,
+    #[allow(dead_code)]
     pending_fcu_vs: Option<(i32, DateTime<Utc>)>,
 }
 
@@ -5155,9 +5176,16 @@ fn log_three_state_change(
 
 /// Debounced logger for FCU encoder displays. Each tick, the pilot
 /// might be turning the knob — we don't want a "Selected ALT 36000"
+///
+/// Currently unused — the call sites were removed when we dropped
+/// the Fenix `L:E_FCU_*` LVar logging (those returned encoder
+/// click counts, not engineering values). Kept because we plan to
+/// revive it for the standard `AUTOPILOT * VAR` SimVars. Once the
+/// new wiring lands, drop the `#[allow(dead_code)]` below.
 /// for every click on the way from 12000 to 36000. We hold the new
 /// value for FCU_DEBOUNCE_SECS, and only emit the log entry once it
 /// has held steady for that long.
+#[allow(dead_code)]
 fn fcu_debounce(
     app: &AppHandle,
     snap_value: Option<i32>,

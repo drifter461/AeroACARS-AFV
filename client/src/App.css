@@ -118,6 +118,76 @@ body {
   align-items: center;
 }
 
+/* Update-available button — sits inline next to the status pills.
+   Replaces the old full-width banner that pushed all content down. */
+.update-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 5px 12px;
+  border-radius: 6px;
+  border: 1px solid #2563eb;
+  background: #2563eb;
+  color: white;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+.update-button:hover {
+  background: #1d4ed8;
+  border-color: #1d4ed8;
+}
+.update-button__icon {
+  font-size: 13px;
+  line-height: 1;
+}
+
+.update-modal__backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 24px;
+}
+.update-modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 20px 22px;
+  width: 100%;
+  max-width: 480px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+}
+.update-modal__title {
+  margin: 0 0 12px 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+.update-modal__notes {
+  margin: 0 0 16px 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-line;
+}
+.update-modal__progress {
+  margin: 12px 0;
+  font-size: 12px;
+  font-family: var(--font-mono, monospace);
+  color: var(--text-muted);
+}
+.update-modal__actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
 .status-pill {
   display: inline-flex;
   align-items: center;

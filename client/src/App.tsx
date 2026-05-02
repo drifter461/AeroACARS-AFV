@@ -8,7 +8,7 @@ import { BriefingView } from "./components/BriefingView";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { ActivityLogPanel } from "./components/ActivityLogPanel";
 import { AboutPanel } from "./components/AboutPanel";
-import { UpdateBanner } from "./components/UpdateBanner";
+import { UpdateButton } from "./components/UpdateButton";
 import { LiveRecordingIndicator } from "./components/LiveRecordingIndicator";
 import { useSimSession } from "./hooks/useSimSession";
 import type { ActiveFlightInfo, LoginResult } from "./types";
@@ -198,13 +198,13 @@ function App() {
 
   return (
     <main className="app">
-      <UpdateBanner />
       <header className="app__header">
         <div className="app__brand">
           <h1>{t("app.name")}</h1>
           <p className="tagline">{t("app.tagline")}</p>
         </div>
         <div className="app__status-pills">
+          <UpdateButton />
           <span
             className={`status-pill status-pill--${
               phpvmsConnected ? "online" : "offline"
