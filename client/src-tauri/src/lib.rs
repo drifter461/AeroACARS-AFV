@@ -1077,6 +1077,129 @@ fn format_callsign(airline_icao: &str, flight_number: &str) -> String {
     }
 }
 
+/// Render an Option<f32> as kg with sensible "n/a" fallback for the
+/// activity-log detail string. Used by the fuel/weight diagnostics.
+fn fmt_kg(v: Option<f32>) -> String {
+    match v {
+        Some(n) if n > 0.0 => format!("{:.0} kg", n),
+        Some(_) | None => "n/a".to_string(),
+    }
+}
+fn fmt_kg_f64(v: Option<f64>) -> String {
+    match v {
+        Some(n) if n > 0.0 => format!("{:.0} kg", n),
+        Some(_) | None => "n/a".to_string(),
+    }
+}
+
+/// Emit a fuel/weight diagnostic line into the activity log at the
+/// phase transitions where AeroACARS captures values into PIREP
+/// fields. Lets the pilot verify after the fact what the app saw.
+///
+/// The four meaningful transitions:
+///   * Pushback / TaxiOut → "Block fuel" capture window closes (well,
+///     it's a running peak, but this is when the pilot rolls off the
+///     stand and the value should be locked in).
+///   * Takeoff           → TOW + takeoff fuel snapshotted into stats.
+///   * Landing           → LDW + landing fuel snapshotted.
+///   * BlocksOn          → final fuel + computed Fuel Used.
+///
+/// Other phases produce no entry.
+fn log_fuel_weight_at_phase(
+    app: &AppHandle,
+    flight: &ActiveFlight,
+    phase: FlightPhase,
+    snap: &SimSnapshot,
+) {
+    // Take ALL values out under the lock, then drop it before calling
+    // log_activity_handle (which reaches into AppState for the activity
+    // log mutex — never hold two mutexes across an external call).
+    let (
+        block_fuel,
+        takeoff_fuel,
+        takeoff_weight,
+        landing_fuel,
+        landing_weight,
+        last_fuel,
+    ) = {
+        let stats = flight.stats.lock().expect("flight stats");
+        (
+            stats.block_fuel_kg,
+            stats.takeoff_fuel_kg,
+            stats.takeoff_weight_kg,
+            stats.landing_fuel_kg,
+            stats.landing_weight_kg,
+            stats.last_fuel_kg,
+        )
+    };
+
+    let (message, detail) = match phase {
+        FlightPhase::Pushback | FlightPhase::TaxiOut => {
+            // Block fuel is a running peak — at this point we expect
+            // it to roughly match `snap.fuel_total_kg` unless the
+            // pilot just defueled. ZFW/payload/empty come straight
+            // from the SimVar block.
+            (
+                "Fuel & Weight @ Block-off".to_string(),
+                Some(format!(
+                    "Block fuel {} | Live fuel {:.0} kg | ZFW {} | Payload {} | OEW {} | Total {}",
+                    fmt_kg(block_fuel),
+                    snap.fuel_total_kg,
+                    fmt_kg(snap.zfw_kg),
+                    fmt_kg(snap.payload_kg),
+                    fmt_kg(snap.empty_weight_kg),
+                    fmt_kg(snap.total_weight_kg),
+                )),
+            )
+        }
+        FlightPhase::Takeoff => {
+            (
+                "Fuel & Weight @ Takeoff".to_string(),
+                Some(format!(
+                    "Takeoff fuel {} | TOW {} | Block fuel was {}",
+                    fmt_kg(takeoff_fuel),
+                    fmt_kg_f64(takeoff_weight),
+                    fmt_kg(block_fuel),
+                )),
+            )
+        }
+        FlightPhase::Landing => {
+            (
+                "Fuel & Weight @ Landing".to_string(),
+                Some(format!(
+                    "Landing fuel {} | LDW {} | TOW was {}",
+                    fmt_kg(landing_fuel),
+                    fmt_kg_f64(landing_weight),
+                    fmt_kg_f64(takeoff_weight),
+                )),
+            )
+        }
+        FlightPhase::BlocksOn => {
+            // Fuel Used = block fuel (peak before takeoff) minus
+            // current fuel. Only show when both are valid and
+            // block > current — otherwise the math is meaningless
+            // (e.g. defuel during taxi, fuel SimVar missing).
+            let fuel_used = match (block_fuel, last_fuel) {
+                (Some(b), Some(c)) if b > 0.0 && b > c => Some(b - c),
+                _ => None,
+            };
+            (
+                "Fuel & Weight @ Block-on".to_string(),
+                Some(format!(
+                    "Final fuel {} | Fuel used {} | Landing fuel was {}",
+                    fmt_kg(last_fuel),
+                    fmt_kg(fuel_used),
+                    fmt_kg(landing_fuel),
+                )),
+            )
+        }
+        // No diagnostic for other phase transitions.
+        _ => return,
+    };
+
+    log_activity_handle(app, ActivityLevel::Info, message, detail);
+}
+
 // ---- Activity log ----
 
 /// How many position-streamer ticks between persistence flushes. Stats
@@ -3166,6 +3289,14 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                         snap.altitude_msl_ft, snap.groundspeed_kt, snap.altitude_agl_ft
                     )),
                 );
+                // Diagnostic fuel/weight snapshot at the four phases
+                // where the values get captured into PIREP fields.
+                // Lets the pilot verify what the app saw — especially
+                // useful with Fenix where TOTAL WEIGHT / ZFW / payload
+                // sometimes report 0 and the pilot can't tell from
+                // the PIREP alone whether the SimVar was missing or
+                // the addon hadn't finished loading at capture time.
+                log_fuel_weight_at_phase(&app, &flight, new_phase, &snap);
                 record_event(
                     &app,
                     &flight.pirep_id,
