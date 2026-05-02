@@ -1435,11 +1435,33 @@ const BOUNCE_AGL_RETURN_FT: f64 = 5.0;
 /// ≈ 10-15 min — plenty to cover even a long ILS approach.
 const APPROACH_BUFFER_MAX: usize = 120;
 
-/// Groundspeed (kt) at which we consider the rollout finished. Used
-/// to finalise `rollout_distance_m`. Aircraft don't spend time
-/// between 5 kt and full stop on the runway — they exit to taxi or
-/// brake to a halt.
+/// Primary rollout-end trigger: groundspeed at which we consider the
+/// pilot has finished using the runway and is about to clear at a
+/// high-speed taxiway exit. Real pilots almost never decelerate to a
+/// full stop on the runway — they brake to ~40 kt and turn off at the
+/// next exit. Using a 40 kt threshold gives a "runway distance used"
+/// metric that matches what other ACARS tools (BeatMyLanding,
+/// vmsACARS) and FOQA reports show.
+///
+/// Source for 40 kt: ICAO Doc 9981 (Procedures for Air Navigation
+/// Services — Aerodromes) recommends rapid-exit taxiways be designed
+/// for a 65 km/h (≈ 35 kt) exit speed; FAA AC 150/5300-13B uses 60 kt
+/// for high-speed RETs but pilots routinely brake further to ~40 kt
+/// before committing to the turn.
+const ROLLOUT_EXIT_GS_KT: f32 = 40.0;
+
+/// Secondary trigger: full stop on the runway (rare in practice — long
+/// rwys at uncontrolled fields, GA touch-and-go's gone wrong). Kept
+/// as a hard floor so a pilot who really does brake to a stop still
+/// gets a finalised metric.
 const ROLLOUT_STOP_GS_KT: f32 = 5.0;
+
+/// Tertiary trigger: heading has rotated this many degrees from the
+/// touchdown heading, meaning the aircraft has clearly turned onto a
+/// taxiway and is no longer using the runway. Stops the accumulator
+/// from counting the taxi-out distance against the rollout figure.
+/// Computed signed (wraparound-safe) and compared in absolute value.
+const ROLLOUT_HEADING_DEVIATION_DEG: f32 = 30.0;
 
 /// Hard-landing thresholds, ordered worst-first. The first row that
 /// the peak |V/S| or G-force breaches wins; combined with
@@ -4449,10 +4471,41 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
                 }
                 stats.rollout_last_lat = Some(snap.lat);
                 stats.rollout_last_lon = Some(snap.lon);
-                if snap.groundspeed_kt < ROLLOUT_STOP_GS_KT && snap.on_ground {
+
+                // Three independent finalisation triggers — whichever
+                // fires first wins. See the constants near the top of
+                // this file for the rationale on each threshold.
+                let exit_speed_reached =
+                    snap.groundspeed_kt < ROLLOUT_EXIT_GS_KT && snap.on_ground;
+                let full_stop = snap.groundspeed_kt < ROLLOUT_STOP_GS_KT && snap.on_ground;
+                let turned_off_runway = match stats.landing_heading_true_deg {
+                    Some(td_heading) => {
+                        // Wrap-around-safe signed delta in (-180, 180].
+                        let mut diff = snap.heading_deg_true - td_heading;
+                        while diff > 180.0 {
+                            diff -= 360.0;
+                        }
+                        while diff <= -180.0 {
+                            diff += 360.0;
+                        }
+                        diff.abs() > ROLLOUT_HEADING_DEVIATION_DEG
+                    }
+                    None => false,
+                };
+
+                if exit_speed_reached || full_stop || turned_off_runway {
                     stats.rollout_finalized = true;
+                    let reason = if turned_off_runway {
+                        "turned off centerline"
+                    } else if full_stop {
+                        "full stop"
+                    } else {
+                        "exit speed reached"
+                    };
                     tracing::info!(
                         meters = stats.rollout_distance_m.unwrap_or(0.0),
+                        gs_kt = snap.groundspeed_kt,
+                        reason,
                         "rollout finalised"
                     );
                 }
@@ -4744,11 +4797,12 @@ fn build_pirep_fields(
         f.insert("approach_bank_stddev_deg".into(), format!("{:.2}", sd));
     }
     if let Some(meters) = stats.rollout_distance_m {
-        f.insert(
-            "Rollout Distance".into(),
-            format!("{:.0} m ({:.0} ft)", meters, meters * 3.2808),
-        );
+        let feet = meters * 3.28084;
+        f.insert("Rollout Distance".into(), format!("{:.0} ft", feet));
+        // Keep the legacy snake_case field in metres for back-compat
+        // with existing VA scripts; add the ft variant alongside.
         f.insert("rollout_distance_m".into(), format!("{:.0}", meters));
+        f.insert("rollout_distance_ft".into(), format!("{:.0}", feet));
     }
 
     // ---- SimBrief OFP plan + fuel-efficiency (Landing Analyzer Stage 2) ----
@@ -5012,7 +5066,7 @@ fn build_pirep_notes(flight: &ActiveFlight, stats: &FlightStats) -> String {
             let _ = writeln!(s, "  Apr Bank σ    {:.1}°", sd);
         }
         if let Some(m) = stats.rollout_distance_m {
-            let _ = writeln!(s, "  Rollout       {:.0} m", m);
+            let _ = writeln!(s, "  Rollout       {:.0} ft", m * 3.28084);
         }
         if let Some(score) = stats.landing_score {
             let grade = letter_grade(score.numeric());

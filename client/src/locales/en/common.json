@@ -56,6 +56,7 @@
     "centerline_offset": "Centerline offset",
     "past_threshold": "Past threshold",
     "rollout": "Rollout distance",
+    "runway_used_pct": "Runway used",
     "fuel": "Fuel",
     "plan_burn": "Plan",
     "actual_burn": "Actual",

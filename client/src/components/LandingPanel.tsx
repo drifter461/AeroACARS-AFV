@@ -362,7 +362,7 @@ function RunwayDiagram({ rw }: { rw: LandingRunwayMatch }) {
         fontSize="10"
         fill="currentColor"
       >
-        {Math.abs(rw.centerline_distance_m).toFixed(1)} m {rw.side.toLowerCase()}
+        {rw.centerline_distance_abs_ft.toFixed(0)} ft {rw.side.toLowerCase()}
       </text>
     </svg>
   );
@@ -724,7 +724,7 @@ function LandingDetail({
             <div>
               <dt>{t("landing.centerline_offset")}</dt>
               <dd>
-                {Math.abs(record.runway_match.centerline_distance_m).toFixed(1)} m{" "}
+                {record.runway_match.centerline_distance_abs_ft.toFixed(0)} ft{" "}
                 {record.runway_match.side.toLowerCase()}
               </dd>
             </div>
@@ -741,9 +741,23 @@ function LandingDetail({
             {record.rollout_distance_m != null && (
               <div>
                 <dt>{t("landing.rollout")}</dt>
-                <dd>{record.rollout_distance_m.toFixed(0)} m</dd>
+                <dd>{(record.rollout_distance_m * 3.28084).toFixed(0)} ft</dd>
               </div>
             )}
+            {record.runway_match.length_ft > 0 &&
+              record.rollout_distance_m != null && (
+                <div>
+                  <dt>{t("landing.runway_used_pct")}</dt>
+                  <dd>
+                    {(
+                      ((record.rollout_distance_m * 3.28084) /
+                        record.runway_match.length_ft) *
+                      100
+                    ).toFixed(0)}
+                    %
+                  </dd>
+                </div>
+              )}
           </dl>
         </section>
       )}
