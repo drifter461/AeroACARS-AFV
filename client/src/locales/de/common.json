@@ -3,10 +3,6 @@
     "name": "AeroACARS",
     "tagline": "ACARS für phpVMS 7"
   },
-  "phase": {
-    "title": "Phase 1 — Grundgerüst",
-    "description": "Das Tauri-Skeleton steht. Login, Simulator-Anbindung und PIREP-Übermittlung folgen als Nächstes."
-  },
   "tabs": {
     "dashboard": "Dashboard",
     "cockpit": "Cockpit",
@@ -174,13 +170,12 @@
     "off_hint": "Simulator-Anbindung ist deaktiviert.",
     "idle_hint": "Warte auf den Simulator…",
     "connecting_hint": "Warte auf den Simulator… der Adapter verbindet sich automatisch, sobald er läuft.",
-    "xplane_phase2": "X-Plane-Unterstützung kommt in Phase 2 — die Auswahl ist gespeichert, aber noch keine Verbindung möglich.",
     "kinds": {
       "off": "Aus",
       "msfs2024": "MSFS 2024",
       "msfs2020": "MSFS 2020",
-      "xplane11": "X-Plane 11 (Phase 2)",
-      "xplane12": "X-Plane 12 (Phase 2)"
+      "xplane11": "X-Plane 11",
+      "xplane12": "X-Plane 12"
     },
     "yes": "Ja",
     "no": "Nein",

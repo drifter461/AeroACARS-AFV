@@ -91,11 +91,6 @@ export function AboutPanel() {
             needed).
           </li>
           <li>
-            <strong>vmsACARS</strong> — Reference for phpVMS API
-            patterns (correct bid-delete endpoint, ACARS PHP module
-            routes).
-          </li>
-          <li>
             <strong>Tauri 2 + React + Rust</strong> — App framework.
           </li>
           <li>
@@ -116,7 +111,6 @@ export function AboutPanel() {
           <li>Boeing 737 FCOM — Hard-Landing inspection trigger</li>
           <li>Airbus A320 FCOM — TD sink rate / inspection criteria</li>
           <li>Lufthansa FOQA — Public category bands</li>
-          <li>vmsACARS rules.yml — Default 500 fpm hard-landing rule</li>
         </ul>
       </div>
 

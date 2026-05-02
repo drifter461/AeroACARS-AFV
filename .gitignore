@@ -115,3 +115,8 @@ tmp/
 *.p8
 *.mobileprovision
 notarize-output.txt
+
+# ===== Tauri updater signing keys =====
+# Private key NEVER commits — needed to sign releases. Public key DOES commit (in tauri.conf.json).
+client/aeroacars-updater.key
+client/aeroacars-updater.key.pub

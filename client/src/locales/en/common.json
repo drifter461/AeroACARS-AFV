@@ -3,10 +3,6 @@
     "name": "AeroACARS",
     "tagline": "ACARS for phpVMS 7"
   },
-  "phase": {
-    "title": "Phase 1 — Foundation",
-    "description": "The Tauri scaffold is in place. Login, simulator integration, and PIREP submission arrive next."
-  },
   "tabs": {
     "dashboard": "Dashboard",
     "cockpit": "Cockpit",
@@ -174,13 +170,12 @@
     "off_hint": "Simulator integration is disabled.",
     "idle_hint": "Waiting for the simulator…",
     "connecting_hint": "Waiting for the simulator… the adapter will connect automatically once it starts.",
-    "xplane_phase2": "X-Plane support arrives in Phase 2 — your choice is saved, but no connection yet.",
     "kinds": {
       "off": "Off",
       "msfs2024": "MSFS 2024",
       "msfs2020": "MSFS 2020",
-      "xplane11": "X-Plane 11 (Phase 2)",
-      "xplane12": "X-Plane 12 (Phase 2)"
+      "xplane11": "X-Plane 11",
+      "xplane12": "X-Plane 12"
     },
     "yes": "Yes",
     "no": "No",

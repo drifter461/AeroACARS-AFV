@@ -1471,8 +1471,22 @@ fn app_info() -> AppInfo {
     }
 }
 
+/// Hardcoded phpVMS host this build is locked to. Pre-1.0 we ship
+/// AeroACARS as a German Sky Group internal beta; opening the
+/// app to other VAs (config-driven URL) is a Phase-3 task once
+/// the core is hardened. The login UI ignores whatever URL the
+/// user types and always uses this — the input field stays for
+/// continuity but the value is overwritten before validation.
+const ALLOWED_PHPVMS_HOST: &str = "german-sky-group.eu";
+
 /// Authenticate against a phpVMS site. On success: stores key in OS keyring,
 /// writes URL to site config, and caches the live `Client` in `AppState`.
+///
+/// Domain is locked to `ALLOWED_PHPVMS_HOST` for this build. The
+/// `url` argument is rewritten to `https://{ALLOWED_PHPVMS_HOST}`
+/// regardless of what the UI sent. Pre-1.0 we don't want pilots
+/// pointing AeroACARS at random phpVMS instances and reporting
+/// bugs that aren't ours.
 #[tauri::command]
 async fn phpvms_login(
     app: AppHandle,
@@ -1480,13 +1494,17 @@ async fn phpvms_login(
     url: String,
     api_key: String,
 ) -> Result<LoginResult, UiError> {
-    let conn = Connection::new(&url, api_key.trim())?;
+    // Hard-lock the host. We allow http/https variants and any path
+    // suffix from the input but always force the canonical hostname.
+    let _ = url; // input field is decorative for now
+    let locked_url = format!("https://{ALLOWED_PHPVMS_HOST}");
+    let conn = Connection::new(&locked_url, api_key.trim())?;
     let client = Client::new(conn)?;
     let profile = client.get_profile().await?;
 
     secrets::store_api_key(KEYRING_ACCOUNT, api_key.trim())
         .map_err(|e| UiError::new("keyring", e.to_string()))?;
-    write_site_config(&app, &SiteConfig { url: url.clone() })?;
+    write_site_config(&app, &SiteConfig { url: locked_url.clone() })?;
 
     let base_url = client.connection().base_url().to_string();
     *state.client.lock().expect("client mutex") = Some(client.clone());
@@ -1529,7 +1547,7 @@ async fn phpvms_load_session(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<Option<LoginResult>, UiError> {
-    let Some(cfg) = read_site_config(&app)? else {
+    let Some(_cfg) = read_site_config(&app)? else {
         return Ok(None);
     };
     let Some(api_key) = secrets::load_api_key(KEYRING_ACCOUNT)
@@ -1538,7 +1556,11 @@ async fn phpvms_load_session(
         return Ok(None);
     };
 
-    let conn = Connection::new(&cfg.url, &api_key)?;
+    // Force the locked host even if the persisted config has an old
+    // URL from a development build that allowed arbitrary phpVMS
+    // instances. See `ALLOWED_PHPVMS_HOST` for the rationale.
+    let locked_url = format!("https://{ALLOWED_PHPVMS_HOST}");
+    let conn = Connection::new(&locked_url, &api_key)?;
     let client = Client::new(conn)?;
     match client.get_profile().await {
         Ok(profile) => {
@@ -5971,6 +5993,8 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(app_state)
         .setup(|app| {
             // Resolve the activity-log persistence path now that we

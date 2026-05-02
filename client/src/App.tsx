@@ -8,6 +8,7 @@ import { BriefingView } from "./components/BriefingView";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { ActivityLogPanel } from "./components/ActivityLogPanel";
 import { AboutPanel } from "./components/AboutPanel";
+import { UpdateBanner } from "./components/UpdateBanner";
 import { LiveRecordingIndicator } from "./components/LiveRecordingIndicator";
 import { useSimSession } from "./hooks/useSimSession";
 import type { ActiveFlightInfo, LoginResult } from "./types";
@@ -176,6 +177,7 @@ function App() {
 
   return (
     <main className="app">
+      <UpdateBanner />
       <header className="app__header">
         <div className="app__brand">
           <h1>{t("app.name")}</h1>

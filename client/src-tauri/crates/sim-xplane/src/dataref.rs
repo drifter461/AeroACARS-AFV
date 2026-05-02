@@ -175,22 +175,22 @@ pub const CATALOG: &[DatarefEntry] = &[
         name: "sim/flightmodel2/controls/flap_handle_deploy_ratio",
         field: FieldId::FlapsHandle,
     },
-    // --- Engines (running flag per engine, array index syntax
-    //     unsupported in raw RREF — we'd subscribe `[0]`, `[1]` etc
-    //     but X-Plane doesn't index into arrays via name string; we
-    //     therefore subscribe each engine via the per-index DataRef
-    //     name `sim/flightmodel/engine/ENGN_running`, which when
-    //     subscribed without bracket returns the FIRST element only.
-    //     For Phase 1 we accept "first engine running" as a proxy
-    //     for "any engine running" and will fix this in Phase 2 by
-    //     using the indexable DataRef variant). ---
+    // --- Engines: explicit array index per engine. The unbracketed
+    //     `ENGN_running` was unreliable (returned 0 even when engine 1
+    //     was running on a 2-engine heavy — verified via live test).
+    //     Bracket-suffix syntax IS supported by RREF: X-Plane parses
+    //     `[N]` and returns just that array slot.
     DatarefEntry {
-        name: "sim/flightmodel/engine/ENGN_running",
+        name: "sim/flightmodel/engine/ENGN_running[0]",
         field: FieldId::Eng1Running,
     },
-    // --- Weight & fuel (kg native) ---
+    // --- Weight & fuel (kg native).
+    //     `acf_m_fuel_total` is the MAX TANK CAPACITY, not the
+    //     current onboard fuel weight (verified via live test: full
+    //     tank reported as 0 kg). Use the live `flightmodel/weight`
+    //     DataRef instead. ---
     DatarefEntry {
-        name: "sim/aircraft/weight/acf_m_fuel_total",
+        name: "sim/flightmodel/weight/m_fuel_total",
         field: FieldId::FuelTotalKg,
     },
     DatarefEntry {

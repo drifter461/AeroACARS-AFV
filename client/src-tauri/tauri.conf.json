@@ -39,8 +39,17 @@
     "resources": {
       "crates/sim-msfs/ffi/lib/SimConnect.dll": "SimConnect.dll"
     },
+    "createUpdaterArtifacts": true,
     "publisher": "AeroACARS Project",
     "shortDescription": "Cross-platform ACARS client for phpVMS 7",
     "longDescription": "AeroACARS connects phpVMS 7 with MSFS 2020/2024 and X-Plane 11/12, recording flights, streaming live position data, and submitting full PIREPs with detailed runway and landing analysis."
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/MANFahrer-GF/AeroACARS/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDREM0E0NzUxQzBGOTg0MDgKUldRSWhQbkFVVWM2VFFnMzJqRTVtM0pvQ285QTJPbFJBRWtIMXdUR3BDRkdtQWFFbm5lZzNiM2kK"
+    }
   }
 }
