@@ -1,6 +1,6 @@
 export type Theme = "dark" | "light";
 
-const STORAGE_KEY = "cloudeacars.theme";
+const STORAGE_KEY = "aeroacars.theme";
 
 export function getInitialTheme(): Theme {
   const stored = localStorage.getItem(STORAGE_KEY);

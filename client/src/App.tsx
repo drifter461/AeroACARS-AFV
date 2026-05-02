@@ -18,8 +18,8 @@ type SessionStatus =
 
 type Tab = "cockpit" | "briefing" | "log" | "settings";
 
-const DEBUG_STORAGE_KEY = "cloudeacars.debug";
-const AUTO_FILE_STORAGE_KEY = "cloudeacars.autoFile";
+const DEBUG_STORAGE_KEY = "aeroacars.debug";
+const AUTO_FILE_STORAGE_KEY = "aeroacars.autoFile";
 
 function loadDebugMode(): boolean {
   return localStorage.getItem(DEBUG_STORAGE_KEY) === "1";

@@ -5,7 +5,7 @@
 //!
 //! Source: aviationweather.gov (NOAA), which exposes a free JSON API and
 //! doesn't require an API key. Requests are rate-limited by the upstream;
-//! we don't expose this through CloudeAcars more than twice per flight
+//! we don't expose this through AeroACARS more than twice per flight
 //! (departure + arrival), so we'll never come close to the limits.
 //!
 //! Status: Phase J.2 — production-ready for the standard "snapshot once
@@ -87,7 +87,7 @@ pub struct MetarSnapshot {
     pub wind_speed_kt: Option<f32>,
     pub gust_kt: Option<f32>,
     /// Visibility in metres. We convert from statute miles (NOAA's
-    /// native unit) so the rest of CloudeAcars can stay metric.
+    /// native unit) so the rest of AeroACARS can stay metric.
     pub visibility_m: Option<u32>,
     pub temperature_c: Option<f32>,
     pub dewpoint_c: Option<f32>,
@@ -150,7 +150,7 @@ async fn fetch_metar_once(icao: &str) -> Result<MetarSnapshot, MetarError> {
     );
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
-        .user_agent(concat!("CloudeAcars/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("AeroACARS/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| MetarError::Network(e.to_string()))?;
     let response = client

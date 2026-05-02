@@ -15,7 +15,7 @@ import type {
 /**
  * Maximum distance (in nautical miles) between the aircraft and the bid's
  * departure airport before "Start flight" is enabled. Mirrors the server-side
- * threshold in `cloudeacars-app/src/lib.rs::MAX_START_DISTANCE_NM`.
+ * threshold in `aeroacars-app/src/lib.rs::MAX_START_DISTANCE_NM`.
  */
 const MAX_START_DISTANCE_NM = 5.0;
 

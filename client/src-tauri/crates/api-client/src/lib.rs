@@ -2,10 +2,10 @@
 //!
 //! Talks to:
 //!   * phpVMS Core API (users, bids, flights, fleet, PIREP file, ACARS positions)
-//!   * CloudeAcars phpVMS module (config, version, heartbeat, landing extras) — Phase 4
+//!   * AeroACARS phpVMS module (config, version, heartbeat, landing extras) — Phase 4
 //!
 //! Authentication: phpVMS API key sent via the `X-API-Key` header (phpVMS standard).
-//! All requests advertise `User-Agent: CloudeAcars/<version>` so the server can identify us.
+//! All requests advertise `User-Agent: AeroACARS/<version>` so the server can identify us.
 
 #![allow(dead_code)] // Some endpoints land in later phases; their wrappers are stubbed.
 
@@ -518,7 +518,7 @@ pub struct Client {
 
 impl Client {
     pub fn new(conn: Connection) -> Result<Self, ApiError> {
-        let user_agent = format!("CloudeAcars/{}", env!("CARGO_PKG_VERSION"));
+        let user_agent = format!("AeroACARS/{}", env!("CARGO_PKG_VERSION"));
         let http = HttpClient::builder()
             .user_agent(user_agent)
             .timeout(DEFAULT_TIMEOUT)

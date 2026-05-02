@@ -174,7 +174,7 @@ fn worker_loop(shared: Arc<Shared>, stop: Arc<AtomicBool>, kind: SimKind) {
     // Outer reconnect loop. SimConnect_Open returns E_FAIL while MSFS
     // isn't running; we simply retry every 2s until it's up.
     while !stop.load(Ordering::Relaxed) {
-        match Connection::open("CloudeAcars") {
+        match Connection::open("AeroACARS") {
             Ok(mut conn) => {
                 tracing::info!("SimConnect_Open succeeded — registering data definition");
                 if let Err(e) = conn.register_telemetry() {

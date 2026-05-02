@@ -1,6 +1,6 @@
 # client/
 
-CloudeAcars desktop client — **Tauri 2** (Rust core) + **React + TypeScript + Vite** (frontend).
+AeroACARS desktop client — **Tauri 2** (Rust core) + **React + TypeScript + Vite** (frontend).
 
 Bilingual UI (DE / EN) with `react-i18next`, dark-mode aware via CSS variables driven by `data-theme` on `<html>`.
 
@@ -65,7 +65,7 @@ Outputs platform-specific installers (Windows MSI/NSIS, macOS .app/DMG) under `s
 - 🟡 **Phase 1:** Tauri scaffold (this commit), bilingual UI skeleton, internal crate stubs. `app_info` Tauri command exposed; everything else is TODO inside the crates.
 - ⬜ Phase 2: X-Plane plugin + adapter, flight phase FSM, full flight log.
 - ⬜ Phase 3: Runway DB, METAR, landing analyzer.
-- ⬜ Phase 4: `CloudeAcars` phpVMS server module (lives in `../server-module/`).
+- ⬜ Phase 4: `AeroACARS` phpVMS server module (lives in `../server-module/`).
 - ⬜ Phase 5: Update system, code-signing, installer hardening.
 
 ## Important constraints

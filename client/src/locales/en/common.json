@@ -1,6 +1,6 @@
 {
   "app": {
-    "name": "CloudeAcars",
+    "name": "AeroACARS",
     "tagline": "ACARS for phpVMS 7"
   },
   "phase": {
@@ -81,7 +81,7 @@
   },
   "settings": {
     "title": "Settings",
-    "description": "General CloudeAcars preferences.",
+    "description": "General AeroACARS preferences.",
     "appearance_section": "Language & appearance",
     "language_label": "Language",
     "theme_label": "Theme",
@@ -89,7 +89,7 @@
     "theme_light": "Light",
     "simulator_section": "Simulator",
     "simulator_label": "Active simulator",
-    "simulator_hint": "Pick your simulator. CloudeAcars connects automatically as soon as the sim is running.",
+    "simulator_hint": "Pick your simulator. AeroACARS connects automatically as soon as the sim is running.",
     "filing_section": "PIREP filing",
     "auto_file_label": "Auto-file PIREP",
     "auto_file_hint": "Files the PIREP automatically once the flight reaches the \"Arrived\" phase (at gate, engines off, parking brake set). The manual \"End flight\" button remains available for cases where validation fails.",
@@ -359,7 +359,7 @@
       "option_cancel_hint": "Discards the PIREP entirely on phpVMS.",
       "option_back": "Back (do nothing)",
       "manual_form_title": "Manual PIREP",
-      "manual_form_intro": "The PIREP will be filed as a manual report tagged 'CloudeAcars (manual)' and reviewed by the VA admin.",
+      "manual_form_intro": "The PIREP will be filed as a manual report tagged 'AeroACARS (manual)' and reviewed by the VA admin.",
       "divert_label": "Divert airport (ICAO, optional)",
       "divert_hint": "If you landed somewhere other than the planned arrival ({{planned}}).",
       "reason_label": "Reason / note (required for diverts)",

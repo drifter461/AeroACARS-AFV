@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    cloudeacars_app_lib::run()
+    aeroacars_app_lib::run()
 }

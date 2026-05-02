@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "CloudeAcars",
+  "productName": "AeroACARS",
   "version": "0.1.0",
-  "identifier": "com.cloudeacars.app",
+  "identifier": "com.aeroacars.app",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "CloudeAcars",
+        "title": "AeroACARS",
         "width": 1200,
         "height": 800,
         "minWidth": 900,
@@ -39,8 +39,8 @@
     "resources": {
       "crates/sim-msfs/ffi/lib/SimConnect.dll": "SimConnect.dll"
     },
-    "publisher": "CloudeAcars Project",
+    "publisher": "AeroACARS Project",
     "shortDescription": "Cross-platform ACARS client for phpVMS 7",
-    "longDescription": "CloudeAcars connects phpVMS 7 with MSFS 2020/2024 and X-Plane 11/12, recording flights, streaming live position data, and submitting full PIREPs with detailed runway and landing analysis."
+    "longDescription": "AeroACARS connects phpVMS 7 with MSFS 2020/2024 and X-Plane 11/12, recording flights, streaming live position data, and submitting full PIREPs with detailed runway and landing analysis."
   }
 }

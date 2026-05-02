@@ -12,7 +12,7 @@
 
 use thiserror::Error;
 
-const SERVICE: &str = "CloudeAcars";
+const SERVICE: &str = "AeroACARS";
 
 #[derive(Debug, Error)]
 pub enum SecretError {

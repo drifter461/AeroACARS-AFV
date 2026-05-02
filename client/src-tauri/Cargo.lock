@@ -9,6 +9,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
+name = "aeroacars-app"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "api-client",
+ "chrono",
+ "csv",
+ "geo",
+ "metar",
+ "recorder",
+ "secrets",
+ "serde",
+ "serde_json",
+ "sim-core",
+ "sim-msfs",
+ "sim-xplane",
+ "storage",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-opener",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -543,32 +569,6 @@ dependencies = [
  "glob",
  "libc",
  "libloading 0.8.9",
-]
-
-[[package]]
-name = "cloudeacars-app"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "api-client",
- "chrono",
- "csv",
- "geo",
- "metar",
- "recorder",
- "secrets",
- "serde",
- "serde_json",
- "sim-core",
- "sim-msfs",
- "sim-xplane",
- "storage",
- "tauri",
- "tauri-build",
- "tauri-plugin-opener",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

@@ -17,7 +17,7 @@ resolver = "2"
 version = "0.1.0"
 edition = "2021"
 license = "Proprietary"
-authors = ["CloudeAcars Project"]
+authors = ["AeroACARS Project"]
 publish = false
 
 [workspace.dependencies]
@@ -76,17 +76,17 @@ dbg_macro = "warn"
 # ---- The Tauri application itself ----
 
 [package]
-name = "cloudeacars-app"
+name = "aeroacars-app"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "CloudeAcars desktop client (Tauri 2 + React)"
+description = "AeroACARS desktop client (Tauri 2 + React)"
 
 [lib]
 # The `_lib` suffix avoids a Windows linker name clash between the bin and lib targets.
 # See https://github.com/rust-lang/cargo/issues/8519
-name = "cloudeacars_app_lib"
+name = "aeroacars_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

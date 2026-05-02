@@ -23,7 +23,7 @@ void i18n
     interpolation: { escapeValue: false },
     detection: {
       order: ["localStorage", "navigator"],
-      lookupLocalStorage: "cloudeacars.lang",
+      lookupLocalStorage: "aeroacars.lang",
       caches: ["localStorage"],
     },
   });

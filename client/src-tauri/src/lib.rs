@@ -1,4 +1,4 @@
-//! CloudeAcars — Tauri application root.
+//! AeroACARS — Tauri application root.
 //!
 //! Holds the active `api_client::Client` in shared state, exposes auth commands
 //! to the UI (login, logout, session restore), and persists the site URL to a
@@ -1316,9 +1316,9 @@ pub struct AppInfo {
 #[tauri::command]
 fn app_info() -> AppInfo {
     AppInfo {
-        name: "CloudeAcars",
+        name: "AeroACARS",
         version: env!("CARGO_PKG_VERSION"),
-        commit: option_env!("CLOUDEACARS_GIT_SHA"),
+        commit: option_env!("AEROACARS_GIT_SHA"),
     }
 }
 
@@ -1538,9 +1538,9 @@ fn load_activity_log_at_boot() -> VecDeque<ActivityEntry> {
         None => return VecDeque::new(),
     };
     // Tauri's identifier-based default for app_config_dir on Windows.
-    // Identifier is set in `tauri.conf.json` as `com.cloudeacars.app`.
+    // Identifier is set in `tauri.conf.json` as `com.aeroacars.app`.
     let path = std::path::Path::new(&appdata)
-        .join("com.cloudeacars.app")
+        .join("com.aeroacars.app")
         .join(ACTIVITY_LOG_FILE);
     if !path.exists() {
         return VecDeque::new();
@@ -2079,7 +2079,7 @@ async fn flight_start(
         planned_distance: bid.flight.distance.as_ref().and_then(|d| d.nmi),
         planned_flight_time: bid.flight.flight_time,
         route: bid.flight.route.clone().filter(|s| !s.is_empty()),
-        source_name: format!("CloudeAcars/{}", env!("CARGO_PKG_VERSION")),
+        source_name: format!("AeroACARS/{}", env!("CARGO_PKG_VERSION")),
         notes: None,
     };
 
@@ -2603,7 +2603,7 @@ async fn flight_end(
             level,
             landing_rate,
             score,
-            source_name: Some(format!("CloudeAcars/{}", env!("CARGO_PKG_VERSION"))),
+            source_name: Some(format!("AeroACARS/{}", env!("CARGO_PKG_VERSION"))),
             notes: Some(notes),
             fares,
             fields: Some(fields),
@@ -2797,7 +2797,7 @@ async fn flight_end_manual(
             landing_rate,
             score,
             source_name: Some(format!(
-                "CloudeAcars/{} (manual)",
+                "AeroACARS/{} (manual)",
                 env!("CARGO_PKG_VERSION")
             )),
             notes: Some(notes),
@@ -3758,7 +3758,7 @@ fn build_pirep_fields(
 
     f.insert(
         "Source".into(),
-        format!("CloudeAcars/{}", env!("CARGO_PKG_VERSION")),
+        format!("AeroACARS/{}", env!("CARGO_PKG_VERSION")),
     );
     f.insert("Departure Airport".into(), flight.dpt_airport.clone());
     f.insert("Arrival Airport".into(), flight.arr_airport.clone());
@@ -4018,7 +4018,7 @@ fn build_pirep_notes(flight: &ActiveFlight, stats: &FlightStats) -> String {
         }
     }
     lines.push(format!(
-        "CloudeAcars {} ({} positions, {:.1} nm)",
+        "AeroACARS {} ({} positions, {:.1} nm)",
         env!("CARGO_PKG_VERSION"),
         stats.position_count,
         stats.distance_nm
@@ -5308,14 +5308,14 @@ async fn try_resume_flight(
 
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,cloudeacars=debug"));
+        .unwrap_or_else(|_| EnvFilter::new("info,aeroacars=debug"));
     let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     init_tracing();
-    tracing::info!(version = env!("CARGO_PKG_VERSION"), "CloudeAcars starting");
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "AeroACARS starting");
 
     // Restore the activity log from disk before anything else uses
     // AppState. Pre-populates the in-memory VecDeque so the pilot
@@ -5338,7 +5338,7 @@ pub fn run() {
         let banner = ActivityEntry {
             timestamp: Utc::now(),
             level: ActivityLevel::Info,
-            message: format!("CloudeAcars v{} gestartet", env!("CARGO_PKG_VERSION")),
+            message: format!("AeroACARS v{} gestartet", env!("CARGO_PKG_VERSION")),
             detail: None,
         };
         tracing::info!(message = %banner.message, "activity");
@@ -5391,5 +5391,5 @@ pub fn run() {
             inspector_list,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running CloudeAcars");
+        .expect("error while running AeroACARS");
 }
