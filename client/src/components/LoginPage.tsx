@@ -39,9 +39,16 @@ function isUiError(value: unknown): value is UiError {
   );
 }
 
-export function LoginPage({ initialUrl = "", onSuccess }: Props) {
+/**
+ * Hardcoded phpVMS host this build is locked to. Mirrors the
+ * backend's `ALLOWED_PHPVMS_HOST` constant — the backend ignores
+ * whatever URL the form sent and always uses this, so we just
+ * surface it read-only in the UI for transparency.
+ */
+const LOCKED_HOST = "https://german-sky-group.eu";
+
+export function LoginPage({ initialUrl: _initialUrl = "", onSuccess }: Props) {
   const { t } = useTranslation();
-  const [url, setUrl] = useState(initialUrl);
   const [apiKey, setApiKey] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<UiError | null>(null);
@@ -53,7 +60,10 @@ export function LoginPage({ initialUrl = "", onSuccess }: Props) {
     setError(null);
     try {
       const result = await invoke<LoginResult>("phpvms_login", {
-        url: url.trim(),
+        // The backend ignores `url` and uses ALLOWED_PHPVMS_HOST,
+        // but we still pass the locked value for clarity in any
+        // future logging / debugging.
+        url: LOCKED_HOST,
         apiKey: apiKey.trim(),
       });
       onSuccess(result);
@@ -78,14 +88,17 @@ export function LoginPage({ initialUrl = "", onSuccess }: Props) {
           <span className="field__label">{t("login.url_label")}</span>
           <input
             type="url"
-            inputMode="url"
-            autoComplete="url"
-            required
-            placeholder={t("login.url_placeholder")}
-            value={url}
-            onChange={(e) => setUrl(e.currentTarget.value)}
-            disabled={submitting}
+            value={LOCKED_HOST}
+            readOnly
+            disabled
+            aria-describedby="locked-host-hint"
           />
+          <small id="locked-host-hint" className="field__hint">
+            🔒 Diese Build-Variante ist auf <code>german-sky-group.eu</code>{" "}
+            gesperrt. Forke das Repo und ändere{" "}
+            <code>ALLOWED_PHPVMS_HOST</code> in <code>src/lib.rs</code> für
+            deine eigene VA.
+          </small>
         </label>
 
         <label className="field">
@@ -111,7 +124,7 @@ export function LoginPage({ initialUrl = "", onSuccess }: Props) {
         <button
           type="submit"
           className="button button--primary"
-          disabled={submitting || !url || !apiKey}
+          disabled={submitting || !apiKey}
         >
           {submitting ? t("login.submitting") : t("login.submit")}
         </button>
