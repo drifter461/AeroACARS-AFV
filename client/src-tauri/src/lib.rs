@@ -526,6 +526,7 @@ struct TouchdownProfilePoint {
     bank_deg: f32,
 }
 
+
 #[derive(Default)]
 struct FlightStats {
     // Position tracking.
@@ -3821,36 +3822,60 @@ fn build_pirep_fields(
         }
     }
 
-    // Landing analyzer (Phase I) — peak values are usually worse than the
-    // initial-touchdown sample, so include both for VA review.
+    // ---- Landing report (Phase I + Tier 1/2/3) ----
+    //
+    // Two parallel surface forms, both derived from the same Rust state:
+    //
+    //   * **Human-readable Title Case** ("Landing Score", "Centerline
+    //     Offset") — for default phpVMS themes that just dump custom
+    //     fields as a key:value table. Always with units in the value.
+    //
+    //   * **Raw machine-readable snake_case** ("landing_score_numeric",
+    //     "touchdown_centerline_m") — separate, plain numbers/strings,
+    //     no formatting. Lets VAs sort/filter PIREPs and build leader-
+    //     boards without regex-parsing the human strings.
+    //
+    // PLUS a single JSON blob field (`touchdown_analysis_json`) with
+    // EVERYTHING including the per-ms touchdown profile. Theme plugins
+    // that want to render charts / runway diagrams parse that one
+    // field instead of stitching ten flat ones together.
+    //
+    // This mirrors BeatMyLanding's "one rich JSON, two render targets"
+    // architecture — only difference is our two targets are phpVMS
+    // (default theme = flat fields, custom theme = JSON) instead of
+    // their in-sim toast + own website.
     if let Some(score) = stats.landing_score {
         f.insert("Landing Score".into(), score.label().to_string());
+        f.insert("landing_score_label".into(), score.label().to_string());
+        f.insert("landing_score_numeric".into(), score.numeric().to_string());
     }
     if let Some(vs) = stats.landing_peak_vs_fpm {
         f.insert("Peak Landing Rate".into(), format!("{:.0} fpm", vs));
+        f.insert("landing_peak_vs_fpm".into(), format!("{:.1}", vs));
     }
     if let Some(g) = stats.landing_peak_g_force {
         f.insert("Peak Landing G".into(), format!("{:.2} G", g));
+        f.insert("landing_peak_g".into(), format!("{:.3}", g));
     }
     if stats.bounce_count > 0 {
         f.insert("Bounces".into(), stats.bounce_count.to_string());
     }
+    f.insert("bounce_count".into(), stats.bounce_count.to_string());
     if let Some(slip) = stats.touchdown_sideslip_deg {
-        // Sideslip / crab angle at touchdown — useful for VAs grading
-        // crosswind technique. Sign: positive = nose right of track.
-        f.insert(
-            "Touchdown Sideslip".into(),
-            format!("{:+.1}°", slip),
-        );
+        // Sideslip / crab angle at touchdown — positive = nose right
+        // of track (right-crosswind crab). Useful for VAs grading
+        // crosswind technique.
+        f.insert("Touchdown Sideslip".into(), format!("{:+.1}°", slip));
+        f.insert("touchdown_sideslip_deg".into(), format!("{:.2}", slip));
     }
 
     // Runway correlation (Tier 2) — derived from the OurAirports table
     // by haversine + cross-track math from the touchdown coordinate.
-    // Reported alongside `Approach Runway` (which is `ATC RUNWAY
-    // SELECTED` — the *cleared* runway, not necessarily the one that
-    // got the wheels). When they differ, the pilot landed somewhere
-    // they shouldn't have or the ATC SimVar wasn't refreshed.
+    // Sits next to `Approach Runway` (which is `ATC RUNWAY SELECTED`
+    // — the *cleared* runway). When they differ, the pilot landed
+    // somewhere they shouldn't have or the ATC SimVar wasn't refreshed.
     if let Some(rw) = &stats.runway_match {
+        // Human-readable
         f.insert(
             "Touchdown Runway".into(),
             format!("{}/{}", rw.airport_ident, rw.runway_ident),
@@ -3871,29 +3896,38 @@ fn build_pirep_fields(
                 rw.touchdown_distance_from_threshold_ft, rw.length_ft
             ),
         );
+        // Raw machine-readable
+        f.insert(
+            "touchdown_runway_airport".into(),
+            rw.airport_ident.clone(),
+        );
+        f.insert("touchdown_runway_ident".into(), rw.runway_ident.clone());
+        f.insert(
+            "touchdown_runway_length_ft".into(),
+            format!("{:.0}", rw.length_ft),
+        );
+        f.insert(
+            "touchdown_runway_heading_true_deg".into(),
+            format!("{:.1}", rw.heading_true_deg),
+        );
+        f.insert(
+            "touchdown_centerline_m".into(),
+            format!("{:.2}", rw.centerline_distance_m),
+        );
+        f.insert("touchdown_centerline_side".into(), rw.side.clone());
+        f.insert(
+            "touchdown_past_threshold_ft".into(),
+            format!("{:.0}", rw.touchdown_distance_from_threshold_ft),
+        );
+        f.insert("touchdown_runway_surface".into(), rw.surface.clone());
     }
-    // Touchdown profile (Tier 3) — compact CSV-style line so the PIREP
-    // text view stays readable. Keep only every 3rd point (~10 Hz from
-    // the 30 Hz buffer) and clip to ±2 s around touchdown so the line
-    // stays under ~600 chars.
-    if !stats.touchdown_profile.is_empty() {
-        let line = stats
-            .touchdown_profile
-            .iter()
-            .filter(|p| p.t_ms.abs() <= 2_000)
-            .step_by(3)
-            .map(|p| {
-                format!(
-                    "[{}ms vs={:.0} g={:.2} agl={:.0}]",
-                    p.t_ms, p.vs_fpm, p.g_force, p.agl_ft
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(" ");
-        if !line.is_empty() {
-            f.insert("Touchdown Profile".into(), line);
-        }
-    }
+
+    // (No JSON blob field — the flat raw snake_case fields above
+    // already cover sortable leaderboards and per-PIREP display in
+    // any phpVMS theme. If a future widget needs the per-ms V/S
+    // curve we'll add a focused `touchdown_profile_json` field then;
+    // shipping the full analysis blob now would just bloat every
+    // PIREP's custom-fields table without a consumer.)
 
     // METAR snapshots (Phase J.2) — captured at takeoff / touchdown.
     if let Some(raw) = stats.dep_metar_raw.as_ref().filter(|s| !s.is_empty()) {
