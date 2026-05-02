@@ -1237,15 +1237,25 @@ const BOUNCE_AGL_THRESHOLD_FT: f64 = 35.0;
 /// BeatMyLanding's `BounceRadioAltReturnFeet`.
 const BOUNCE_AGL_RETURN_FT: f64 = 5.0;
 
-/// Hard-landing thresholds, ordered worst-first. The first row that the
-/// peak |V/S| or G-force breaches wins; combined with `bounce_count`
-/// this maps to a `LandingScore`. Numbers are typical VA-rule defaults
-/// — VAs that want their own thresholds can override later via
-/// `phpvms_get_settings` (Phase L).
+/// Hard-landing thresholds, ordered worst-first. The first row that
+/// the peak |V/S| or G-force breaches wins; combined with
+/// `bounce_count` this maps to a `LandingScore`. Calibrated to
+/// match how real-world pilots talk about touchdown firmness:
+///
+///   < 150 fpm  → "butter" / greaser → Smooth
+///   < 300 fpm  → normal landing     → Acceptable
+///   < 600 fpm  → firm               → Firm
+///   < 1000 fpm → hard, inspection   → Hard
+///   ≥ 1000 fpm → structural concern → Severe
+///
+/// Earlier we had Smooth = < 60 fpm which was unrealistically
+/// tight — pilots reported a clean -91 fpm touchdown getting
+/// downgraded to Acceptable, which felt wrong. 150 fpm matches
+/// the community / training-school definition of a "butter".
 const TOUCHDOWN_VS_SEVERE_FPM: f32 = 1000.0;
 const TOUCHDOWN_VS_HARD_FPM: f32 = 600.0;
-const TOUCHDOWN_VS_FIRM_FPM: f32 = 240.0;
-const TOUCHDOWN_VS_SMOOTH_FPM: f32 = 60.0;
+const TOUCHDOWN_VS_FIRM_FPM: f32 = 300.0;
+const TOUCHDOWN_VS_SMOOTH_FPM: f32 = 150.0;
 const TOUCHDOWN_G_HARD: f32 = 1.8;
 const TOUCHDOWN_G_FIRM: f32 = 1.4;
 
