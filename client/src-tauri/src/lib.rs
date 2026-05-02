@@ -5224,19 +5224,37 @@ fn build_pirep_notes(flight: &ActiveFlight, stats: &FlightStats) -> String {
 }
 
 /// Map our internal `FlightPhase` to the phpVMS PirepStatus code we POST in
-/// `update_pirep`. Some phases collapse to the same code (e.g. Climb and
-/// Cruise both report ENR).
+/// `update_pirep`. Codes follow the canonical phpVMS Core PirepStatus
+/// enum (see `nabeelio/phpvms` `app/Models/Enums/PirepStatus.php`):
+///
+///   BST = Boarding              PBT = Pushback           OFB = Off blocks
+///   TXI = Taxi                  TKO = Takeoff (rolling)  TOF = Took off
+///   ICL = Initial climb         ENR = Enroute            TEN = Through 10k
+///   TOD = Top of descent        APR = Approach           FAP = Final
+///   LDG = Landing               LAN = Landed             TXG = Taxi to gate
+///   ARR = Arrived
+///
+/// We deliberately use `PBT` for Pushback rather than `OFB` — many VAs
+/// translate `OFB` as "Abgeflogen" (departed), which confuses pilots
+/// who are still pushing back. `PBT` reads as "Pushback" everywhere.
+///
+/// Some phases collapse to the same code (e.g. Climb and Cruise both
+/// report ENR; Descent uses TEN to make the through-FL100 transition
+/// explicit on the phpVMS live tracker).
 fn phase_to_status(phase: FlightPhase) -> Option<&'static str> {
     match phase {
         FlightPhase::Preflight | FlightPhase::Boarding => Some("BST"),
-        FlightPhase::Pushback => Some("OFB"),
+        FlightPhase::Pushback => Some("PBT"),
         FlightPhase::TaxiOut => Some("TXI"),
         FlightPhase::TakeoffRoll => Some("TKO"),
         FlightPhase::Takeoff => Some("TOF"),
-        FlightPhase::Climb | FlightPhase::Cruise => Some("ENR"),
-        FlightPhase::Descent => Some("TEN"),
-        FlightPhase::Approach | FlightPhase::Final => Some("APP"),
-        FlightPhase::Landing | FlightPhase::TaxiIn => Some("LAN"),
+        FlightPhase::Climb => Some("ICL"),
+        FlightPhase::Cruise => Some("ENR"),
+        FlightPhase::Descent => Some("TOD"),
+        FlightPhase::Approach => Some("APR"),
+        FlightPhase::Final => Some("FAP"),
+        FlightPhase::Landing => Some("LDG"),
+        FlightPhase::TaxiIn => Some("TXG"),
         FlightPhase::BlocksOn | FlightPhase::Arrived => Some("ARR"),
         FlightPhase::PirepSubmitted => None,
     }
