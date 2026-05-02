@@ -1615,6 +1615,19 @@ fn init_activity_log_path(app: &AppHandle) {
     let _ = ACTIVITY_LOG_PATH.set(path);
 }
 
+/// Reset the activity log for a fresh recording. Called from
+/// `flight_start` (NOT `flight_adopt`) so each new flight starts
+/// with a clean feed in the UI and on disk. Per-PIREP JSONL flight-
+/// event logs are unaffected — they remain on disk forever for
+/// review / debugging.
+fn clear_activity_log_for_new_flight(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let mut log = state.activity_log.lock().expect("activity_log lock");
+    log.clear();
+    save_activity_log(&log);
+    tracing::info!("activity log cleared for new flight");
+}
+
 /// Best-effort persist of the entire activity-log VecDeque to disk.
 /// Failures are logged at warn level but never propagated — the
 /// activity log is informational, not safety-critical, and we'd
@@ -2359,6 +2372,15 @@ async fn flight_start(
 
     spawn_position_streamer(app.clone(), Arc::clone(&flight), client);
     spawn_touchdown_sampler(app.clone(), Arc::clone(&flight));
+
+    // New flight = fresh activity log. Pilots were getting confused
+    // when the previous flight's events (or yesterday's) lingered at
+    // the top of the log. The JSONL flight-event log on disk still
+    // captures everything per-PIREP for review, but the in-app feed
+    // resets here for a clean recording. Resume (`flight_adopt`)
+    // skips this on purpose — there the existing log is the
+    // continuation history we want to keep.
+    clear_activity_log_for_new_flight(&app);
 
     let info = flight_info(flight.as_ref());
     log_activity(
