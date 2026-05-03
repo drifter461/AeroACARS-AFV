@@ -212,10 +212,13 @@ fn ng3_to_pmdg_state(s: &crate::pmdg::ng3::Pmdg738Snapshot) -> sim_core::PmdgSta
 
         // Controls
         flap_angle_deg: s.flap_angle_deg,
+        flap_handle_label: s.flap_handle_label.to_string(),
+        speedbrake_lever_pos: Some(s.speedbrake_lever_pos),
         autobrake_label: s.autobrake.label().to_string(),
         speedbrake_armed: s.speedbrake_armed,
         speedbrake_extended: s.speedbrake_extended,
         takeoff_config_warning: s.takeoff_config_warning,
+        xpdr_mode_label: crate::pmdg::pmdg_xpdr_mode_label(s.xpdr_mode).to_string(),
 
         // NG3 doesn't have a dedicated `APURunning` bool in the
         // SDK header (777 does), but we have something better
@@ -362,6 +365,9 @@ fn x777_to_pmdg_state(s: &crate::pmdg::x777::Pmdg777XSnapshot) -> sim_core::Pmdg
         fmc_perf_input_complete: s.fmc_perf_input_complete,
 
         flap_angle_deg,
+        flap_handle_label: s.flap_handle_label.to_string(),
+        // 777 SDK gives the lever as 0..100 — normalise to 0.0..1.0.
+        speedbrake_lever_pos: Some(f32::from(s.speedbrake_lever_pos) / 100.0),
         autobrake_label: s.autobrake.label().to_string(),
         speedbrake_armed: s.speedbrake_armed,
         speedbrake_extended: s.speedbrake_extended,
@@ -371,6 +377,7 @@ fn x777_to_pmdg_state(s: &crate::pmdg::x777::Pmdg777XSnapshot) -> sim_core::Pmdg
         // a perfect match. Leave `false` for now; if needed,
         // we can derive from EICAS messages later.
         takeoff_config_warning: false,
+        xpdr_mode_label: crate::pmdg::pmdg_xpdr_mode_label(s.xpdr_mode).to_string(),
 
         // 777-specific extras (Phase 5.5b — wider integration).
         thrust_limit_mode: crate::pmdg::x777::x777_thrust_limit_label(
@@ -557,6 +564,15 @@ impl MsfsAdapter {
             // `speedbrake_armed` and `autobrake_label`. Mirror them
             // into the standard fields so generic consumers benefit.
             snap.spoilers_armed = Some(pmdg.speedbrake_armed);
+            // v0.2.4: prefer PMDG-derived lever position too — the
+            // Standard SimVar `SPOILERS HANDLE POSITION` jitters
+            // around the ARMED detent, causing flicker entries
+            // ("DEPLOYED 76% / RETRACTED") in the activity log.
+            // PMDG gives a stable lever value (NG3 synthesised
+            // from the bools, 777 from the raw 0..100 lever).
+            if let Some(v) = pmdg.speedbrake_lever_pos {
+                snap.spoilers_handle_position = Some(v);
+            }
             if !pmdg.autobrake_label.is_empty() {
                 snap.autobrake = Some(pmdg.autobrake_label.clone());
             }

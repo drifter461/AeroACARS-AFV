@@ -656,11 +656,23 @@ pub struct Pmdg738Snapshot {
     /// usually identical). 0 = up, 1/2/5/10/15/25/30/40 = handle
     /// detents. Live value, not handle position.
     pub flap_angle_deg: f32,
+    /// Boeing 737 flap-handle label derived from `flap_angle_deg` —
+    /// nearest detent (UP/1/2/5/10/15/25/30/40). NG3 SDK doesn't
+    /// expose the handle position directly, only the live angle, so
+    /// we snap to the nearest Boeing detent. Used for Premium-First
+    /// activity-log labels.
+    pub flap_handle_label: &'static str,
     pub le_flaps_extended: bool,
     pub le_flaps_in_transit: bool,
     pub gear_lever_down: bool,
     pub speedbrake_armed: bool,
     pub speedbrake_extended: bool,
+    /// Synthesised lever position 0.0..1.0. NG3 SDK exposes only
+    /// boolean ARMED/EXTENDED states — we synthesise a stable
+    /// "lever percentage" from those (0=stowed, 0.25=armed,
+    /// 1.0=extended) so the standard `spoilers_handle_position`
+    /// Premium-First override doesn't jitter at the ARMED detent.
+    pub speedbrake_lever_pos: f32,
     pub autobrake: Pmdg738Autobrake,
     pub takeoff_config_warning: bool,
     pub stab_out_of_trim: bool,
@@ -712,6 +724,44 @@ pub struct Pmdg738Snapshot {
     pub battery_master: bool,
 }
 
+/// Boeing 737 NG3 flap-handle label derived from the live trailing-edge
+/// flap angle. NG3 SDK doesn't expose the handle position directly —
+/// only `MAIN_TEFlapsNeedle` (live degrees). We snap to the nearest
+/// detent (UP/1/2/5/10/15/25/30/40) using halfway-points so a flap
+/// in transit reports the closer detent.
+///
+/// Halfway thresholds:
+///   < 0.5  → UP
+///   < 1.5  → 1
+///   < 3.5  → 2
+///   < 7.5  → 5
+///   < 12.5 → 10
+///   < 20.0 → 15
+///   < 27.5 → 25
+///   < 35.0 → 30
+///   else   → 40
+pub fn ng3_flap_label_from_angle(deg: f32) -> &'static str {
+    if deg < 0.5 {
+        "UP"
+    } else if deg < 1.5 {
+        "1"
+    } else if deg < 3.5 {
+        "2"
+    } else if deg < 7.5 {
+        "5"
+    } else if deg < 12.5 {
+        "10"
+    } else if deg < 20.0 {
+        "15"
+    } else if deg < 27.5 {
+        "25"
+    } else if deg < 35.0 {
+        "30"
+    } else {
+        "40"
+    }
+}
+
 impl Pmdg738Snapshot {
     /// Decode a raw PMDG NG3 data block into the useful-subset view.
     pub fn from_raw(raw: &Pmdg738RawData) -> Self {
@@ -755,11 +805,22 @@ impl Pmdg738Snapshot {
             },
 
             flap_angle_deg: raw.MAIN_TEFlapsNeedle[0],
+            flap_handle_label: ng3_flap_label_from_angle(raw.MAIN_TEFlapsNeedle[0]),
             le_flaps_extended: raw.MAIN_annunLE_FLAPS_EXT != 0,
             le_flaps_in_transit: raw.MAIN_annunLE_FLAPS_TRANSIT != 0,
             gear_lever_down: raw.MAIN_GearLever == 2,
             speedbrake_armed: raw.MAIN_annunSPEEDBRAKE_ARMED != 0,
             speedbrake_extended: raw.MAIN_annunSPEEDBRAKE_EXTENDED != 0,
+            // Synthesise lever pos from the bools — sufficient for
+            // jitter-free Activity-Log overrides; doesn't claim to
+            // mirror the real lever motion in flight.
+            speedbrake_lever_pos: if raw.MAIN_annunSPEEDBRAKE_EXTENDED != 0 {
+                1.0
+            } else if raw.MAIN_annunSPEEDBRAKE_ARMED != 0 {
+                0.25
+            } else {
+                0.0
+            },
             autobrake: Pmdg738Autobrake::from_byte(raw.MAIN_AutobrakeSelector),
             takeoff_config_warning: raw.MAIN_annunTAKEOFF_CONFIG != 0,
             stab_out_of_trim: raw.MAIN_annunSTAB_OUT_OF_TRIM != 0,
@@ -890,6 +951,31 @@ mod tests {
         assert_eq!(Pmdg738Autobrake::from_byte(5), Pmdg738Autobrake::Max);
         assert_eq!(Pmdg738Autobrake::from_byte(0).label(), "RTO");
         assert_eq!(Pmdg738Autobrake::from_byte(5).label(), "MAX");
+    }
+
+    /// Boeing 737 NG3 flap-handle labels — verifies the angle→detent
+    /// snap so the activity log shows real Boeing labels (not Airbus
+    /// "1+F"/"3"/"FULL"). Halfway-point tests pin the boundaries that
+    /// matter for in-transit flap motion.
+    #[test]
+    fn ng3_flap_label_from_angle_decoding() {
+        // Stable-detent values
+        assert_eq!(ng3_flap_label_from_angle(0.0), "UP");
+        assert_eq!(ng3_flap_label_from_angle(1.0), "1");
+        assert_eq!(ng3_flap_label_from_angle(2.0), "2");
+        assert_eq!(ng3_flap_label_from_angle(5.0), "5");
+        assert_eq!(ng3_flap_label_from_angle(10.0), "10");
+        assert_eq!(ng3_flap_label_from_angle(15.0), "15");
+        assert_eq!(ng3_flap_label_from_angle(25.0), "25");
+        assert_eq!(ng3_flap_label_from_angle(30.0), "30");
+        assert_eq!(ng3_flap_label_from_angle(40.0), "40");
+
+        // Halfway points snap to the nearer detent
+        assert_eq!(ng3_flap_label_from_angle(0.4), "UP");
+        assert_eq!(ng3_flap_label_from_angle(0.6), "1");
+        assert_eq!(ng3_flap_label_from_angle(7.0), "5");
+        assert_eq!(ng3_flap_label_from_angle(8.0), "10");
+        assert_eq!(ng3_flap_label_from_angle(35.5), "40");
     }
 
     #[test]

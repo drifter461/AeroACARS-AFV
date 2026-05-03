@@ -303,6 +303,16 @@ pub struct PmdgState {
     /// Trailing-edge flap angle in degrees (live, not handle
     /// position). For Boeing 737: 0/1/2/5/10/15/25/30/40 detents.
     pub flap_angle_deg: f32,
+    /// Boeing flap-handle label (Premium-First). NG3 detents:
+    /// "UP"/"1"/"2"/"5"/"10"/"15"/"25"/"30"/"40". 777X detents:
+    /// "UP"/"1"/"5"/"15"/"20"/"25"/"30". Empty when not applicable.
+    /// Activity-log uses this directly instead of the Airbus-style
+    /// quantisation of `flaps_position`.
+    pub flap_handle_label: String,
+    /// Speedbrake/spoiler handle position normalised 0.0..1.0. Used
+    /// to override the standard `spoilers_handle_position` SimVar
+    /// which jitters near the ARMED detent. None when not available.
+    pub speedbrake_lever_pos: Option<f32>,
     /// Autobrake setting label: "RTO" / "OFF" / "1" / "2" / "3"
     /// / "MAX". The values vary by variant (777 has 4 LO/MED/...
     /// settings) so we keep this as a label string.
@@ -311,6 +321,11 @@ pub struct PmdgState {
     pub speedbrake_armed: bool,
     /// True if the speedbrake is currently extended in flight.
     pub speedbrake_extended: bool,
+    /// Transponder mode label as shown on the cockpit panel:
+    /// "STBY"/"ALT-OFF"/"XPNDR"/"TA"/"TA-RA". Empty when not
+    /// applicable. PMDG-cockpit-authoritative — the standard
+    /// `TRANSPONDER STATE` SimVar only exposes the binary on/off.
+    pub xpdr_mode_label: String,
     /// Cockpit "TAKEOFF CONFIG" warning is active. If true at
     /// takeoff roll start, the PIREP gets a flag.
     pub takeoff_config_warning: bool,

@@ -109,6 +109,34 @@ impl PmdgVariant {
             Self::X777 => "PMDG 777X",
         }
     }
+
+    /// Best-guess generic ICAO code from the variant alone, used as a
+    /// fallback when MSFS reports an unusable `ATC MODEL` string (e.g.
+    /// the localisation key "ATCCOM.AC_MODEL_B738.0.text" that some
+    /// liveries set). The variant alone can't tell us which 737 sub-
+    /// variant or which 777 sub-variant it is, so we return the
+    /// family default. Concrete sub-variant identification needs the
+    /// SDK-specific aircraft-model byte from the snapshot.
+    pub fn fallback_icao(self) -> &'static str {
+        match self {
+            Self::Ng3 => "B738",  // most common 737 NG3 variant
+            Self::X777 => "B77W", // most common 777 variant in PMDG fleet
+        }
+    }
+}
+
+/// Decode a PMDG XPDR mode selector byte to a cockpit-readable label.
+/// Both NG3 and 777X use the same mapping
+/// (`XPDR_ModeSel`: 0=STBY 1=ALT_RPTG_OFF 2=XPNDR 3=TA 4=TA/RA).
+pub fn pmdg_xpdr_mode_label(mode: u8) -> &'static str {
+    match mode {
+        0 => "STBY",
+        1 => "ALT-OFF",
+        2 => "XPNDR",
+        3 => "TA",
+        4 => "TA-RA",
+        _ => "",
+    }
 }
 
 #[cfg(test)]
@@ -145,6 +173,24 @@ mod tests {
             PmdgVariant::detect_from_air_path("PMDG 777-200LR"),
             Some(PmdgVariant::X777)
         );
+    }
+
+    #[test]
+    fn xpdr_mode_label_decoding() {
+        use super::pmdg_xpdr_mode_label;
+        assert_eq!(pmdg_xpdr_mode_label(0), "STBY");
+        assert_eq!(pmdg_xpdr_mode_label(1), "ALT-OFF");
+        assert_eq!(pmdg_xpdr_mode_label(2), "XPNDR");
+        assert_eq!(pmdg_xpdr_mode_label(3), "TA");
+        assert_eq!(pmdg_xpdr_mode_label(4), "TA-RA");
+        assert_eq!(pmdg_xpdr_mode_label(99), ""); // unknown stays silent
+    }
+
+    #[test]
+    fn fallback_icao_for_pmdg_variant() {
+        use super::PmdgVariant;
+        assert_eq!(PmdgVariant::Ng3.fallback_icao(), "B738");
+        assert_eq!(PmdgVariant::X777.fallback_icao(), "B77W");
     }
 
     #[test]

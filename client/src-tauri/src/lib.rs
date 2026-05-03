@@ -1247,6 +1247,13 @@ struct FlightStats {
     /// derived from `flaps_position * 5` and rounded). One log per real
     /// detent change rather than every 0.001 of jitter.
     last_logged_flaps_detent: Option<u8>,
+    /// PMDG-Premium-First flap label the last time we emitted a log
+    /// entry. Stored as the cockpit-exact Boeing label ("UP"/"1"/"5"/
+    /// "15"/"30"/etc.) when a PMDG aircraft is loaded; cleared when
+    /// the pilot switches to a non-PMDG aircraft so the legacy
+    /// `last_logged_flaps_detent` path takes back over without
+    /// firing a duplicate "Flaps ↓ X" entry.
+    last_logged_flap_label: Option<String>,
     /// Gear command position discretised — 0 = up, 1 = down. The
     /// 0..1 SimVar value is rounded so a moving gear-handle doesn't
     /// flood the log mid-cycle.
@@ -1314,6 +1321,10 @@ struct FlightStats {
     last_logged_pmdg_apu: Option<bool>,
     /// Wheel chocks set (777). Pre-flight ground state.
     last_logged_pmdg_chocks: Option<bool>,
+    /// PMDG transponder mode label (v0.2.4). Cockpit-exact mode
+    /// selector position — STBY/ALT-OFF/XPNDR/TA/TA-RA — which the
+    /// standard `TRANSPONDER STATE` SimVar can't expose.
+    last_logged_pmdg_xpdr_mode: Option<String>,
 
     // ---- PMDG PIREP captures (Phase 5.6 / v0.2.0) ----
     /// PMDG aircraft variant label captured once at flight start.
@@ -1515,9 +1526,16 @@ impl Ord for LandingScore {
     }
 }
 
-/// Snapshot of the six exterior lights we track. Compared as a whole so we
-/// can emit one log entry per "lights change" rather than six on a config
-/// transition.
+/// Snapshot of the exterior lights we track. Compared as a whole so we
+/// can emit one log entry per "lights change" rather than one-per-light
+/// on a config transition.
+///
+/// Wing + wheel-well were added in v0.2.4 as part of the PMDG Premium-
+/// First sweep. They're optional in spirit because most generic SimVar
+/// profiles don't expose them — the activity-log path checks the
+/// underlying `light_wing` / `light_wheel_well` for `Some(_)` before
+/// emitting a transition entry to avoid noise on aircraft that don't
+/// report those switches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct LightsState {
     landing: bool,
@@ -1526,6 +1544,11 @@ struct LightsState {
     taxi: bool,
     nav: bool,
     logo: bool,
+    /// PMDG-only on most installations — generic SimVars don't expose
+    /// the wing-illumination switch separately on Boeings.
+    wing: bool,
+    /// NG3-only bonus (737 has a dedicated wheel-well light switch).
+    wheel_well: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1684,9 +1707,10 @@ impl From<ApiError> for UiError {
 // ---- Helpers ----
 
 /// Translate a flaps detent (0..5) into the Airbus-style label most
-/// virtual airlines (and the activity-log readers) recognise. Boeing
-/// pilots will read "Flaps 3" the same way; the FULL label maps to
-/// detent 5 on Airbus, but Boeings don't reach 5 anyway.
+/// virtual airlines (and the activity-log readers) recognise. ONLY
+/// used when no PMDG snapshot is available — for PMDG aircraft we
+/// take the cockpit-exact Boeing label directly from
+/// `pmdg.flap_handle_label` (see flap-detent change-detection block).
 fn detent_label(detent: u8) -> &'static str {
     match detent {
         0 => "UP",
@@ -1695,6 +1719,28 @@ fn detent_label(detent: u8) -> &'static str {
         3 => "2",
         4 => "3",
         _ => "FULL",
+    }
+}
+
+/// Order Boeing flap-handle labels for direction-of-change detection.
+/// Boeing 737 detents: UP/1/2/5/10/15/25/30/40 (rank 0..8).
+/// Boeing 777 detents: UP/1/5/15/20/25/30 (rank 0..6, sharing the
+/// numeric ordering with NG3 — both share the rank table since UP=0,
+/// 1=1, 5=3, 15=5 etc., and the comparison only cares about
+/// monotonicity, not exact values).
+fn boeing_detent_rank(label: &str) -> u8 {
+    match label {
+        "UP" => 0,
+        "1" => 1,
+        "2" => 2,
+        "5" => 3,
+        "10" => 4,
+        "15" => 5,
+        "20" => 6,
+        "25" => 7,
+        "30" => 8,
+        "40" => 9,
+        _ => 0,
     }
 }
 
@@ -7288,8 +7334,34 @@ fn detect_telemetry_changes(app: &AppHandle, flight: &ActiveFlight, snap: &SimSn
         // "ATCCOM.AC_MODEL A320.0.text" in `ATC MODEL` rather than the plain
         // ICAO. Filter that out — a stray dot in an ICAO never happens.
         let icao_raw = snap.aircraft_icao.as_deref().unwrap_or("");
+        // v0.2.4: when the standard ICAO is unusable (empty, or a
+        // localisation key like "ATCCOM.AC_MODEL_B738.0.text" that
+        // MSFS 2024 hands out for some PMDG liveries), fall back to
+        // the PMDG-variant family ICAO. That's accurate to the family
+        // (B738/B77W) even if not to the sub-variant.
+        let pmdg_fallback_icao: Option<&'static str> = snap
+            .pmdg
+            .as_ref()
+            .and_then(|_| {
+                // Aircraft path tells us which PMDG family is active.
+                // We don't know it from snap.pmdg.variant_label alone,
+                // but we do know "PMDG SDK is active" — so we fall
+                // back via the variant_label string content.
+                let label = &snap.pmdg.as_ref()?.variant_label;
+                if label.contains("737") {
+                    Some("B738")
+                } else if label.contains("777") {
+                    // Pick the most-common 777 variant as default;
+                    // exact -200LR / -300ER / 777F can't be inferred
+                    // from the variant label alone (that's a richer
+                    // mapping we may add later).
+                    Some("B77W")
+                } else {
+                    None
+                }
+            });
         let icao = if icao_raw.contains('.') || icao_raw.is_empty() {
-            "?"
+            pmdg_fallback_icao.unwrap_or("?")
         } else {
             icao_raw
         };
@@ -7306,14 +7378,26 @@ fn detect_telemetry_changes(app: &AppHandle, flight: &ActiveFlight, snap: &SimSn
         // useful for PIREP audit), but the live banner just shows what
         // MSFS reports. Re-enable later via a WASM-based livery reader.
         let _ = &flight.planned_registration;
+        // v0.2.4: when PMDG SDK is feeding us premium telemetry, surface
+        // that in the profile string so the pilot doesn't see the
+        // misleading "Default (standard SimVars)" right before the
+        // "PMDG SDK aktiv" entry one tick later.
+        let profile_label = if let Some(pmdg) = snap.pmdg.as_ref() {
+            format!(
+                "{} + {}",
+                snap.aircraft_profile.label(),
+                pmdg.variant_label
+            )
+        } else {
+            snap.aircraft_profile.label().to_string()
+        };
         log_activity_handle(
             app,
             ActivityLevel::Info,
             format!("Aircraft: {title}"),
             Some(format!(
                 "Type {icao} · Reg {reg} · Sim {:?} · Profile: {}",
-                snap.simulator,
-                snap.aircraft_profile.label()
+                snap.simulator, profile_label
             )),
         );
     }
@@ -7321,13 +7405,19 @@ fn detect_telemetry_changes(app: &AppHandle, flight: &ActiveFlight, snap: &SimSn
     // ---- Profile change (after first tick) — pilot swapped airframes
     if stats.last_logged_profile != Some(snap.aircraft_profile) {
         if !first_tick {
+            // v0.2.4: same Premium-First label suffix as the banner —
+            // PMDG SDK active means the *premium* layer is doing the
+            // heavy lifting even if the underlying SimVar profile
+            // is still the generic "Default" one.
+            let label = if let Some(pmdg) = snap.pmdg.as_ref() {
+                format!("{} + {}", snap.aircraft_profile.label(), pmdg.variant_label)
+            } else {
+                snap.aircraft_profile.label().to_string()
+            };
             log_activity_handle(
                 app,
                 ActivityLevel::Info,
-                format!(
-                    "Aircraft profile changed → {}",
-                    snap.aircraft_profile.label()
-                ),
+                format!("Aircraft profile changed → {}", label),
                 None,
             );
         }
@@ -7355,6 +7445,30 @@ fn detect_telemetry_changes(app: &AppHandle, flight: &ActiveFlight, snap: &SimSn
                 );
             }
             stats.last_logged_squawk = Some(sq);
+        }
+    }
+
+    // ---- XPDR mode (PMDG only — v0.2.4 Premium-First).
+    // PMDG cockpit exposes the actual transponder MODE selector
+    // (STBY / ALT-OFF / XPNDR / TA / TA-RA) which the standard
+    // SimVar `TRANSPONDER STATE` only exposes as a binary on/off.
+    // Logged as a separate entry so the squawk-code log keeps its
+    // original semantics.
+    if let Some(pmdg) = snap.pmdg.as_ref() {
+        if !pmdg.xpdr_mode_label.is_empty()
+            && stats.last_logged_pmdg_xpdr_mode.as_deref() != Some(pmdg.xpdr_mode_label.as_str())
+        {
+            // Skip first tick on a "boring" STBY value to avoid noise
+            // when the pilot loads cold-and-dark.
+            if !first_tick || pmdg.xpdr_mode_label != "STBY" {
+                log_activity_handle(
+                    app,
+                    ActivityLevel::Info,
+                    format!("XPDR mode → {}", pmdg.xpdr_mode_label),
+                    None,
+                );
+            }
+            stats.last_logged_pmdg_xpdr_mode = Some(pmdg.xpdr_mode_label.clone());
         }
     }
 
@@ -7409,6 +7523,17 @@ fn detect_telemetry_changes(app: &AppHandle, flight: &ActiveFlight, snap: &SimSn
         }
     }
 
+    // Premium-First (v0.2.4): wing + wheel-well are NG3/777-only via
+    // PMDG. We only set them in the LightsState when the underlying
+    // Option is Some — that way generic SimVar aircraft don't generate
+    // false "Wing lights OFF" log entries (because the field defaults
+    // to None there).
+    let pmdg_has_wing = snap.pmdg.as_ref().and_then(|p| p.light_wing).is_some();
+    let pmdg_has_wheel_well = snap
+        .pmdg
+        .as_ref()
+        .and_then(|p| p.light_wheel_well)
+        .is_some();
     let lights = LightsState {
         landing: snap.light_landing.unwrap_or(false),
         beacon: snap.light_beacon.unwrap_or(false),
@@ -7419,6 +7544,12 @@ fn detect_telemetry_changes(app: &AppHandle, flight: &ActiveFlight, snap: &SimSn
         taxi: snap.light_taxi.unwrap_or(false),
         nav: snap.light_nav.unwrap_or(false),
         logo: snap.light_logo.unwrap_or(false),
+        wing: snap.pmdg.as_ref().and_then(|p| p.light_wing).unwrap_or(false),
+        wheel_well: snap
+            .pmdg
+            .as_ref()
+            .and_then(|p| p.light_wheel_well)
+            .unwrap_or(false),
     };
     if stats.last_logged_lights != Some(lights) {
         if let Some(prev) = stats.last_logged_lights {
@@ -7435,6 +7566,15 @@ fn detect_telemetry_changes(app: &AppHandle, flight: &ActiveFlight, snap: &SimSn
             // OFF/AUTO/ON log entry above already covers it.
             if !strobe_three_state_active {
                 changes.push(("Strobe", prev.strobe, lights.strobe));
+            }
+            // Wing + wheel-well only fire when PMDG is the source of
+            // truth this tick — prevents bogus "Wing OFF" entries
+            // when the pilot swaps from PMDG to a generic aircraft.
+            if pmdg_has_wing {
+                changes.push(("Wing", prev.wing, lights.wing));
+            }
+            if pmdg_has_wheel_well {
+                changes.push(("Wheel-well", prev.wheel_well, lights.wheel_well));
             }
             for (name, old, new) in changes {
                 if old != new {
@@ -7582,24 +7722,66 @@ fn detect_telemetry_changes(app: &AppHandle, flight: &ActiveFlight, snap: &SimSn
     }
 
     // ---- Flaps detent
-    // Map normalised 0.0..1.0 to a detent 0..5. Airbus has six positions
-    // (UP / 1 / 1+F / 2 / 3 / FULL); Boeing tops out at 4. Either way,
-    // rounding keeps every transition discrete and stops floating-point
-    // jitter on a moving lever from spamming the log.
-    let flaps_detent = (snap.flaps_position.clamp(0.0, 1.0) * 5.0).round() as u8;
-    if stats.last_logged_flaps_detent != Some(flaps_detent) {
-        if let Some(prev) = stats.last_logged_flaps_detent {
-            // Direction matters: pilots care whether they're configuring
-            // for departure ("Flaps 1") or for landing ("Flaps FULL").
-            let dir = if flaps_detent > prev { "↓" } else { "↑" };
-            log_activity_handle(
-                app,
-                ActivityLevel::Info,
-                format!("Flaps {dir} {}", detent_label(flaps_detent)),
-                Some(format!("IAS {:.0} kt, AGL {:.0} ft", snap.indicated_airspeed_kt, snap.altitude_agl_ft)),
-            );
+    // Premium-First (v0.2.4): if PMDG is loaded, use the cockpit-exact
+    // Boeing handle label directly ("UP"/"1"/"5"/"15"/"30"/"40"). For
+    // generic SimVars we map the normalised 0.0..1.0 position to a 0..5
+    // detent — that's accurate for Airbus families (6 positions). For
+    // Boeing without PMDG it's a known approximation; pilots flying
+    // PMDG (the typical Boeing-study-level case) get the real labels.
+    //
+    // Detection: pmdg.flap_handle_label is non-empty when PMDG is the
+    // source of truth. The pmdg-detent string itself is the activity-
+    // log label (no detent_label() lookup needed).
+    let pmdg_flap = snap
+        .pmdg
+        .as_ref()
+        .map(|p| p.flap_handle_label.clone())
+        .filter(|s| !s.is_empty());
+    if let Some(label) = pmdg_flap {
+        if stats.last_logged_flap_label.as_deref() != Some(label.as_str()) {
+            if let Some(prev) = stats.last_logged_flap_label.as_ref() {
+                // Direction: nominal numeric ordering of Boeing detents
+                // ("UP" < "1" < "2" < "5" < "10" < "15" < "25" < "30" <
+                // "40"). Mapping via boeing_detent_rank keeps the arrow
+                // direction sensible for Boeing labels.
+                let dir = if boeing_detent_rank(&label) > boeing_detent_rank(prev) {
+                    "↓"
+                } else {
+                    "↑"
+                };
+                log_activity_handle(
+                    app,
+                    ActivityLevel::Info,
+                    format!("Flaps {dir} {}", label),
+                    Some(format!(
+                        "IAS {:.0} kt, AGL {:.0} ft",
+                        snap.indicated_airspeed_kt, snap.altitude_agl_ft
+                    )),
+                );
+            }
+            stats.last_logged_flap_label = Some(label);
+            // Keep numeric path in sync to avoid double-firing if the
+            // pilot swaps to a non-PMDG aircraft mid-session.
+            stats.last_logged_flaps_detent = None;
         }
-        stats.last_logged_flaps_detent = Some(flaps_detent);
+    } else {
+        let flaps_detent = (snap.flaps_position.clamp(0.0, 1.0) * 5.0).round() as u8;
+        if stats.last_logged_flaps_detent != Some(flaps_detent) {
+            if let Some(prev) = stats.last_logged_flaps_detent {
+                let dir = if flaps_detent > prev { "↓" } else { "↑" };
+                log_activity_handle(
+                    app,
+                    ActivityLevel::Info,
+                    format!("Flaps {dir} {}", detent_label(flaps_detent)),
+                    Some(format!(
+                        "IAS {:.0} kt, AGL {:.0} ft",
+                        snap.indicated_airspeed_kt, snap.altitude_agl_ft
+                    )),
+                );
+            }
+            stats.last_logged_flaps_detent = Some(flaps_detent);
+            stats.last_logged_flap_label = None;
+        }
     }
 
     // ---- Stall / overspeed warnings (always loud)
