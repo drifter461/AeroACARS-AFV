@@ -29,6 +29,12 @@ interface Props {
    *  actual sweep call is fired once at mount inside App.tsx. */
   autoDeleteFlightLogs: boolean;
   onAutoDeleteFlightLogsChange: (next: boolean) => void;
+  /** When true, clicking the close button hides the window into the
+   *  system tray (Win) / menubar (Mac) instead of quitting. Default
+   *  off; toggle persisted in localStorage and synced to the Rust
+   *  backend so the close-handler reads it directly. */
+  minimizeToTray: boolean;
+  onMinimizeToTrayChange: (next: boolean) => void;
   theme: Theme;
   onThemeChange: (next: Theme) => void;
   /** Latest sim telemetry — surfaced in the debug section when the
@@ -48,6 +54,8 @@ export function SettingsPanel({
   onAutoStartChange,
   autoDeleteFlightLogs,
   onAutoDeleteFlightLogsChange,
+  minimizeToTray,
+  onMinimizeToTrayChange,
   theme,
   onThemeChange,
   simStatus,
@@ -183,6 +191,26 @@ export function SettingsPanel({
           autoDelete={autoDeleteFlightLogs}
           onAutoDeleteChange={onAutoDeleteFlightLogsChange}
         />
+      </div>
+
+      <div className="settings__section">
+        <h3>{t("behaviour.section_title")}</h3>
+        <label className="settings__checkbox">
+          <input
+            type="checkbox"
+            checked={minimizeToTray}
+            onChange={(e) => onMinimizeToTrayChange(e.target.checked)}
+          />
+          <span>
+            <strong>{t("behaviour.minimize_to_tray_label")}</strong>
+            <span
+              className="settings__row-hint"
+              dangerouslySetInnerHTML={{
+                __html: t("behaviour.minimize_to_tray_hint"),
+              }}
+            />
+          </span>
+        </label>
       </div>
 
       <div className="settings__section">

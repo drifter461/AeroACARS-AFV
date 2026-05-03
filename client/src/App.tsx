@@ -36,6 +36,20 @@ const AUTO_DELETE_LOGS_DAYS = 30;
  *  re-launches so we don't re-show on every startup. */
 const RELEASE_NOTES_LAST_SEEN_KEY = "aeroacars.releaseNotes.lastSeenVersion";
 
+const MINIMIZE_TO_TRAY_KEY = "aeroacars.minimizeToTray";
+
+/** Default OFF on both platforms — most pilots expect "X = quit"
+ *  even on Mac. The setting hint explains why someone might want it
+ *  on (long flights / heartbeat keep-alive). Persisted "1" → on,
+ *  anything else (incl. unset) → off. */
+function loadMinimizeToTray(): boolean {
+  return localStorage.getItem(MINIMIZE_TO_TRAY_KEY) === "1";
+}
+
+function saveMinimizeToTray(value: boolean): void {
+  localStorage.setItem(MINIMIZE_TO_TRAY_KEY, value ? "1" : "0");
+}
+
 function loadLastSeenReleaseNotesVersion(): string | null {
   return localStorage.getItem(RELEASE_NOTES_LAST_SEEN_KEY);
 }
@@ -121,6 +135,17 @@ function App() {
   const [autoDeleteFlightLogs, setAutoDeleteFlightLogs] = useState<boolean>(
     () => loadAutoDeleteFlightLogs(),
   );
+  const [minimizeToTray, setMinimizeToTray] = useState<boolean>(
+    () => loadMinimizeToTray(),
+  );
+
+  // Sync the minimize-to-tray flag to the Rust backend whenever it
+  // changes, plus on first mount. Backend default is `false`;
+  // localStorage is the source of truth across restarts. The actual
+  // close-handler in Rust just reads this atomic flag.
+  useEffect(() => {
+    void invoke("set_minimize_to_tray", { enabled: minimizeToTray }).catch(() => {});
+  }, [minimizeToTray]);
   /** Version we should pop the release-notes modal for. Set on first
    *  mount when the running version differs from the lastSeen
    *  localStorage entry, AND when the user manually triggers it via
@@ -452,6 +477,11 @@ function App() {
           onAutoStartChange={handleAutoStartChange}
           autoDeleteFlightLogs={autoDeleteFlightLogs}
           onAutoDeleteFlightLogsChange={handleAutoDeleteFlightLogsChange}
+          minimizeToTray={minimizeToTray}
+          onMinimizeToTrayChange={(next) => {
+            setMinimizeToTray(next);
+            saveMinimizeToTray(next);
+          }}
           theme={theme}
           onThemeChange={setTheme}
           simStatus={simStatus}

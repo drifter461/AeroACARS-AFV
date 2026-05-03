@@ -284,6 +284,11 @@
     "refresh_button_label": "Speicher-Statistiken aktualisieren",
     "refresh_button_title": "Aktualisieren"
   },
+  "behaviour": {
+    "section_title": "Verhalten",
+    "minimize_to_tray_label": "Beim Schließen in System-Tray minimieren",
+    "minimize_to_tray_hint": "Statt zu beenden wird AeroACARS in den System-Tray (Mac: in die Menüleiste) minimiert. Klick aufs Tray-Icon öffnet das Fenster wieder. Über das Tray-Menü → „Beenden“ wird die App tatsächlich geschlossen.<br/><br/>Empfohlen während aktiver Flüge: AeroACARS läuft im Hintergrund weiter und sendet Heartbeat + Position-Updates an phpVMS."
+  },
   "release_notes": {
     "modal_title": "Was ist neu in {{version}}",
     "published_prefix": "veröffentlicht am",

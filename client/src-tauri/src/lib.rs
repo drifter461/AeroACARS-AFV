@@ -104,6 +104,12 @@ const KG_TO_LB: f64 = 2.20462262;
 /// hasn't started yet).
 const ARRIVED_FALLBACK_RADIUS_NM: f64 = 2.0;
 const ARRIVED_FALLBACK_DWELL_SECS: i64 = 30;
+/// AGL threshold above which we mark the flight as having actually
+/// flown. Powers the `was_airborne` gate that prevents both the
+/// Arrived-fallback and the divert-detection from firing pre-flight
+/// (GSX repositioning, ground-handling wackeln, etc.). 50 ft is well
+/// above gear-strut oscillation and runway-end short-hop noise.
+const WAS_AIRBORNE_AGL_FT: f32 = 50.0;
 
 /// If at the moment the FSM reaches Arrived the aircraft is farther
 /// than this from the planned `arr_airport`, we treat it as a divert
@@ -247,6 +253,14 @@ struct AppState {
     /// Without this, a user that cancels the auto-started flight
     /// while still parked at the gate would get an instant re-trigger.
     auto_start_last_bid_id: Mutex<Option<i64>>,
+    /// When `true`, intercept the main window's CloseRequested event
+    /// and `hide()` the window instead of letting it close. The user
+    /// gets to it again via the system-tray icon (Win) / menubar
+    /// item (Mac). When `false`, close behaves normally and the app
+    /// quits. Toggle lives in Settings → Verhalten; persisted via
+    /// the React side's `aeroacars.minimizeToTray` localStorage key
+    /// and synced into here on every mount + change.
+    minimize_to_tray_enabled: AtomicBool,
 }
 
 /// RAII guard for `AppState::flight_setup_in_progress`. Acquire it at the
@@ -703,6 +717,18 @@ struct FlightStats {
     /// correct `arr_airport_id`. None when we landed at the planned
     /// destination as expected.
     divert_hint: Option<DivertHint>,
+
+    /// True once the aircraft has actually been airborne above
+    /// `WAS_AIRBORNE_AGL_FT` ft AGL since the flight started. Used to
+    /// gate the universal Arrived-fallback and divert-detection so
+    /// they NEVER fire pre-flight — caught by a real bug at KFLL
+    /// where GSX repositioned the aircraft a few meters at the gate,
+    /// `block_off_at` got stamped from the resulting >0.5 kt motion,
+    /// and 9 minutes later (engines never started) the fallback
+    /// fired with phase=Arrived + a divert banner pointing at
+    /// "you're in KFLL, planned was MKJS — divert?". Aircraft had
+    /// never even left the gate.
+    was_airborne: bool,
 
     /// Wann das Flugzeug zum ersten Mal nach `tug_done` zum Stehen
     /// kam (gs < 0.5 kt). Triggert das 10-Sekunden-Dwell-Fenster
@@ -2009,6 +2035,35 @@ fn current_client(state: &tauri::State<'_, AppState>) -> Result<Client, UiError>
         .as_ref()
         .cloned()
         .ok_or_else(|| UiError::new("not_logged_in", "no active session"))
+}
+
+/// Read the current minimize-to-tray setting from backend state.
+/// Used by the React side after mount to surface the toggle's
+/// initial value when localStorage was wiped.
+#[tauri::command]
+fn get_minimize_to_tray(state: tauri::State<'_, AppState>) -> bool {
+    state
+        .minimize_to_tray_enabled
+        .load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Flip the minimize-to-tray flag. The React Settings panel calls
+/// this whenever the user toggles the checkbox AND on every mount
+/// (so the persisted localStorage value flows back into the backend
+/// after a restart). Cheap atomic flip — the actual close-handler
+/// just reads the flag at the moment a CloseRequested fires.
+#[tauri::command]
+fn set_minimize_to_tray(
+    state: tauri::State<'_, AppState>,
+    enabled: bool,
+) -> Result<(), UiError> {
+    let was = state
+        .minimize_to_tray_enabled
+        .swap(enabled, std::sync::atomic::Ordering::Relaxed);
+    if was != enabled {
+        tracing::info!(enabled, "minimize_to_tray toggled");
+    }
+    Ok(())
 }
 
 /// Find the N nearest airports to the active flight's CURRENT
@@ -4725,6 +4780,16 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
     let alt = snap.altitude_msl_ft as f32;
     stats.peak_altitude_ft = Some(stats.peak_altitude_ft.map_or(alt, |p| p.max(alt)));
 
+    // Mark the flight as having actually been airborne. Sticky once
+    // set — even if the aircraft comes back down (final approach,
+    // touch-and-go) the flag stays true. Gates the universal
+    // Arrived-fallback so neither GSX repositioning nor a few-meter
+    // wackeln at the gate accidentally promotes the FSM to Arrived
+    // pre-flight. See WAS_AIRBORNE_AGL_FT for the threshold rationale.
+    if !snap.on_ground && snap.altitude_agl_ft as f32 > WAS_AIRBORNE_AGL_FT {
+        stats.was_airborne = true;
+    }
+
     // Touchdown ring-buffer is now populated by the dedicated 30 Hz
     // sampler (`spawn_touchdown_sampler`) — the streamer ticks every
     // 5–8 s during Final / Landing, way too sparse to reliably catch
@@ -5328,7 +5393,15 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
         next_phase,
         FlightPhase::Preflight | FlightPhase::Boarding
     );
-    if !already_done && !pre_block_off && stats.block_off_at.is_some() {
+    // GATE: only run the universal Arrived-fallback (and the divert
+    // detection inside it) if the aircraft has actually been airborne
+    // at some point. Without this, GSX/sim ground-handling jitter at
+    // the gate can stamp `block_off_at` (any motion >0.5 kt counts),
+    // and 30 s later the fallback fires with phase=Arrived plus a
+    // bogus divert hint pointing at the departure airport — exactly
+    // the bug pilots reported with NKS 833 KFLL→MKJS where GSX wackeln
+    // produced "you landed at KFLL, planned was MKJS, file as divert?".
+    if !already_done && !pre_block_off && stats.block_off_at.is_some() && stats.was_airborne {
         let arr_pos = runway::airport_position(&flight.arr_airport);
         let dist_to_planned_nmi = arr_pos
             .map(|(la, lo)| runway::distance_m(snap.lat, snap.lon, la, lo) / 1852.0)
@@ -7703,6 +7776,80 @@ fn bid_matches_current_state(bid: &Bid, snap: &SimSnapshot) -> bool {
     dist <= AUTO_START_PROXIMITY_M
 }
 
+/// Build the system-tray icon with a Show / Quit context menu and
+/// click-to-toggle behaviour. Called once during Tauri setup; the
+/// resulting tray lives for the app lifetime — when the window is
+/// hidden via the minimize-to-tray feature this icon is the only
+/// way back to the app.
+///
+/// On Windows the icon shows in the system tray (bottom-right);
+/// on macOS in the menubar (top-right) — same code, the OS routes
+/// it to the platform-native location.
+fn build_tray_icon(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+    use tauri::menu::{Menu, MenuItem};
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+    use tauri::Manager;
+
+    let show_item = MenuItem::with_id(app, "show", "Anzeigen / Show", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, "quit", "Beenden / Quit", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+
+    // Use the embedded app icon as tray icon. Tauri auto-renders this
+    // appropriately on each platform (Mac gets template treatment if
+    // the source is a single-channel PNG, otherwise it's used as-is).
+    let icon = app
+        .default_window_icon()
+        .ok_or("no default window icon")?
+        .clone();
+
+    TrayIconBuilder::with_id("aeroacars-tray")
+        .tooltip("AeroACARS")
+        .icon(icon)
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "show" => {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.show();
+                    let _ = w.unminimize();
+                    let _ = w.set_focus();
+                }
+            }
+            "quit" => {
+                // Bypass the CloseRequested → hide path by calling
+                // app.exit() directly. Same effect as toggling
+                // minimize-to-tray off and clicking X, but explicit.
+                app.exit(0);
+            }
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            // Left-click on the tray icon toggles the main window's
+            // visibility. Right-click opens the context menu (handled
+            // by Tauri itself because show_menu_on_left_click=false).
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                let app = tray.app_handle();
+                if let Some(w) = app.get_webview_window("main") {
+                    if w.is_visible().unwrap_or(false) {
+                        let _ = w.hide();
+                    } else {
+                        let _ = w.show();
+                        let _ = w.unminimize();
+                        let _ = w.set_focus();
+                    }
+                }
+            }
+        })
+        .build(app)?;
+
+    Ok(())
+}
+
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,aeroacars=debug"));
@@ -7753,6 +7900,35 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(app_state)
+        .on_window_event(|window, event| {
+            // CloseRequested fires when the user clicks the red X
+            // (Mac) or the title-bar X (Win). When the
+            // minimize-to-tray toggle is on, we suppress the close
+            // and just hide the window — the pilot keeps using it
+            // via the tray icon. When the toggle is off, the close
+            // proceeds normally and the app exits.
+            //
+            // Critically: we ONLY override the main "AeroACARS"
+            // window, not any future child windows. Child windows
+            // close as expected.
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() != "main" {
+                    return;
+                }
+                let state = window.app_handle().state::<AppState>();
+                let minimize = state
+                    .minimize_to_tray_enabled
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                if minimize {
+                    api.prevent_close();
+                    if let Err(e) = window.hide() {
+                        tracing::warn!(error = %e, "failed to hide main window");
+                    } else {
+                        tracing::info!("main window hidden to tray");
+                    }
+                }
+            }
+        })
         .setup(|app| {
             // Resolve the activity-log persistence path now that we
             // have an AppHandle. After this, save_activity_log() can
@@ -7773,6 +7949,14 @@ pub fn run() {
             // where the very first toggle's IPC call lost the spawn race
             // and the user had to restart the app to recover.
             spawn_auto_start_watcher(app.handle().clone());
+            // Build the system-tray icon + menu. On Windows this lands
+            // in the system tray (bottom-right); on Mac in the menubar
+            // (top-right). The icon click toggles window visibility,
+            // and the right-click context menu has Show / Quit. See
+            // `minimize_to_tray_enabled` for the behaviour gate.
+            if let Err(e) = build_tray_icon(&app.handle()) {
+                tracing::warn!(error = %e, "tray icon setup failed — minimize-to-tray will not work");
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -7784,6 +7968,8 @@ pub fn run() {
             phpvms_refresh_profile,
             divert_nearest_airports,
             fetch_release_notes,
+            get_minimize_to_tray,
+            set_minimize_to_tray,
             sim_get_kind,
             sim_set_kind,
             sim_status,
