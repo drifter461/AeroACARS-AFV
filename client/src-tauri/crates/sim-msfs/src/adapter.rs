@@ -94,6 +94,131 @@ struct Shared {
     pmdg: Mutex<PmdgSharedState>,
 }
 
+/// Convert a PMDG NG3 (737-specific) snapshot to the generic
+/// `sim_core::PmdgState` shape. The FSM, activity log, and PIREP
+/// code consume `PmdgState` so they don't have to branch on
+/// 737 vs. 777 — this is the boundary that makes that work.
+///
+/// FMA-mode strings: 737 NG MCP shows the active mode via boolean
+/// annunciator lights (one per mode — VNAV, LVL CHG, ALT HOLD,
+/// VS, HDG SEL, LNAV, VOR/LOC, APP, SPEED, N1). We pick the
+/// "most active" one in priority order matching what the real
+/// FMA shows when multiple are momentarily active.
+fn ng3_to_pmdg_state(s: &crate::pmdg::ng3::Pmdg738Snapshot) -> sim_core::PmdgState {
+    use sim_core::PmdgState;
+
+    // Speed-mode: FMA-priority order. SPD wins over N1 if both
+    // (rare; usually only one). Real cockpit shows N1 during
+    // takeoff, SPD during climb/cruise, etc.
+    let fma_speed_mode = if s.fma.speed_n1 {
+        "N1"
+    } else if s.fma.speed {
+        "SPD"
+    } else {
+        ""
+    };
+    // Roll-mode: LNAV wins over VOR/LOC over HDG SEL.
+    let fma_roll_mode = if s.fma.lnav {
+        "LNAV"
+    } else if s.fma.vor_loc {
+        "VOR/LOC"
+    } else if s.fma.app {
+        "APP"
+    } else if s.fma.hdg_sel {
+        "HDG SEL"
+    } else {
+        ""
+    };
+    // Pitch-mode: VNAV / LVL CHG / VS / ALT HOLD priority.
+    let fma_pitch_mode = if s.fma.vnav {
+        "VNAV"
+    } else if s.fma.lvl_chg {
+        "LVL CHG"
+    } else if s.fma.alt_hold {
+        "ALT HOLD"
+    } else if s.fma.vs {
+        "V/S"
+    } else if s.fma.app {
+        "G/S"
+    } else {
+        ""
+    };
+
+    PmdgState {
+        variant_label: s.variant.label().to_string(),
+
+        // MCP — None when blanked or unpowered.
+        mcp_speed_raw: if s.mcp_speed_blanked || !s.mcp_powered {
+            None
+        } else {
+            Some(s.mcp_speed_raw)
+        },
+        mcp_heading_deg: if s.mcp_powered {
+            Some(s.mcp_heading_deg)
+        } else {
+            None
+        },
+        mcp_altitude_ft: if s.mcp_powered {
+            Some(s.mcp_altitude_ft)
+        } else {
+            None
+        },
+        mcp_vs_fpm: if s.mcp_vs_blanked || !s.mcp_powered {
+            None
+        } else {
+            Some(s.mcp_vs_fpm)
+        },
+
+        // FMA modes
+        fma_speed_mode: fma_speed_mode.to_string(),
+        fma_roll_mode: fma_roll_mode.to_string(),
+        fma_pitch_mode: fma_pitch_mode.to_string(),
+        at_armed: s.fma.at_armed,
+        ap_engaged: s.fma.cmd_a || s.fma.cmd_b,
+        fd_on: s.fma.fd_capt || s.fma.fd_fo,
+
+        // FMC plan
+        fmc_takeoff_flaps_deg: if s.fmc_takeoff_flaps_deg == 0 {
+            None
+        } else {
+            Some(s.fmc_takeoff_flaps_deg)
+        },
+        fmc_landing_flaps_deg: if s.fmc_landing_flaps_deg == 0 {
+            None
+        } else {
+            Some(s.fmc_landing_flaps_deg)
+        },
+        fmc_v1_kt: s.fmc_v_speeds.v1_kt,
+        fmc_vr_kt: s.fmc_v_speeds.vr_kt,
+        fmc_v2_kt: s.fmc_v_speeds.v2_kt,
+        fmc_vref_kt: s.fmc_v_speeds.vref_kt,
+        fmc_cruise_alt_ft: if s.fmc_cruise_alt_ft == 0 {
+            None
+        } else {
+            Some(s.fmc_cruise_alt_ft)
+        },
+        fmc_distance_to_tod_nm: if s.fmc_distance_to_tod_nm < 0.0 {
+            None
+        } else {
+            Some(s.fmc_distance_to_tod_nm)
+        },
+        fmc_distance_to_dest_nm: if s.fmc_distance_to_dest_nm < 0.0 {
+            None
+        } else {
+            Some(s.fmc_distance_to_dest_nm)
+        },
+        fmc_flight_number: s.fmc_flight_number.clone(),
+        fmc_perf_input_complete: s.fmc_perf_input_complete,
+
+        // Controls
+        flap_angle_deg: s.flap_angle_deg,
+        autobrake_label: s.autobrake.label().to_string(),
+        speedbrake_armed: s.speedbrake_armed,
+        speedbrake_extended: s.speedbrake_extended,
+        takeoff_config_warning: s.takeoff_config_warning,
+    }
+}
+
 /// Public PMDG SDK status — exposed via `MsfsAdapter::pmdg_status()`
 /// so the UI can show "SDK enabled?" hints, log warnings, etc.
 #[derive(Debug, Clone)]
@@ -204,7 +329,17 @@ impl MsfsAdapter {
     }
 
     pub fn snapshot(&self) -> Option<SimSnapshot> {
-        self.shared.snapshot.lock().unwrap().clone()
+        let mut snap = self.shared.snapshot.lock().unwrap().clone()?;
+        // Merge PMDG SDK data when available (Phase 5.4). The
+        // standard SimVar telemetry fills the SimSnapshot's main
+        // body; PMDG fills the optional `pmdg` field with cockpit-
+        // exact values that standard SimVars don't expose (FMA,
+        // MCP, V-speeds). FSM and PIREP code consume the generic
+        // `PmdgState` shape, agnostic to NG3 vs. 777X.
+        if let Some(ng3_state) = self.pmdg_ng3_snapshot() {
+            snap.pmdg = Some(ng3_to_pmdg_state(&ng3_state));
+        }
+        Some(snap)
     }
 
     /// Latest PMDG NG3 cockpit state, if a PMDG 737 is loaded AND
