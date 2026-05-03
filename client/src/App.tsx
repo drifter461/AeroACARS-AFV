@@ -353,6 +353,7 @@ function App() {
           theme={theme}
           onThemeChange={setTheme}
           simStatus={simStatus}
+          activeFlight={activeFlight}
         />
       )}
 

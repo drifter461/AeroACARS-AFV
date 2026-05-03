@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTranslation } from "react-i18next";
-import type { SimKind, SimStatus } from "../types";
+import type { ActiveFlightInfo, SimKind, SimStatus } from "../types";
 import type { Theme } from "../theme";
 import { SimDebugPanel } from "./SimDebugPanel";
 
@@ -29,6 +29,9 @@ interface Props {
   /** Latest sim telemetry — surfaced in the debug section when the
    *  user has enabled debug mode. Polled centrally by `useSimSession`. */
   simStatus: SimStatus | null;
+  /** Active flight, used to surface heartbeat / position-post timing
+   *  in the debug panel. Null when no flight is in progress. */
+  activeFlight: ActiveFlightInfo | null;
 }
 
 export function SettingsPanel({
@@ -41,6 +44,7 @@ export function SettingsPanel({
   theme,
   onThemeChange,
   simStatus,
+  activeFlight,
 }: Props) {
   const { t, i18n } = useTranslation();
   const [kind, setKind] = useState<SimKind | null>(null);
@@ -185,9 +189,43 @@ export function SettingsPanel({
         {debugMode && (
           <div className="settings__debug-panel">
             <SimDebugPanel status={simStatus} />
+            <PhpvmsHeartbeatDebug activeFlight={activeFlight} />
           </div>
         )}
       </div>
     </section>
+  );
+}
+
+function PhpvmsHeartbeatDebug({ activeFlight }: { activeFlight: ActiveFlightInfo | null }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, []);
+  if (!activeFlight) {
+    return (
+      <div className="settings__debug-row">
+        <strong>phpVMS Heartbeat:</strong> kein aktiver Flug
+      </div>
+    );
+  }
+  const fmt = (iso: string | null): string => {
+    if (!iso) return "—";
+    const ageSec = Math.max(0, Math.floor((now - new Date(iso).getTime()) / 1000));
+    if (ageSec < 90) return `vor ${ageSec}s`;
+    const min = Math.floor(ageSec / 60);
+    const rem = ageSec % 60;
+    return `vor ${min}m ${rem}s`;
+  };
+  return (
+    <div className="settings__debug-row">
+      <strong>phpVMS:</strong>{" "}
+      letzte Position {fmt(activeFlight.last_position_at)} ·{" "}
+      letzter Heartbeat {fmt(activeFlight.last_heartbeat_at)}
+      {activeFlight.queued_position_count > 0 && (
+        <> · {activeFlight.queued_position_count} queued</>
+      )}
+    </div>
   );
 }

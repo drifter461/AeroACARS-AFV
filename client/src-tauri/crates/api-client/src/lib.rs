@@ -325,6 +325,22 @@ pub struct SimBriefOfp {
     pub route: Option<String>,
     /// Alternate airport ICAO, if planned.
     pub alternate: Option<String>,
+    /// Ordered waypoints from the OFP `<navlog>`. Posted to phpVMS via
+    /// `POST /pireps/{id}/route` after prefile so the live map can show
+    /// the planned track alongside the actually flown one.
+    #[serde(default)]
+    pub waypoints: Vec<RouteFix>,
+}
+
+/// Single navlog fix from a SimBrief OFP. `kind` carries the SimBrief
+/// fix type ("apt", "wpt", "vor", "ndb"); we map it to phpVMS's
+/// numeric `nav_type` at the boundary.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct RouteFix {
+    pub ident: String,
+    pub lat: f64,
+    pub lon: f64,
+    pub kind: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -511,9 +527,16 @@ pub struct FareEntry {
     pub count: i32,
 }
 
-/// Body for `POST /api/pireps/{id}/update`. Used to advance the in-flight
-/// status (Boarding, Pushback, Takeoff, Airborne, …) so the PIREP shows up
-/// in the live-flight view.
+/// Body for `POST /api/pireps/{id}/update`. Used both for explicit phase /
+/// state transitions AND as the periodic "heartbeat" that keeps the PIREP
+/// alive against phpVMS's `RemoveExpiredLiveFlights` cron — that cron looks
+/// at `pireps.updated_at`, NOT at the latest position row, so without a
+/// regular call here a long cruise leg gets soft-deleted after the
+/// `acars.live_time` window (default 2h on most installs).
+///
+/// vmsACARS sends this every `acars_update_timer` seconds (default 30) with
+/// monotonically growing `flight_time` / `distance` fields, which
+/// guarantees Eloquent sees the model as dirty and bumps `updated_at`.
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct UpdateBody {
     /// phpVMS PirepState. 1 = IN_PROGRESS, 2 = PENDING, etc.
@@ -523,8 +546,77 @@ pub struct UpdateBody {
     /// "TKO" takeoff, "ENR" enroute, "APP" approach).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    /// Seconds since block-off. Monotonically growing → guarantees dirty.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flight_time: Option<i32>,
+    /// Distance flown so far (nmi). Also used by the live-map sidebar.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub distance: Option<f64>,
+    /// Fuel burned so far (units configured site-side; phpVMS default lbs).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fuel_used: Option<f64>,
+    /// Current cruise level / altitude in feet (e.g. 34000).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub level: Option<i32>,
+    /// Free-form ACARS source identifier shown in the PIREP detail.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
+}
+
+/// Single text log line posted to `POST /api/pireps/{id}/acars/logs`. Used
+/// for sub-events that don't map to a phpVMS PirepStatus code (TOC, TOD,
+/// V1 / VR / V2, touchdown vertical speed, engine start/stop, etc.) — vmsACARS
+/// uses this same endpoint to write the chronological "story" pilots see
+/// in the PIREP detail page.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct LogEntry {
+    pub log: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lat: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lon: Option<f64>,
+    /// ISO-8601 UTC timestamp.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+}
+
+/// Single waypoint posted to `POST /api/pireps/{id}/route`. Order is
+/// 0-based; nav_type follows the phpVMS Navdata enum (1 = waypoint,
+/// 2 = NDB, 3 = VOR, 4 = airport). When unsure, omit nav_type — phpVMS
+/// renders it generically.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct RouteWaypoint {
+    pub name: String,
+    pub order: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nav_type: Option<i32>,
+    pub lat: f64,
+    pub lon: f64,
+}
+
+/// Full PIREP record returned by `GET /api/pireps/{id}`. We use this for
+/// recovery / diagnose when the live POST endpoints suddenly start
+/// returning 404 — we can distinguish "soft-deleted by cron" from
+/// "pirep was filed elsewhere" from "auth lost".
+#[derive(Debug, Clone, Deserialize)]
+pub struct PirepFull {
+    pub id: String,
+    #[serde(default)]
+    pub state: Option<i32>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub flight_number: Option<String>,
+    #[serde(default)]
+    pub dpt_airport_id: Option<String>,
+    #[serde(default)]
+    pub arr_airport_id: Option<String>,
+    #[serde(default)]
+    pub flight_time: Option<i32>,
+    #[serde(default)]
+    pub distance: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -884,9 +976,70 @@ impl Client {
     }
 
     /// `POST /api/pireps/{pirep_id}/update` — change PIREP status/state during flight.
+    /// Also serves as the periodic heartbeat (see `UpdateBody` doc).
     pub async fn update_pirep(&self, pirep_id: &str, body: &UpdateBody) -> Result<(), ApiError> {
         let path = format!("/api/pireps/{pirep_id}/update");
         self.post_void(&path, body).await
+    }
+
+    /// `POST /api/pireps/{pirep_id}/acars/logs` — push a batch of free-form
+    /// text log lines that show up in the PIREP detail. Used for sub-events
+    /// without a PirepStatus equivalent (TOC, TOD, V1/VR/V2, touchdown VS,
+    /// engine start/stop, etc.).
+    pub async fn post_acars_logs(
+        &self,
+        pirep_id: &str,
+        logs: &[LogEntry],
+    ) -> Result<(), ApiError> {
+        #[derive(Serialize)]
+        struct Body<'a> {
+            logs: &'a [LogEntry],
+        }
+        let path = format!("/api/pireps/{pirep_id}/acars/logs");
+        self.post_void(&path, &Body { logs }).await
+    }
+
+    /// `POST /api/pireps/{pirep_id}/route` — upload the planned flight-plan
+    /// waypoints (e.g. from the SimBrief OFP). phpVMS draws these as a
+    /// dotted line on the PIREP map alongside the actually flown track.
+    /// Send once shortly after prefile.
+    pub async fn post_route(
+        &self,
+        pirep_id: &str,
+        route: &[RouteWaypoint],
+    ) -> Result<(), ApiError> {
+        #[derive(Serialize)]
+        struct Body<'a> {
+            route: &'a [RouteWaypoint],
+        }
+        let path = format!("/api/pireps/{pirep_id}/route");
+        self.post_void(&path, &Body { route }).await
+    }
+
+    /// `POST /api/pireps/{pirep_id}/fields` — upsert custom PIREP fields the
+    /// VA admin defined in the phpVMS admin panel (e.g. "Block fuel",
+    /// "Pilot remarks", "Diversion?"). Map keys are the field NAMES (as
+    /// shown in the admin), values are stringified.
+    pub async fn post_pirep_fields(
+        &self,
+        pirep_id: &str,
+        fields: &std::collections::HashMap<String, String>,
+    ) -> Result<(), ApiError> {
+        #[derive(Serialize)]
+        struct Body<'a> {
+            fields: &'a std::collections::HashMap<String, String>,
+        }
+        let path = format!("/api/pireps/{pirep_id}/fields");
+        self.post_void(&path, &Body { fields }).await
+    }
+
+    /// `GET /api/pireps/{pirep_id}` — fetch the current server-side state of
+    /// a single PIREP. Used for resume-after-restart and to disambiguate
+    /// 404s on the live POST endpoints (soft-deleted by cron vs. cancelled
+    /// elsewhere vs. auth lost).
+    pub async fn get_pirep(&self, pirep_id: &str) -> Result<PirepFull, ApiError> {
+        let path = format!("/api/pireps/{pirep_id}");
+        self.get_data(&path).await
     }
 
     /// `GET /api/fleet/aircraft/{id}` — single aircraft, used for diagnostics.
@@ -997,6 +1150,7 @@ fn parse_simbrief_ofp(xml: &str) -> Option<SimBriefOfp> {
         .or_else(|| extract_tag(xml, "icao_code"))
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
+    let waypoints = extract_navlog_fixes(xml);
 
     Some(SimBriefOfp {
         planned_block_fuel_kg: plan_ramp,
@@ -1007,7 +1161,35 @@ fn parse_simbrief_ofp(xml: &str) -> Option<SimBriefOfp> {
         planned_ldw_kg: ldw,
         route,
         alternate,
+        waypoints,
     })
+}
+
+/// Walk `<navlog>...<fix>...</fix>...</navlog>` and pull every fix.
+/// Resilient to missing `<navlog>` (older SimBrief OFP variants put fixes
+/// at the document root) — falls back to scanning the whole document.
+fn extract_navlog_fixes(xml: &str) -> Vec<RouteFix> {
+    let scope = extract_tag(xml, "navlog").unwrap_or(xml);
+    let mut out = Vec::new();
+    let mut cursor = 0;
+    while let Some(start) = scope[cursor..].find("<fix>") {
+        let abs_start = cursor + start + "<fix>".len();
+        let Some(rel_end) = scope[abs_start..].find("</fix>") else {
+            break;
+        };
+        let block = &scope[abs_start..abs_start + rel_end];
+        cursor = abs_start + rel_end + "</fix>".len();
+        let ident = extract_tag(block, "ident").unwrap_or("").trim().to_string();
+        let lat: Option<f64> = extract_tag(block, "pos_lat")
+            .and_then(|s| s.trim().parse().ok());
+        let lon: Option<f64> = extract_tag(block, "pos_long")
+            .and_then(|s| s.trim().parse().ok());
+        let kind = extract_tag(block, "type").unwrap_or("").trim().to_string();
+        if let (true, Some(la), Some(lo)) = (!ident.is_empty(), lat, lon) {
+            out.push(RouteFix { ident, lat: la, lon: lo, kind });
+        }
+    }
+    out
 }
 
 #[cfg(test)]

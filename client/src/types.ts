@@ -291,6 +291,11 @@ export interface ActiveFlightInfo {
   /** ISO-8601 UTC timestamp of the most recent successful
    *  position-post, or null if none has succeeded yet. */
   last_position_at: string | null;
+  /** ISO-8601 UTC timestamp of the most recent successful PIREP
+   *  heartbeat (`POST /pireps/{id}/update`). Used by the debug panel
+   *  to confirm the keep-alive is firing — without it phpVMS soft-deletes
+   *  the in-flight PIREP after `acars.live_time` hours. */
+  last_heartbeat_at: string | null;
   /** Positions sitting in the offline queue waiting to replay.
    *  0 means we're online and current. */
   queued_position_count: number;

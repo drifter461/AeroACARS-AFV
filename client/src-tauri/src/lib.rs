@@ -91,6 +91,15 @@ const DISTANCE_EPSILON_M: f64 = 5.0;
 /// and the PIREP `file` endpoint expect pounds — convert at the boundary.
 const KG_TO_LB: f64 = 2.20462262;
 
+/// How often we POST `/pireps/{id}/update` purely to bump `pireps.updated_at`
+/// and keep phpVMS's `RemoveExpiredLiveFlights` cron from soft-deleting
+/// the in-flight PIREP. The cron runs hourly and looks at `updated_at`,
+/// NOT at the latest position row — without this heartbeat, a long
+/// cruise leg with no phase changes gets killed after `acars.live_time`
+/// hours (default 2h on most installs). vmsACARS uses 30 s by default
+/// (`acars_update_timer`); we match.
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+
 /// How close (in nautical miles) the aircraft must be to the departure airport
 /// to start the flight. Generous enough to cover taxi positions and remote
 /// stands; tight enough to reject "I'm at EDDF instead of EDDP".
@@ -288,6 +297,12 @@ struct ActiveFlight {
     /// could end up calling spawn more than once for the same ActiveFlight;
     /// this flag ensures only ONE streamer task is ever live per flight.
     streamer_spawned: AtomicBool,
+    /// Set once we've detected that phpVMS soft-deleted the PIREP under us
+    /// (any live POST endpoint returning 404). Idempotency guard so the
+    /// "PIREP cancelled remotely" activity entry / UI event fire exactly
+    /// once even if positions and the heartbeat both get 404s in the
+    /// same cycle.
+    cancelled_remotely: AtomicBool,
 }
 
 /// On-disk representation of an active flight, used for resume after a client
@@ -824,6 +839,12 @@ struct FlightStats {
     /// the dashboard should warn the pilot before they file a PIREP
     /// without recent telemetry.
     last_position_at: Option<DateTime<Utc>>,
+    /// When the streamer last successfully POSTed `/pireps/{id}/update`.
+    /// Surfaced via `flight_status` so a debug panel can show "last
+    /// keep-alive Xs ago" — useful to diagnose if the heartbeat that
+    /// prevents phpVMS's RemoveExpiredLiveFlights cron from killing the
+    /// PIREP is actually getting through.
+    last_heartbeat_at: Option<DateTime<Utc>>,
     /// Number of positions currently sitting in the offline queue
     /// waiting to be replayed. >0 means we lost the network briefly
     /// and the dashboard should surface that.
@@ -1104,6 +1125,12 @@ pub struct ActiveFlightInfo {
     /// Powers the cockpit's LIVE recording indicator — "X seconds
     /// ago" derived client-side.
     last_position_at: Option<String>,
+    /// ISO-8601 UTC timestamp of the last successful PIREP heartbeat
+    /// (`POST /pireps/{id}/update`). Surfaced for the debug panel so
+    /// the pilot can see the keep-alive is firing — without it, phpVMS
+    /// soft-deletes the PIREP after `acars.live_time` hours of inactive
+    /// `updated_at`.
+    last_heartbeat_at: Option<String>,
     /// Number of positions sitting in the offline queue. Non-zero
     /// means the streamer hit a network failure recently and the
     /// dashboard should warn the pilot.
@@ -1489,12 +1516,14 @@ const ROLLOUT_HEADING_DEVIATION_DEG: f32 = 30.0;
 ///
 /// Consensus → these tiers:
 ///
+/// ```text
 ///                  V/S        G
 ///   Smooth         < 200 fpm  < 1.20 G   (butter / greaser)
 ///   Acceptable     < 400 fpm  < 1.40 G   (normal LH FOQA)
 ///   Firm           < 600 fpm  < 1.70 G   (firm but accepted)
 ///   Hard           < 1000 fpm < 2.10 G   (FCOM inspection trigger)
 ///   Severe         ≥ 1000 fpm ≥ 2.10 G   (structural concern)
+/// ```
 // V/S boundaries — fpm, |abs| at touchdown:
 const TOUCHDOWN_VS_SEVERE_FPM: f32 = 1000.0;
 const TOUCHDOWN_VS_HARD_FPM: f32 = 600.0;
@@ -2184,6 +2213,7 @@ fn flight_info(flight: &ActiveFlight) -> ActiveFlightInfo {
         arr_gate: stats.arr_gate.clone(),
         approach_runway: stats.approach_runway.clone(),
         last_position_at: stats.last_position_at.map(|t| t.to_rfc3339()),
+        last_heartbeat_at: stats.last_heartbeat_at.map(|t| t.to_rfc3339()),
         queued_position_count: stats.queued_position_count,
     }
 }
@@ -2383,6 +2413,7 @@ async fn flight_adopt(
         // Surfaced via flight_status to trigger the resume banner.
         was_just_resumed: AtomicBool::new(true),
         streamer_spawned: AtomicBool::new(false),
+        cancelled_remotely: AtomicBool::new(false),
     });
 
     save_active_flight(&app, &flight);
@@ -2677,7 +2708,8 @@ async fn flight_start(
     let update_body = UpdateBody {
         state: Some(0),
         status: Some("BST".to_string()),
-        notes: None,
+        source_name: Some(format!("AeroACARS/{}", env!("CARGO_PKG_VERSION"))),
+        ..Default::default()
     };
     if let Err(e) = client.update_pirep(&pirep.id, &update_body).await {
         tracing::warn!(
@@ -2762,6 +2794,7 @@ async fn flight_start(
         // Fresh start triggered by user — no banner needed.
         was_just_resumed: AtomicBool::new(false),
         streamer_spawned: AtomicBool::new(false),
+        cancelled_remotely: AtomicBool::new(false),
     });
 
     save_active_flight(&app, &flight);
@@ -2778,6 +2811,9 @@ async fn flight_start(
     // so stats already exists; the lock is short-held and never
     // crosses an await.
     if let Some(ofp) = planned_ofp {
+        // Pull the navlog out before moving the rest into FlightStats so
+        // we can post it to phpVMS without holding a lock across an await.
+        let waypoints = ofp.waypoints.clone();
         let mut stats = flight.stats.lock().expect("flight stats lock");
         stats.planned_block_fuel_kg = Some(ofp.planned_block_fuel_kg).filter(|&v| v > 0.0);
         stats.planned_burn_kg = Some(ofp.planned_burn_kg).filter(|&v| v > 0.0);
@@ -2791,6 +2827,39 @@ async fn flight_start(
         // Persist immediately so a Tauri restart mid-flight doesn't
         // lose the plan.
         save_active_flight(&app, &flight);
+
+        // Push the planned waypoints to phpVMS so the live map / PIREP
+        // detail can draw the planned track alongside the flown one.
+        // Best-effort: failure here doesn't abort the flight setup.
+        if !waypoints.is_empty() {
+            let route: Vec<api_client::RouteWaypoint> = waypoints
+                .iter()
+                .enumerate()
+                .map(|(i, fix)| api_client::RouteWaypoint {
+                    name: fix.ident.clone(),
+                    order: i as i32,
+                    nav_type: simbrief_kind_to_nav_type(&fix.kind),
+                    lat: fix.lat,
+                    lon: fix.lon,
+                })
+                .collect();
+            let pirep_id = pirep.id.clone();
+            let route_client = client.clone();
+            tauri::async_runtime::spawn(async move {
+                match route_client.post_route(&pirep_id, &route).await {
+                    Ok(()) => tracing::info!(
+                        pirep_id = %pirep_id,
+                        waypoint_count = route.len(),
+                        "planned route uploaded"
+                    ),
+                    Err(e) => tracing::warn!(
+                        pirep_id = %pirep_id,
+                        error = %e,
+                        "planned route upload failed"
+                    ),
+                }
+            });
+        }
     }
 
     spawn_position_streamer(app.clone(), Arc::clone(&flight), client);
@@ -3875,6 +3944,12 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
     }
     tauri::async_runtime::spawn(async move {
         tracing::info!(pirep_id = %flight.pirep_id, "position streamer started");
+        // Heartbeat tracker: ensures `POST /pireps/{id}/update` fires at
+        // least every `HEARTBEAT_INTERVAL` so phpVMS's RemoveExpiredLiveFlights
+        // cron never reaches the inactivity threshold. Initialised one
+        // interval in the past so the first eligible tick triggers it.
+        let mut last_heartbeat: std::time::Instant =
+            std::time::Instant::now() - HEARTBEAT_INTERVAL;
         // Phase-adaptive cadence: re-read the current phase on every tick so
         // the sleep matches what the aircraft is actually doing right now
         // (5 s during takeoff/landing, 8 s on approach/final, 10 s on the
@@ -3911,11 +3986,36 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
             // in a final score so we can emit the activity-log entry
             // exactly once. `landing_score` flips from None to Some
             // inside `step_flight` after TOUCHDOWN_WINDOW_SECS.
-            announce_landing_score(&app, &flight);
+            // Returns Some(message) the first time a score is announced
+            // so the streamer can mirror it into `acars/logs`.
+            let landing_log_message = announce_landing_score(&app, &flight);
             // Diff cockpit knobs against last-seen values and log changes
             // to the activity feed. One entry per change, not per tick.
             detect_telemetry_changes(&app, &flight, &snap);
             let position = snapshot_to_position(&snap);
+
+            // Collect any text-log entries we want to mirror into phpVMS's
+            // `/acars/logs` for the PIREP detail page. Phase changes get a
+            // generic "Phase: <name>" line; landings get the touchdown
+            // summary. Posted in a single batch at the end of the tick to
+            // minimise HTTP round-trips.
+            let mut acars_log_entries: Vec<api_client::LogEntry> = Vec::new();
+            if let Some(new_phase) = phase_change {
+                acars_log_entries.push(api_client::LogEntry {
+                    log: format!("Phase: {}", phase_human_label(new_phase)),
+                    lat: Some(snap.lat),
+                    lon: Some(snap.lon),
+                    created_at: Some(Utc::now().to_rfc3339()),
+                });
+            }
+            if let Some(msg) = landing_log_message {
+                acars_log_entries.push(api_client::LogEntry {
+                    log: msg,
+                    lat: Some(snap.lat),
+                    lon: Some(snap.lon),
+                    created_at: Some(Utc::now().to_rfc3339()),
+                });
+            }
 
             // Try to drain any positions we couldn't ship in earlier
             // ticks before sending the new one — keeps phpVMS's row
@@ -3960,6 +4060,14 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                             snapshot: snap.clone(),
                         },
                     );
+                }
+                Err(ApiError::NotFound) => {
+                    // phpVMS soft-deleted the PIREP under us (most likely
+                    // the RemoveExpiredLiveFlights hourly cron). Queueing
+                    // would just spam 404s forever — handle it as a hard
+                    // remote cancellation instead.
+                    handle_remote_cancellation(&app, &flight, "POST positions");
+                    break;
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -4048,24 +4156,80 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                 // weather. Spawned async so a flaky aviationweather.gov
                 // doesn't stall the streamer.
                 maybe_spawn_metar_fetch(&app, &flight, new_phase);
-                if let Some(status) = phase_to_status(new_phase) {
-                    tracing::info!(
-                        pirep_id = %flight.pirep_id,
-                        ?new_phase,
-                        status,
-                        "flight phase transition"
-                    );
-                    let body = UpdateBody {
-                        state: None,
-                        status: Some(status.to_string()),
-                        notes: None,
-                    };
-                    if let Err(e) = client.update_pirep(&flight.pirep_id, &body).await {
+            }
+
+            // Unified heartbeat-and-phase-update: POST `/pireps/{id}/update`
+            // either when the phase just changed (so the live map sees the
+            // new status immediately) OR after every `HEARTBEAT_INTERVAL`
+            // (so phpVMS's RemoveExpiredLiveFlights cron never fires
+            // mid-flight). Both purposes use the same payload — sending
+            // monotonic flight_time / distance also guarantees the row is
+            // dirty so Eloquent always writes UPDATE and bumps updated_at.
+            let phase_for_heartbeat = phase_change.unwrap_or(current_phase);
+            let due_for_heartbeat = last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL;
+            if phase_change.is_some() || due_for_heartbeat {
+                let body = {
+                    let stats = flight.stats.lock().expect("flight stats");
+                    build_heartbeat_body(&snap, &stats, phase_for_heartbeat)
+                };
+                match client.update_pirep(&flight.pirep_id, &body).await {
+                    Ok(()) => {
+                        last_heartbeat = std::time::Instant::now();
+                        {
+                            let mut stats = flight.stats.lock().expect("flight stats");
+                            stats.last_heartbeat_at = Some(Utc::now());
+                        }
+                        tracing::debug!(
+                            pirep_id = %flight.pirep_id,
+                            phase = ?phase_for_heartbeat,
+                            phase_changed = phase_change.is_some(),
+                            flight_time_min = body.flight_time.unwrap_or(0),
+                            distance_nm = body.distance.unwrap_or(0.0),
+                            "PIREP heartbeat sent"
+                        );
+                    }
+                    Err(ApiError::NotFound) => {
+                        handle_remote_cancellation(&app, &flight, "POST update");
+                        break;
+                    }
+                    Err(e) => {
                         tracing::warn!(
                             pirep_id = %flight.pirep_id,
-                            ?new_phase,
+                            phase = ?phase_for_heartbeat,
                             error = %e,
-                            "could not push phase status update"
+                            "PIREP heartbeat failed"
+                        );
+                    }
+                }
+            }
+
+            // Mirror collected text events into phpVMS's `/acars/logs` for
+            // the PIREP detail page. Best-effort: a transient network
+            // error here doesn't matter — the activity log + recorder
+            // already have the durable copy. 404 still means the PIREP
+            // is gone, so handle that the same way as the heartbeat.
+            if !acars_log_entries.is_empty() {
+                match client
+                    .post_acars_logs(&flight.pirep_id, &acars_log_entries)
+                    .await
+                {
+                    Ok(()) => {
+                        tracing::debug!(
+                            pirep_id = %flight.pirep_id,
+                            count = acars_log_entries.len(),
+                            "ACARS log lines pushed"
+                        );
+                    }
+                    Err(ApiError::NotFound) => {
+                        handle_remote_cancellation(&app, &flight, "POST acars/logs");
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            pirep_id = %flight.pirep_id,
+                            count = acars_log_entries.len(),
+                            error = %e,
+                            "ACARS log push failed"
                         );
                     }
                 }
@@ -4073,6 +4237,45 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
         }
         tracing::info!(pirep_id = %flight.pirep_id, "position streamer stopped");
     });
+}
+
+/// Map SimBrief's text fix `<type>` ("apt", "wpt", "vor", "ndb", "ltlg")
+/// to phpVMS's numeric `nav_type` for `POST /pireps/{id}/route`. phpVMS
+/// is permissive (`nav_type` is `sometimes|int`); when we can't classify
+/// a fix we omit the field and let the server render it generically.
+fn simbrief_kind_to_nav_type(kind: &str) -> Option<i32> {
+    match kind.to_ascii_lowercase().as_str() {
+        "wpt" => Some(1),
+        "ndb" => Some(2),
+        "vor" => Some(3),
+        "apt" => Some(4),
+        _ => None,
+    }
+}
+
+/// Human-readable single-word label for a `FlightPhase`. Used in the
+/// `/acars/logs` text we ship to phpVMS. Pilots already see these in
+/// the German activity feed; matching them here keeps the PIREP detail
+/// consistent with what was on screen during the flight.
+fn phase_human_label(phase: FlightPhase) -> &'static str {
+    match phase {
+        FlightPhase::Preflight => "Preflight",
+        FlightPhase::Boarding => "Boarding",
+        FlightPhase::Pushback => "Pushback",
+        FlightPhase::TaxiOut => "Taxi Out",
+        FlightPhase::TakeoffRoll => "Takeoff Roll",
+        FlightPhase::Takeoff => "Takeoff",
+        FlightPhase::Climb => "Initial Climb",
+        FlightPhase::Cruise => "Cruise",
+        FlightPhase::Descent => "Descent",
+        FlightPhase::Approach => "Approach",
+        FlightPhase::Final => "Final",
+        FlightPhase::Landing => "Landing",
+        FlightPhase::TaxiIn => "Taxi In",
+        FlightPhase::BlocksOn => "On Blocks",
+        FlightPhase::Arrived => "Arrived",
+        FlightPhase::PirepSubmitted => "PIREP Submitted",
+    }
 }
 
 /// Read a snapshot from whichever adapter is currently active per
@@ -4746,6 +4949,91 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
     } else {
         None
     }
+}
+
+/// Build the body for an in-flight `POST /api/pireps/{id}/update` call.
+/// Used both by the periodic heartbeat (every `HEARTBEAT_INTERVAL`) and by
+/// phase-change callbacks. Sends monotonically growing `flight_time` and
+/// `distance` so Eloquent always sees the model as dirty and bumps
+/// `pireps.updated_at`, which is what the cleanup cron checks.
+fn build_heartbeat_body(
+    snap: &SimSnapshot,
+    stats: &FlightStats,
+    current_phase: FlightPhase,
+) -> UpdateBody {
+    let now = Utc::now();
+    let flight_time_secs = match (stats.takeoff_at, stats.landing_at) {
+        (Some(t), Some(l)) if l > t => (l - t).num_seconds().max(0) as i32,
+        (Some(t), None) => (now - t).num_seconds().max(0) as i32,
+        // Pre-takeoff: fall back to block-off so cancellation cron sees
+        // movement during the boarding/taxi period too.
+        _ => stats
+            .block_off_at
+            .map(|b| (now - b).num_seconds().max(0) as i32)
+            .unwrap_or(0),
+    };
+    // Same fuel arithmetic as the file body: block - remaining, in pounds.
+    let fuel_used = match (stats.block_fuel_kg, stats.last_fuel_kg) {
+        (Some(b), Some(c)) if b > c => Some((b - c) as f64 * KG_TO_LB),
+        _ => None,
+    };
+    // Prefer the peak altitude observed (matches the FILE-time `level`),
+    // but fall back to the current MSL altitude during early climb so the
+    // live map shows something sensible before peak gets captured.
+    let level = stats
+        .peak_altitude_ft
+        .map(|ft| ((ft / 100.0).round() * 100.0) as i32)
+        .or_else(|| {
+            if snap.altitude_msl_ft > 100.0 {
+                Some(((snap.altitude_msl_ft / 100.0).round() * 100.0) as i32)
+            } else {
+                None
+            }
+        })
+        .map(|v| v.max(0));
+    UpdateBody {
+        state: None,
+        status: phase_to_status(current_phase).map(|s| s.to_string()),
+        flight_time: Some(flight_time_secs / 60),
+        distance: Some(stats.distance_nm),
+        fuel_used,
+        level,
+        source_name: Some(format!("AeroACARS/{}", env!("CARGO_PKG_VERSION"))),
+        notes: None,
+    }
+}
+
+/// Handle a 404 from the live PIREP endpoints (positions / update). phpVMS
+/// soft-deletes in-flight PIREPs after `acars.live_time` hours of no
+/// `updated_at` bump (cron `RemoveExpiredLiveFlights`); when that happens,
+/// every subsequent post returns 404 and the streamer would otherwise
+/// retry-spam forever. This stops the streamer cleanly and surfaces the
+/// situation to the user so they can re-file as a manual PIREP.
+fn handle_remote_cancellation(app: &AppHandle, flight: &Arc<ActiveFlight>, source: &str) {
+    if flight.cancelled_remotely.swap(true, Ordering::SeqCst) {
+        // Already handled by an earlier 404 in the same cycle.
+        return;
+    }
+    flight.stop.store(true, Ordering::Relaxed);
+    log_activity_handle(
+        app,
+        ActivityLevel::Error,
+        "PIREP wurde vom Server gecancelt".to_string(),
+        Some(format!(
+            "{source} antwortet mit 404 — phpVMS hat den laufenden PIREP entfernt (vermutlich Inaktivitäts-Timeout). Bitte als Manual-PIREP einreichen."
+        )),
+    );
+    // Best-effort UI nudge — the dashboard listens for this and pops the
+    // manual-PIREP banner. Failure to emit isn't fatal; the activity-log
+    // entry above is the durable signal.
+    let _ = tauri::Emitter::emit(
+        app,
+        "pirep_cancelled_remotely",
+        serde_json::json!({
+            "pirep_id": flight.pirep_id,
+            "source": source,
+        }),
+    );
 }
 
 /// Build the custom-fields map sent in `POST /api/pireps/{id}/file`. Field
@@ -5455,56 +5743,69 @@ enum MetarKind {
 /// the first time `step_flight` finalises a score. Called every tick;
 /// idempotent by design — uses an extra "already announced" flag in
 /// `FlightStats` so resumed sessions that already filed don't re-emit.
-fn announce_landing_score(app: &AppHandle, flight: &ActiveFlight) {
+/// Returns `Some(<acars-log-message>)` exactly once (the first tick after
+/// the touchdown analyzer locked in a score) so the streamer can mirror
+/// the touchdown summary into `POST /pireps/{id}/acars/logs` for the
+/// PIREP detail page. Subsequent ticks return None.
+fn announce_landing_score(app: &AppHandle, flight: &ActiveFlight) -> Option<String> {
     let stats = flight.stats.lock().expect("flight stats");
-    if !stats.landing_score_announced {
-        if let Some(score) = stats.landing_score {
-            let peak_vs = stats.landing_peak_vs_fpm.unwrap_or(0.0);
-            let peak_g = stats.landing_peak_g_force.unwrap_or(0.0);
-            let bounces = stats.bounce_count;
-            let level = match score {
-                LandingScore::Smooth | LandingScore::Acceptable => ActivityLevel::Info,
-                LandingScore::Firm => ActivityLevel::Info,
-                LandingScore::Hard | LandingScore::Severe => ActivityLevel::Warn,
-            };
-            let bounce_part = if bounces > 0 {
-                format!(", {} bounce{}", bounces, if bounces == 1 { "" } else { "s" })
-            } else {
-                String::new()
-            };
-            // Drop the lock before logging so log_activity_handle can
-            // grab the activity_log mutex without deadlocking via
-            // re-entrant borrow.
-            drop(stats);
-            let grade = letter_grade(score.numeric());
-            log_activity_handle(
-                app,
-                level,
-                format!("Touchdown: {} ({})", grade, score.label()),
-                Some(format!(
-                    "V/S {:.0} fpm, G {:.2}{} — Score {}/100",
-                    peak_vs,  // signed: negative = descent, matches the PIREP
-                    peak_g,
-                    bounce_part,
-                    score.numeric(),
-                )),
-            );
-            record_event(
-                app,
-                &flight.pirep_id,
-                &FlightLogEvent::LandingScored {
-                    timestamp: Utc::now(),
-                    score: score.label().to_string(),
-                    peak_vs_fpm: peak_vs,
-                    peak_g_force: peak_g,
-                    bounce_count: bounces,
-                },
-            );
-            // Re-acquire to flag it as announced.
-            let mut stats = flight.stats.lock().expect("flight stats");
-            stats.landing_score_announced = true;
-        }
+    if stats.landing_score_announced {
+        return None;
     }
+    let score = stats.landing_score?;
+    let peak_vs = stats.landing_peak_vs_fpm.unwrap_or(0.0);
+    let peak_g = stats.landing_peak_g_force.unwrap_or(0.0);
+    let bounces = stats.bounce_count;
+    let level = match score {
+        LandingScore::Smooth | LandingScore::Acceptable => ActivityLevel::Info,
+        LandingScore::Firm => ActivityLevel::Info,
+        LandingScore::Hard | LandingScore::Severe => ActivityLevel::Warn,
+    };
+    let bounce_part = if bounces > 0 {
+        format!(", {} bounce{}", bounces, if bounces == 1 { "" } else { "s" })
+    } else {
+        String::new()
+    };
+    // Drop the lock before logging so log_activity_handle can
+    // grab the activity_log mutex without deadlocking via
+    // re-entrant borrow.
+    drop(stats);
+    let grade = letter_grade(score.numeric());
+    log_activity_handle(
+        app,
+        level,
+        format!("Touchdown: {} ({})", grade, score.label()),
+        Some(format!(
+            "V/S {:.0} fpm, G {:.2}{} — Score {}/100",
+            peak_vs, // signed: negative = descent, matches the PIREP
+            peak_g,
+            bounce_part,
+            score.numeric(),
+        )),
+    );
+    record_event(
+        app,
+        &flight.pirep_id,
+        &FlightLogEvent::LandingScored {
+            timestamp: Utc::now(),
+            score: score.label().to_string(),
+            peak_vs_fpm: peak_vs,
+            peak_g_force: peak_g,
+            bounce_count: bounces,
+        },
+    );
+    // Re-acquire to flag it as announced.
+    let mut stats = flight.stats.lock().expect("flight stats");
+    stats.landing_score_announced = true;
+    Some(format!(
+        "Touchdown {} ({}) — V/S {:.0} fpm, G {:.2}{}, score {}/100",
+        grade,
+        score.label(),
+        peak_vs,
+        peak_g,
+        bounce_part,
+        score.numeric(),
+    ))
 }
 
 /// Diff cockpit knob state against the last-logged values and emit one
@@ -6572,6 +6873,65 @@ async fn try_resume_flight(
         return;
     }
 
+    // Verify the PIREP still exists server-side BEFORE rebuilding the
+    // streamer. phpVMS's RemoveExpiredLiveFlights cron may have soft-deleted
+    // it while the client was offline (heartbeat couldn't fire), in which
+    // case adopting locally would just produce a wave of 404s. A 404 here
+    // means the PIREP is gone — clear the disk record and let the user
+    // re-prefile cleanly. Other errors (network, auth) are non-fatal —
+    // we proceed and let the streamer's own error handling kick in.
+    match client.get_pirep(&persisted.pirep_id).await {
+        Ok(p) => {
+            // State 0 = IN_PROGRESS. Anything else means the PIREP was
+            // filed / cancelled / accepted elsewhere — there's nothing for
+            // us to resume into.
+            if p.state.is_some() && p.state != Some(0) {
+                tracing::info!(
+                    pirep_id = %persisted.pirep_id,
+                    state = ?p.state,
+                    status = ?p.status,
+                    "persisted PIREP no longer in progress, discarding resume"
+                );
+                clear_persisted_flight(app);
+                log_activity_handle(
+                    app,
+                    ActivityLevel::Warn,
+                    "Gespeicherter Flug nicht mehr aktiv".to_string(),
+                    Some(format!(
+                        "PIREP {} hat serverseitig Status {:?} — Resume verworfen.",
+                        persisted.pirep_id, p.status
+                    )),
+                );
+                return;
+            }
+        }
+        Err(ApiError::NotFound) => {
+            tracing::info!(
+                pirep_id = %persisted.pirep_id,
+                "persisted PIREP no longer on server (likely soft-deleted by cron), discarding resume"
+            );
+            clear_persisted_flight(app);
+            log_activity_handle(
+                app,
+                ActivityLevel::Warn,
+                "Gespeicherter Flug existiert nicht mehr".to_string(),
+                Some(
+                    "phpVMS hat den PIREP entfernt (vermutlich Inaktivitäts-Timeout). \
+                     Bitte den Flug neu starten oder als Manual-PIREP einreichen."
+                        .to_string(),
+                ),
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(
+                pirep_id = %persisted.pirep_id,
+                error = %e,
+                "could not verify persisted PIREP — proceeding with resume anyway"
+            );
+        }
+    }
+
     // Same guard as flight_start / flight_adopt: if another resume is
     // already running (StrictMode double-mount in dev fires
     // phpvms_load_session twice in close succession), bail silently.
@@ -6679,6 +7039,7 @@ async fn try_resume_flight(
         // the timer expires), or `flight_cancel` aborts the PIREP.
         was_just_resumed: AtomicBool::new(true),
         streamer_spawned: AtomicBool::new(false),
+        cancelled_remotely: AtomicBool::new(false),
     });
 
     {

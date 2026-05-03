@@ -122,3 +122,4 @@ client/aeroacars-updater.key.pub
 
 # Local reverse-engineering / vendor reference assets — never push.
 reference/
+.research/
