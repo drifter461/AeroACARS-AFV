@@ -32,12 +32,32 @@ anpassen.
 
 ## Installation
 
-1. [Latest Release](https://github.com/MANFahrer-GF/AeroACARS/releases/latest) herunterladen
-2. `AeroACARS_<version>_x64-setup.exe` ausführen
-3. SmartScreen-Warnung wegklicken („Weitere Informationen" → „Trotzdem ausführen") — wir sind noch nicht code-signed
-4. AeroACARS startet automatisch. Login mit deinem phpVMS-API-Key.
+Lade dir das Paket für deine Plattform aus dem [Latest Release](https://github.com/MANFahrer-GF/AeroACARS/releases/latest) herunter.
 
-Auto-Updates kommen ab v0.1.0+ direkt in der App.
+### Windows (10 / 11, x64)
+
+1. `AeroACARS_<version>_x64-setup.exe` (NSIS-Installer) herunterladen und ausführen
+2. SmartScreen-Warnung wegklicken: „Weitere Informationen" → „Trotzdem ausführen" — wir sind noch nicht code-signed
+3. AeroACARS startet nach der Installation automatisch
+4. Login mit deinem phpVMS-API-Key
+
+### macOS (Apple Silicon — M1 / M2 / M3 / M4)
+
+1. `AeroACARS_<version>_aarch64.dmg` herunterladen
+2. DMG öffnen → AeroACARS-Icon in den Applications-Ordner ziehen
+3. **Beim ersten Start:** Gatekeeper blockt die App, weil sie nicht über die Apple Notarization gegangen ist. Du hast zwei Wege:
+   - **Per Rechtsklick:** Im Finder auf AeroACARS rechtsklicken → „Öffnen" → „Öffnen" im Dialog bestätigen. Danach merkt sich macOS die Erlaubnis und startet die App ab dann normal.
+   - **Per Terminal** (falls Rechtsklick die Option nicht zeigt — kommt bei strengeren Gatekeeper-Einstellungen vor):
+     ```bash
+     xattr -dr com.apple.quarantine /Applications/AeroACARS.app
+     ```
+4. Login mit deinem phpVMS-API-Key
+
+> **Hinweis:** Intel Macs werden derzeit nicht offiziell gebaut. Wenn dafür Bedarf besteht: ein Issue aufmachen, der Tauri-Build kann ohne große Mühe um `x86_64-apple-darwin` erweitert werden.
+
+### Auto-Updates
+
+Ab v0.1.0+ erscheinen neue Versionen direkt als Update-Banner in der App — kein manueller Download mehr nötig. Der Updater verifiziert die Bundles per Ed25519-Signatur, also auch ohne Code-Signing/Notarization sicher.
 
 ---
 
@@ -105,6 +125,63 @@ npm install
 npm run tauri dev          # Dev-Mode mit Hot-Reload
 npm run tauri build -- --bundles nsis   # Release-Installer bauen
 ```
+
+---
+
+## Troubleshooting / Logs
+
+Wenn AeroACARS sich komisch verhält und du dem Issue-Tracker etwas Substanzielles mitschicken willst — hier ist, was wo liegt.
+
+### Wo AeroACARS Daten ablegt
+
+Alle Dateien liegen unter dem Tauri-Standard-`app_data_dir` mit Bundle-ID `com.aeroacars.app`:
+
+| Plattform | Vollständiger Pfad |
+|---|---|
+| **Windows** | `%APPDATA%\com.aeroacars.app\` <br>(typisch: `C:\Users\<dein-user>\AppData\Roaming\com.aeroacars.app\`) |
+| **macOS** | `~/Library/Application Support/com.aeroacars.app/` |
+
+In Windows kannst du den Ordner direkt mit `Win+R` → `%APPDATA%\com.aeroacars.app` öffnen. In macOS mit Finder → `Cmd+Shift+G` → den Pfad einfügen.
+
+### Was drin liegt
+
+| Datei | Was es ist |
+|---|---|
+| `flight_logs/<pirep_id>.jsonl` | **Per-Flug-Recorder** — eine Zeile pro Event (Position, Phasen-Übergang, Touchdown-Score, METAR-Snapshot). Append-only JSONL, beste Quelle für „warum hat der Flug X gemacht?". Eine Datei pro PIREP. |
+| `activity_log.json` | **In-App-Activity-Feed** — exakt die Zeilen, die im Cockpit-Tab erscheinen, persistiert über Restarts. |
+| `active_flight.json` | Snapshot des aktuell laufenden Flugs für die Resume-Funktion. Existiert nur während ein Flug läuft. |
+| `landing_history.json` | Historische Landungen für den „Landung"-Tab. |
+| `position_queue.bin` | Offline-Backlog: Positionen die wegen Netzwerkproblemen noch nicht hochgeladen werden konnten. Wird automatisch geleert sobald wieder online. |
+| `site.json`, `sim.json` | Lokale Settings (phpVMS-URL, gewählter Sim). Kein API-Key — der liegt im OS-Keyring. |
+
+Der **API-Key** liegt **nicht** als Datei vor. Er wird über das OS-Keyring (Windows Credential Manager / macOS Keychain) gespeichert. Kein Plaintext auf Disk.
+
+### Tracing / Console-Logs
+
+Die Rust-tracing-Ausgaben (HTTP-Requests, SimConnect-Status, Phasen-Berechnung im Detail) gehen aktuell nur auf **stderr** — sie landen **nicht** auf der Disk. Wenn du sie brauchst:
+
+- **Windows:** AeroACARS aus einer PowerShell-Konsole starten: `& "C:\Program Files\AeroACARS\AeroACARS.exe"` — dann erscheinen die tracing-Zeilen im Terminal.
+- **macOS:** Aus dem Terminal: `/Applications/AeroACARS.app/Contents/MacOS/AeroACARS`
+
+Verbosity-Level steuern via `RUST_LOG`:
+
+```bash
+# Standardmodus (info)
+RUST_LOG=info  ./AeroACARS
+
+# Volles Debug für unseren Code, info für alles andere
+RUST_LOG=info,aeroacars=debug  ./AeroACARS
+```
+
+### Issue melden
+
+Wenn was schiefgeht, ist die wertvollste Info im Bug-Report:
+
+1. Die `flight_logs/<pirep_id>.jsonl` des betroffenen Flugs (zippen, anhängen)
+2. Der relevante Ausschnitt aus `activity_log.json`
+3. Falls reproduzierbar: ein paar Zeilen tracing-Output mit `RUST_LOG=info,aeroacars=debug` aus dem Terminal-Run
+
+Issues bitte über → [github.com/MANFahrer-GF/AeroACARS/issues](https://github.com/MANFahrer-GF/AeroACARS/issues)
 
 ---
 
