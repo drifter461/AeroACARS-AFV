@@ -230,10 +230,140 @@ fn clean_atc_model(raw: &str) -> Option<String> {
 /// Loose check: does the aircraft title from MSFS appear to mention the given
 /// ICAO code? Used as a permissive backup when ATC MODEL parses to one code
 /// but the title says something completely different.
+///
+/// "Mention" includes the ICAO code AND any of its known long-form
+/// aliases — e.g. for `icao = "A359"` the title "Airbus A350-900"
+/// counts as a match. Without this, a pilot on a real GSG flight
+/// (Emirates UAE770 EK770, A359 bid, A350-900 sim) got blocked
+/// with "Aircraft mismatch" even though it's the same aircraft.
 fn title_mentions_icao(title: &str, icao: &str) -> bool {
     let title_upper = title.to_uppercase();
     let icao_upper = icao.to_uppercase();
-    title_upper.contains(&icao_upper)
+    if title_upper.contains(&icao_upper) {
+        return true;
+    }
+    // Long-form aliases. If any alias is in the title, accept.
+    aircraft_aliases(&icao_upper)
+        .iter()
+        .any(|alias| title_upper.contains(alias))
+}
+
+/// Bidirectional alias table for aircraft type identification.
+/// phpVMS stores `aircraft.icao` as the ICAO 4-letter type code
+/// (`A359`, `B738`, `B77W`), but MSFS's `ATC MODEL` and `TITLE`
+/// SimVars often expose the marketing/long form (`A350-900`,
+/// `737-800`, `777-300ER`). Both sides refer to the same airframe;
+/// our match logic must accept either.
+///
+/// Returns the list of long-form aliases for the given ICAO code,
+/// PLUS the inverse — if `icao` looks like a marketing form, the
+/// aliases include the corresponding ICAO code so a sim that
+/// reports the ICAO can still match a long-form title and vice
+/// versa. Empty list = no known aliases (fall through to
+/// strict-string comparison).
+///
+/// Live bug 2026-05-04: Emirates A359 bid blocked because sim
+/// loaded "A350-900 (No Cabin)" — same aircraft, different name.
+fn aircraft_aliases(code: &str) -> &'static [&'static str] {
+    // Match against the uppercased input. Long-form aliases are
+    // partial substrings (we only need ONE to be present in the
+    // sim title) — so "A350-900" alone catches "Airbus A350-900",
+    // "A350-900 No Cabin", "Asobo A350-900", etc.
+    match code {
+        // ---- Airbus ----
+        // A220 family
+        "BCS1" => &["A220-100", "CS100"],
+        "BCS3" => &["A220-300", "CS300"],
+        // A320 family
+        "A318" => &["A318"],
+        "A319" => &["A319"],
+        "A20N" => &["A320NEO", "A320-NEO", "A320 NEO"],
+        "A320" => &["A320"],
+        "A21N" => &["A321NEO", "A321-NEO", "A321 NEO"],
+        "A321" => &["A321"],
+        // A330 family
+        "A332" => &["A330-200"],
+        "A333" => &["A330-300"],
+        "A338" => &["A330-800"],
+        "A339" => &["A330-900"],
+        // A340 family
+        "A342" => &["A340-200"],
+        "A343" => &["A340-300"],
+        "A345" => &["A340-500"],
+        "A346" => &["A340-600"],
+        // A350 family — the bug
+        "A359" => &["A350-900", "A350"],
+        "A35K" => &["A350-1000"],
+        // A380
+        "A388" => &["A380-800", "A380"],
+
+        // ---- Boeing ----
+        // 717
+        "B712" => &["717-200", "717"],
+        // 737 NG family
+        "B736" => &["737-600"],
+        "B737" => &["737-700"],
+        "B738" => &["737-800"],
+        "B739" => &["737-900"],
+        // 737 MAX
+        "B37M" => &["737 MAX 7", "737-7", "737MAX-7"],
+        "B38M" => &["737 MAX 8", "737-8", "737MAX-8"],
+        "B39M" => &["737 MAX 9", "737-9", "737MAX-9"],
+        "B3XM" => &["737 MAX 10", "737-10"],
+        // 747
+        "B741" => &["747-100"],
+        "B742" => &["747-200"],
+        "B744" => &["747-400"],
+        "B748" => &["747-8"],
+        // 757
+        "B752" => &["757-200"],
+        "B753" => &["757-300"],
+        // 767
+        "B762" => &["767-200"],
+        "B763" => &["767-300"],
+        "B764" => &["767-400"],
+        // 777
+        "B772" => &["777-200"],
+        "B77L" => &["777-200LR", "777-200 LR"],
+        "B773" => &["777-300"],
+        "B77W" => &["777-300ER", "777-300 ER"],
+        "B77F" => &["777F", "777-200F"],
+        // 787
+        "B788" => &["787-8"],
+        "B789" => &["787-9"],
+        "B78X" => &["787-10"],
+
+        // ---- Embraer ----
+        "E170" => &["170"],
+        "E175" => &["175"],
+        "E190" => &["190"],
+        "E195" => &["195"],
+        "E290" => &["E190-E2", "E2-190"],
+        "E295" => &["E195-E2", "E2-195"],
+
+        // No alias known — fall through to strict comparison.
+        _ => &[],
+    }
+}
+
+/// Symmetric: do these two aircraft type strings refer to the
+/// same airframe? Tries both directions: are `actual`'s long-form
+/// aliases mentioned by `expected`? And are `expected`'s aliases
+/// mentioned by `actual`? Plus strict equality fallback.
+fn aircraft_types_match(expected: &str, actual: &str) -> bool {
+    let exp = expected.to_uppercase();
+    let act = actual.to_uppercase();
+    if exp == act {
+        return true;
+    }
+    // Either side might be the short ICAO form, the other the
+    // long marketing form. Check both directions.
+    if aircraft_aliases(&exp).iter().any(|alias| act.contains(alias))
+        || aircraft_aliases(&act).iter().any(|alias| exp.contains(alias))
+    {
+        return true;
+    }
+    false
 }
 
 /// Shared application state — wraps the currently-authenticated client (if any)
@@ -3223,7 +3353,12 @@ async fn flight_start(
         .to_string();
     if let (Some(expected), Some(actual)) = (expected_icao.as_ref(), sim_icao.as_ref()) {
         let title_supports_expected = title_mentions_icao(&sim_title, expected);
-        if expected != actual && !title_supports_expected {
+        // Use alias-aware comparison so e.g. "A359" (ICAO) matches
+        // "A350-900" (sim long-form). See `aircraft_types_match`.
+        // Live bug 2026-05-04: Emirates UAE770 A359 bid blocked
+        // because sim loaded "A350-900 (No Cabin)" — same aircraft.
+        let types_match_loose = aircraft_types_match(expected, actual);
+        if !types_match_loose && !title_supports_expected {
             let registration = expected_aircraft
                 .registration
                 .as_deref()
@@ -9486,6 +9621,64 @@ mod touch_and_go_go_around_tests {
         );
         assert!(out.is_none());
         assert_eq!(stats.go_around_count, 0);
+    }
+}
+
+#[cfg(test)]
+mod aircraft_alias_tests {
+    use super::aircraft_types_match;
+
+    /// Live bug 2026-05-04: Emirates UAE770 EK770 (A359 bid)
+    /// blocked because the sim loaded "A350-900 (No Cabin)" — both
+    /// names refer to the same airframe.
+    #[test]
+    fn a359_matches_a350_900_long_form() {
+        assert!(aircraft_types_match("A359", "A350-900"));
+        assert!(aircraft_types_match("A350-900", "A359"));
+    }
+
+    #[test]
+    fn b738_matches_737_800() {
+        assert!(aircraft_types_match("B738", "737-800"));
+        assert!(aircraft_types_match("737-800", "B738"));
+    }
+
+    #[test]
+    fn b77w_matches_777_300er() {
+        assert!(aircraft_types_match("B77W", "777-300ER"));
+        assert!(aircraft_types_match("777-300ER", "B77W"));
+        assert!(aircraft_types_match("B77W", "777-300 ER"));
+    }
+
+    #[test]
+    fn a20n_matches_a320neo() {
+        assert!(aircraft_types_match("A20N", "A320NEO"));
+        assert!(aircraft_types_match("A20N", "A320-NEO"));
+        assert!(aircraft_types_match("A20N", "A320 NEO"));
+    }
+
+    #[test]
+    fn b789_matches_787_9() {
+        assert!(aircraft_types_match("B789", "787-9"));
+    }
+
+    #[test]
+    fn unrelated_types_dont_match() {
+        // Real mismatch should still be blocked.
+        assert!(!aircraft_types_match("B738", "A320"));
+        assert!(!aircraft_types_match("A359", "B77W"));
+    }
+
+    #[test]
+    fn case_insensitive() {
+        assert!(aircraft_types_match("a359", "a350-900"));
+        assert!(aircraft_types_match("A359", "a350-900"));
+    }
+
+    #[test]
+    fn strict_equality_still_works_for_unaliased() {
+        assert!(aircraft_types_match("DH8D", "DH8D"));
+        assert!(!aircraft_types_match("DH8D", "DH8C"));
     }
 }
 
