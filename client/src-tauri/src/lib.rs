@@ -8218,6 +8218,72 @@ fn sim_force_resync(app: AppHandle, state: tauri::State<'_, AppState>) {
     }
 }
 
+// ---- PMDG SDK status (Phase H.4 / v0.2.0) ----
+//
+// The Settings tab needs to know:
+//   * Is a PMDG aircraft loaded? (variant detected)
+//   * Are we subscribed?
+//   * Are we actually receiving data? (= SDK enabled in pilot's
+//     options ini)
+// to show the "SDK enabled?" hint when needed and to display the
+// premium-telemetry status badge in the cockpit tab.
+
+/// Minimal serializable PMDG status for the UI. Mirrors the
+/// adapter's `PmdgStatus` but with the variant flattened to a
+/// string so JSON parsing is trivial on the frontend side.
+#[derive(serde::Serialize)]
+struct PmdgStatusDto {
+    /// `"ng3"`, `"x777"`, or `null` when no PMDG aircraft is loaded.
+    variant: Option<&'static str>,
+    /// True once SimConnect ClientData subscription has been
+    /// successfully registered.
+    subscribed: bool,
+    /// True once at least one ClientData packet has actually arrived.
+    /// `subscribed && !ever_received` (after a few seconds) is the
+    /// signal that SDK isn't enabled in the pilot's options ini.
+    ever_received: bool,
+    /// Seconds since the last ClientData packet. `null` when never.
+    stale_secs: Option<u64>,
+    /// True when (variant detected, subscribed, but no data flowing
+    /// for >5 s) — the heuristic for "SDK probably not enabled".
+    /// UI shows the enable-hint modal when this is true.
+    looks_like_sdk_disabled: bool,
+}
+
+#[tauri::command]
+fn pmdg_status(state: tauri::State<'_, AppState>) -> PmdgStatusDto {
+    #[cfg(target_os = "windows")]
+    {
+        let adapter = state.msfs.lock().expect("msfs lock");
+        let s = adapter.pmdg_status();
+        return PmdgStatusDto {
+            variant: s.variant.map(|v| match v {
+                sim_msfs::pmdg::PmdgVariant::Ng3 => "ng3",
+                sim_msfs::pmdg::PmdgVariant::X777 => "x777",
+            }),
+            subscribed: s.subscribed,
+            ever_received: s.ever_received,
+            stale_secs: if s.stale_secs == u64::MAX {
+                None
+            } else {
+                Some(s.stale_secs)
+            },
+            looks_like_sdk_disabled: s.looks_like_sdk_disabled(),
+        };
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = state;
+        PmdgStatusDto {
+            variant: None,
+            subscribed: false,
+            ever_received: false,
+            stale_secs: None,
+            looks_like_sdk_disabled: false,
+        }
+    }
+}
+
 // ---- Live SimVar / LVar inspector (Settings → Debug) ----
 //
 // These commands forward to the MsfsAdapter's inspector watchlist
@@ -9214,6 +9280,7 @@ pub fn run() {
             sim_set_kind,
             sim_status,
             sim_force_resync,
+            pmdg_status,
             airport_get,
             flight_status,
             flight_start,
