@@ -304,6 +304,16 @@ export interface ActiveFlightInfo {
    *  the pilot to confirm the actual destination so the PIREP can be
    *  filed with the correct `arr_airport_id`. Null on normal arrivals. */
   divert_hint: DivertHint | null;
+  /** Touch-and-go count detected during the flight. Sustained climb-back
+   *  above 100 ft AGL within 30 s of an on-ground edge counts as a T&G;
+   *  the FSM also reverts to Climb so subsequent landing detection works
+   *  normally. Always 0 on a routine A→B. */
+  touch_and_go_count: number;
+  /** Confirmed go-around count. Sustained 8 s of climb above lowest
+   *  approach AGL + 200 ft with V/S > +500 fpm during Approach/Final
+   *  fires this. Independent of T&G — a missed approach without
+   *  ground contact only bumps this counter. */
+  go_around_count: number;
 }
 
 /** Mirrors the Rust-side `ReleaseNotes` struct. Returned by the

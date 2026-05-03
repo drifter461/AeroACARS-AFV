@@ -571,6 +571,8 @@
     "elapsed": "Elapsed",
     "distance": "Distance",
     "positions": "Positions sent",
+    "touch_and_go": "Touch-and-Go",
+    "go_around": "Go-Around",
     "end": "End flight (file PIREP)",
     "filing": "Filing…",
     "cancel": "Discard flight",

@@ -74,6 +74,22 @@ export function InfoStrip({ info, snapshot, elapsedMinutes }: Props) {
           label={t("active_flight.positions")}
           value={String(info.position_count)}
         />
+        {/* Touch-and-go + go-around counters: hidden until they fire,
+            so a routine A→B keeps the Trip group at three cells. The
+            moment a T&G or GA happens the cell appears and stays for
+            the rest of the flight as a quiet running tally. */}
+        {info.touch_and_go_count > 0 && (
+          <Cell
+            label={t("active_flight.touch_and_go")}
+            value={String(info.touch_and_go_count)}
+          />
+        )}
+        {info.go_around_count > 0 && (
+          <Cell
+            label={t("active_flight.go_around")}
+            value={String(info.go_around_count)}
+          />
+        )}
       </Group>
     </section>
   );

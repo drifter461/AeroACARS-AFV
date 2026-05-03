@@ -571,6 +571,8 @@
     "elapsed": "Dauer",
     "distance": "Strecke",
     "positions": "Positionen gesendet",
+    "touch_and_go": "Touch-and-Go",
+    "go_around": "Durchstarter",
     "end": "Flug beenden (PIREP einreichen)",
     "filing": "Reiche ein…",
     "cancel": "Flug verwerfen",

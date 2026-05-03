@@ -355,3 +355,141 @@ Wir sind **nicht nur „mit der Konkurrenz auf Augenhöhe", sondern messbar prä
 Der einzige Punkt wo Konkurrenten einen klaren Vorteil hatten (SimCARS' 30-s-Arming-Gate gegen False-Positives) ist eine bewusste Trade-off-Entscheidung von uns zugunsten Touch-and-Go-Trackbarkeit.
 
 Sollte sich das Verhalten im echten Einsatz als false-positive-anfällig herausstellen, ist das Gate eine ~20-Zeilen-Ergänzung in `step_flight`.
+
+---
+
+## H. Touch-and-Go + Go-Around Detection (v0.1.26)
+
+Konkurrenz-Recherche (SmartCARS 3, Volanta, vmsACARS) hat klar
+gezeigt: **niemand** trackt Touch-and-Go oder Go-Around semantisch.
+SmartCARS hat eine Boolean-Variable `IsLanded`, die nach dem ersten
+on-ground edge auf `true` springt und nie wieder auf `false` geht —
+ein T&G wird also wie eine ganz normale Landung verbucht (mit dem
+Score der ersten Berührung), und der zweite Touchdown wird komplett
+ignoriert. Volanta und vmsACARS verhalten sich identisch.
+
+AeroACARS unterscheidet ab v0.1.26 explizit zwischen **Touch-and-Go**
+(Berührung mit Wieder-Climb-Out) und **Final Landing** (Berührung mit
+Rollout bis Stillstand), und detektiert zusätzlich **Go-Arounds**
+(rejected approach OHNE Bodenkontakt, gefolgt von Climb).
+
+### H.1. Touch-and-Go-Klassifikator
+
+Zustände auf `FlightStats`:
+
+```rust
+touchdown_events: Vec<TouchdownEvent>,
+touch_and_go_pending_since: Option<DateTime<Utc>>,
+```
+
+`TouchdownEvent` enthält Zeitstempel, Kind (`TouchAndGo` |
+`FinalLanding`), peak V/S, peak G, Lat/Lon und sub_bounces.
+
+Algorithmus (im FSM `FlightPhase::Landing`-Arm):
+
+1. Beim on-ground edge wird `landing_at` gestempelt — wie bisher.
+2. Innerhalb von `TOUCH_AND_GO_WATCH_SECS` (= 30 s) nach
+   `landing_at` läuft der T&G-Watcher parallel zum Score-Window.
+3. Bedingungen für T&G-Klassifikation (alle gleichzeitig erfüllt
+   für `TOUCH_AND_GO_DWELL_SECS` = 1 s):
+   - `altitude_agl_ft > TOUCH_AND_GO_AGL_THRESHOLD_FT` (= 100 ft)
+   - `!on_ground`
+   - `engines_running > 0`
+4. Bei Klassifikation:
+   - `TouchdownEvent { kind: TouchAndGo }` wird gepusht
+   - alle `landing_*`-Felder + `bounce_count` werden zurückgesetzt
+     (damit der NÄCHSTE Touchdown ein frisches Score-Window kriegt;
+     der T&G zieht den finalen Score nicht runter)
+   - `next_phase = FlightPhase::Climb` — damit bei der nächsten
+     Annäherung die normalen Phase-Übergänge wieder funktionieren
+     (Approach → Final → Landing).
+   - Eintrag in `pending_acars_logs` für den Streamer:
+     `"Touch-and-go #N — V/S … fpm, G …"`
+
+5. Verstreicht `TOUCH_AND_GO_WATCH_SECS` ohne Climb-Out, wird der
+   gespeicherte Touchdown als `kind: FinalLanding` finalisiert
+   (genau einmal — guard via `last().timestamp != touchdown`).
+
+**Trade-off:** Das 1-Sekunden-Dwell-Fenster ist sehr kurz, aber
+gerechtfertigt — die vorgelagerte AGL-Bedingung (100 ft) filtert
+Bouncing zuverlässig raus. Strut-Oszillation kommt nicht mal in die
+Nähe von 100 ft AGL.
+
+### H.2. Go-Around-Detektor
+
+Zustände auf `FlightStats`:
+
+```rust
+go_around_count: u32,
+lowest_agl_during_approach_ft: Option<f32>,
+go_around_climb_pending_since: Option<DateTime<Utc>>,
+```
+
+Helfer (in `lib.rs`):
+
+- `update_lowest_approach_agl(stats, snap)` — pflegt das Minimum
+  über die Approach/Final-Phase. Negative Glitches werden ignoriert
+  (Terrain-Mesh-Hiccups in der Nähe von Bergen würden sonst das
+  Minimum vergiften und jeden späteren Sample wie einen 200 ft
+  Climb-back aussehen lassen).
+- `check_go_around(stats, snap, now) -> Option<FlightPhase>` —
+  liefert `Some(FlightPhase::Climb)` zurück, wenn ein Go-Around
+  klassifiziert wurde. Wird in den `Approach`- und `Final`-Armen
+  der FSM aufgerufen.
+
+Bedingungen (alle gleichzeitig für `GO_AROUND_DWELL_SECS` = 8 s):
+
+- `lowest_agl_during_approach_ft <= 1500.0` — nur wenn der Pilot
+  überhaupt in Approach-typische Höhen abgesunken ist; ein Pilot,
+  der die GS von oben fängt, soll keinen GA triggern, nur weil er
+  beim Levelling kurz Climb hat.
+- `agl > lowest + GO_AROUND_AGL_RECOVERY_FT` (= +200 ft)
+- `vertical_speed_fpm > GO_AROUND_MIN_VS_FPM` (= +500 fpm)
+- `!on_ground`
+- `engines_running > 0`
+
+Bei Klassifikation:
+
+- `go_around_count++`
+- `lowest_agl_during_approach_ft = None` (nächste Annäherung
+  startet mit frischem Minimum)
+- Eintrag in `pending_acars_logs` für den Streamer
+- `next_phase = FlightPhase::Climb` — die FSM kehrt zurück in den
+  Climb-Arm; der nächste Sinkflug triggert wieder normal Descent →
+  Approach → Final.
+
+### H.3. UI-Sichtbarkeit
+
+- **Cockpit InfoStrip** (`info_strip.trip` Group): zeigt Cells
+  `Touch-and-Go: N` und `Durchstarter: N` — nur wenn N > 0, sonst
+  bleibt die Trip-Group bei den ursprünglichen drei Cells.
+- **PIREP custom fields** (`build_pirep_fields`):
+  - `Touchdowns: N (X T&G + final)` — nur bei T&G > 0 oder mehr
+    als einem Touchdown total.
+  - `Go-Arounds: N` — nur bei N > 0.
+- **PIREP notes** (`build_pirep_notes`): Sektion `TOUCHDOWNS` mit
+  einer Zeile pro Event (`#1 T&G   12:34:56  V/S -350 fpm · G
+  1.18 · bounces 0`), und Sektion `GO-AROUNDS` mit dem Counter.
+- **ACARS log lines** (Streamer drained `pending_acars_logs` jede
+  Tick): erscheinen auf der phpVMS-PIREP-Detail-Page in
+  chronologischer Reihenfolge.
+
+### H.4. Tests
+
+`#[cfg(test)] mod touch_and_go_go_around_tests` in `lib.rs`
+deckt 9 Szenarien:
+
+- `lowest_agl_starts_unset_and_takes_first_sample`
+- `lowest_agl_only_decreases_never_increases`
+- `lowest_agl_ignores_negative_glitch_samples`
+- `go_around_does_nothing_without_a_prior_minimum`
+- `go_around_fires_after_dwell_seconds`
+- `go_around_does_not_fire_below_recovery_threshold`
+- `go_around_dwell_resets_when_conditions_break`
+- `go_around_does_not_fire_when_aircraft_caught_glideslope_high`
+- `go_around_requires_engines_running`
+
+End-to-end-Test der FSM ist nicht abgedeckt — die Helper sind die
+testbare Oberfläche; die Integration kommt aus realem In-Sim-Flug
+gegen einen Dev-Server-PIREP.
+

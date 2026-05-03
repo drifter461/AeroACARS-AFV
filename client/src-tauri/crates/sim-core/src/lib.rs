@@ -13,6 +13,13 @@ use serde::{Deserialize, Serialize};
 ///
 /// Field set tracks the requirements spec §8 ("Simulator-Daten und Telemetrie").
 /// Adapters fill what's available; downstream consumers tolerate `None`.
+///
+/// `Default` is provided to make unit testing of the FSM and detectors
+/// painless — tests build a baseline snapshot via `SimSnapshot::default()`
+/// and override only the fields they care about. The default body is
+/// "parked, engines off, on the ground at 0/0" — never produced by a
+/// real simulator, but a stable reference state. Manual impl because
+/// `chrono::DateTime` doesn't impl Default; we use the unix epoch.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SimSnapshot {
     pub timestamp: DateTime<Utc>,
@@ -204,6 +211,103 @@ pub struct SimSnapshot {
     pub aircraft_profile: AircraftProfile,
 }
 
+impl Default for SimSnapshot {
+    fn default() -> Self {
+        Self {
+            timestamp: DateTime::<Utc>::from_timestamp(0, 0).expect("epoch is valid"),
+            lat: 0.0,
+            lon: 0.0,
+            altitude_msl_ft: 0.0,
+            altitude_agl_ft: 0.0,
+            heading_deg_true: 0.0,
+            heading_deg_magnetic: 0.0,
+            pitch_deg: 0.0,
+            bank_deg: 0.0,
+            vertical_speed_fpm: 0.0,
+            velocity_body_x_fps: None,
+            velocity_body_z_fps: None,
+            groundspeed_kt: 0.0,
+            indicated_airspeed_kt: 0.0,
+            true_airspeed_kt: 0.0,
+            aircraft_wind_x_kt: None,
+            aircraft_wind_z_kt: None,
+            g_force: 1.0,
+            on_ground: true,
+            parking_brake: true,
+            stall_warning: false,
+            overspeed_warning: false,
+            paused: false,
+            slew_mode: false,
+            simulation_rate: 1.0,
+            gear_position: 1.0,
+            flaps_position: 0.0,
+            engines_running: 0,
+            fuel_total_kg: 0.0,
+            fuel_used_kg: 0.0,
+            zfw_kg: None,
+            payload_kg: None,
+            total_weight_kg: None,
+            touchdown_vs_fpm: None,
+            touchdown_pitch_deg: None,
+            touchdown_bank_deg: None,
+            touchdown_heading_mag_deg: None,
+            touchdown_lat: None,
+            touchdown_lon: None,
+            wind_direction_deg: None,
+            wind_speed_kt: None,
+            qnh_hpa: None,
+            outside_air_temp_c: None,
+            total_air_temp_c: None,
+            mach: None,
+            empty_weight_kg: None,
+            aircraft_title: None,
+            aircraft_icao: None,
+            aircraft_registration: None,
+            simulator: Simulator::default(),
+            sim_version: None,
+            transponder_code: None,
+            com1_mhz: None,
+            com2_mhz: None,
+            nav1_mhz: None,
+            nav2_mhz: None,
+            light_landing: None,
+            light_beacon: None,
+            light_strobe: None,
+            light_taxi: None,
+            light_nav: None,
+            light_logo: None,
+            strobe_state: None,
+            autopilot_master: None,
+            autopilot_heading: None,
+            autopilot_altitude: None,
+            autopilot_nav: None,
+            autopilot_approach: None,
+            fuel_flow_kg_per_h: None,
+            spoilers_handle_position: None,
+            spoilers_armed: None,
+            pushback_state: None,
+            apu_switch: None,
+            apu_pct_rpm: None,
+            battery_master: None,
+            avionics_master: None,
+            pitot_heat: None,
+            engine_anti_ice: None,
+            wing_anti_ice: None,
+            seatbelts_sign: None,
+            no_smoking_sign: None,
+            fcu_selected_altitude_ft: None,
+            fcu_selected_heading_deg: None,
+            fcu_selected_speed_kt: None,
+            fcu_selected_vs_fpm: None,
+            autobrake: None,
+            parking_name: None,
+            parking_number: None,
+            selected_runway: None,
+            aircraft_profile: AircraftProfile::default(),
+        }
+    }
+}
+
 /// Identifies the active aircraft add-on so the adapter can read the right
 /// LVars (and the activity log can show the pilot which mapping is in use).
 /// Detection runs on every snapshot but the answer is cached on the adapter
@@ -310,12 +414,15 @@ impl AircraftProfile {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum Simulator {
     Msfs2020,
     Msfs2024,
     XPlane11,
     XPlane12,
+    /// Catch-all when no adapter has reported a simulator yet (used as
+    /// the `Default` so `SimSnapshot::default()` works for tests).
+    #[default]
     Other,
 }
 

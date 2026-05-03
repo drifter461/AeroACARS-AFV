@@ -104,6 +104,43 @@ const KG_TO_LB: f64 = 2.20462262;
 /// hasn't started yet).
 const ARRIVED_FALLBACK_RADIUS_NM: f64 = 2.0;
 const ARRIVED_FALLBACK_DWELL_SECS: i64 = 30;
+
+// ---- Touch-and-Go / Go-Around detection (Stage 3) ----
+//
+// These thresholds were chosen by working backwards from real-world
+// pilot intent rather than from sim-specific telemetry shapes:
+//
+// * 100 ft AGL threshold for T&G — comfortably above gear-strut /
+//   bounce-rebound height (which is at most ~40 ft on the worst
+//   bounces), but low enough that a deliberate climb-out from a
+//   training landing crosses it quickly.
+// * 30 s observation window — even a slow GA-pattern aircraft
+//   (172, J3 Cub) climbs past 100 ft in less than that.
+// * 200 ft recovery for GA — a missed approach typically initiates
+//   at ≥200 ft above the lowest observed altitude, and 200 ft is
+//   the standard Cat I missed-approach decision height. Sustained
+//   8 s prevents the detector firing on a single climb-correction.
+// * +500 fpm V/S filter on GA — pilots really go around with positive
+//   V/S, no false positives from a flare round-out.
+
+/// Time after a touchdown during which we watch for the aircraft
+/// climbing back out (= touch-and-go). After this window expires
+/// the touchdown is finalised as a regular landing.
+const TOUCH_AND_GO_WATCH_SECS: i64 = 30;
+/// Aircraft must climb above this AGL after a touchdown to count
+/// as a touch-and-go (not a tall bounce or runway-end pop-up).
+const TOUCH_AND_GO_AGL_THRESHOLD_FT: f32 = 100.0;
+/// Aircraft must be above the AGL threshold for this long for the
+/// T&G to be confirmed — short spike doesn't count.
+const TOUCH_AND_GO_DWELL_SECS: i64 = 1;
+/// AGL increase from `lowest_agl_during_approach_ft` that signals a
+/// possible go-around in progress.
+const GO_AROUND_AGL_RECOVERY_FT: f32 = 200.0;
+/// Sustained climb time required before we classify a Go-Around.
+const GO_AROUND_DWELL_SECS: i64 = 8;
+/// Minimum positive V/S at which the GA detector accepts a sample
+/// as "actually climbing" (filters out flare round-out / level-off).
+const GO_AROUND_MIN_VS_FPM: f32 = 500.0;
 /// AGL threshold above which we mark the flight as having actually
 /// flown. Powers the `was_airborne` gate that prevents both the
 /// Arrived-fallback and the divert-detection from firing pre-flight
@@ -841,6 +878,52 @@ struct FlightStats {
     rollout_last_lat: Option<f64>,
     rollout_last_lon: Option<f64>,
 
+    // ---- Multi-touchdown / Touch-and-Go / Go-Around tracking (Stage 3) ----
+    /// Chronological log of every touchdown during the flight.
+    ///
+    /// On a normal one-landing flight: 1 entry (kind=FinalLanding).
+    /// On a training flight with N touch-and-goes: N+1 entries — the
+    /// last one is always the FinalLanding, earlier ones are
+    /// TouchAndGo. The PIREP `landing_*` native fields and score are
+    /// derived from the LAST entry (i.e. the actual final landing),
+    /// so a T&G doesn't drag down the score.
+    ///
+    /// Empty until the first touchdown. Touchdowns are SNAPSHOTS
+    /// taken at classification time — the in-progress
+    /// `landing_peak_vs_fpm` etc. fields keep being refined for the
+    /// CURRENT (= newest) touchdown until the bounce window closes.
+    touchdown_events: Vec<TouchdownEvent>,
+    /// Watcher state for the touch-and-go classifier. Holds the AGL
+    /// excursion starting from a Touchdown event so we can decide
+    /// (within `TOUCH_AND_GO_WATCH_SECS`) whether the aircraft is
+    /// climbing back out for real (= T&G) or just bouncing/rolling
+    /// out (= regular landing). `None` between touchdowns.
+    touch_and_go_pending_since: Option<DateTime<Utc>>,
+    /// Counter of go-arounds (rejected approaches without touchdown
+    /// followed by climb-back-out). Surfaced as a custom PIREP field
+    /// "Go-Arounds: N". Most flights = 0.
+    go_around_count: u32,
+    /// Lowest AGL observed during the current Approach/Final phase.
+    /// Used by the go-around detector — once we see a sustained
+    /// climb-back from this minimum past `GO_AROUND_AGL_RECOVERY_FT`,
+    /// we classify it as a GA. Reset whenever Phase enters Climb
+    /// (so each new approach gets a fresh minimum to compare against).
+    lowest_agl_during_approach_ft: Option<f32>,
+    /// First tick where the GA detector saw AGL climbing back past
+    /// the recovery threshold. We need this sustained for
+    /// `GO_AROUND_DWELL_SECS` before firing — otherwise every brief
+    /// climb-correction during a normal approach would count as a GA.
+    go_around_climb_pending_since: Option<DateTime<Utc>>,
+
+    /// Free-form ACARS log lines that `step_flight` wants posted to
+    /// phpVMS' `/acars/logs` on the next streamer tick — primarily
+    /// used by the Touch-and-Go and Go-Around classifiers since
+    /// they fire from inside the FSM (not on the streamer's normal
+    /// phase-change branch). Drained empty by the streamer after
+    /// each successful POST. Keeps the FSM decoupled from the HTTP
+    /// client.
+    pending_acars_logs: Vec<String>,
+
     // ---- Landing Analyzer (Stage 2): SimBrief OFP plan ----
     /// Planned block (= ramp) fuel from the SimBrief OFP, in kg.
     /// None when the bid had no SimBrief OFP attached or the fetch
@@ -1021,6 +1104,49 @@ struct FlightStats {
     pending_fcu_spd: Option<(i32, DateTime<Utc>)>,
     #[allow(dead_code)]
     pending_fcu_vs: Option<(i32, DateTime<Utc>)>,
+}
+
+/// What kind of touchdown this is from the pilot's perspective.
+/// Discriminates real landings from training touch-and-goes so the
+/// PIREP score doesn't get unfairly dragged down by deliberate
+/// multi-touch flights.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TouchdownKind {
+    /// The actual end-of-flight landing. The PIREP `landing_*`
+    /// native fields and `landing_score` are derived from this one.
+    /// Always the LAST entry in `touchdown_events` when a flight
+    /// has been filed normally.
+    FinalLanding,
+    /// Training / planned multi-touch — aircraft touched the runway
+    /// briefly, then climbed back out under power. Recorded for the
+    /// audit trail but does NOT influence the score and does NOT
+    /// count toward `bounce_count`.
+    TouchAndGo,
+}
+
+/// One touchdown event during a flight. Captured at the moment the
+/// touchdown is classified (= when either the bounce window closes
+/// for a normal landing, or the T&G watcher confirms a climb-back).
+/// Snapshot semantics — the values reflect the analyzer state at
+/// classification time and don't update afterwards.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TouchdownEvent {
+    pub timestamp: DateTime<Utc>,
+    pub kind: TouchdownKind,
+    /// Worst (= most negative) V/S observed in the touchdown window.
+    pub peak_vs_fpm: f32,
+    /// Highest G-force in the touchdown window.
+    pub peak_g: f32,
+    /// Touchdown coordinates so the PIREP-detail map can plot all
+    /// touchdowns separately.
+    pub lat: f64,
+    pub lon: f64,
+    /// Number of sub-bounces observed for THIS touchdown (= AGL
+    /// excursions above the bounce threshold within the bounce
+    /// window). A clean T&G has 0 sub-bounces; a sloppy flare
+    /// might have 1-2.
+    pub sub_bounces: u8,
 }
 
 /// Categorised assessment of a touchdown. Computed from peak descent
@@ -1237,6 +1363,15 @@ pub struct ActiveFlightInfo {
     /// banner ("you landed at LFBO, planned was LEBL — file as divert
     /// to LFBO?") with action buttons. None for normal arrivals.
     divert_hint: Option<DivertHint>,
+    /// Number of touch-and-go events recorded so far. Always 0 on a
+    /// routine A→B; non-zero on training flights or unstable approaches
+    /// where the pilot bounced and went around. Surfaced as a small
+    /// counter chip in the cockpit during/after Landing phase.
+    touch_and_go_count: u32,
+    /// Number of confirmed go-arounds (sustained climb-back from low
+    /// approach). Independent of T&G — a missed-approach without
+    /// ground contact only bumps this counter, not the T&G one.
+    go_around_count: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1321,6 +1456,84 @@ fn push_approach_sample(stats: &mut FlightStats, snap: &SimSnapshot) {
     while stats.approach_buffer.len() > APPROACH_BUFFER_MAX {
         stats.approach_buffer.pop_front();
     }
+}
+
+/// Track the lowest AGL observed during the current Approach/Final
+/// segment. The go-around detector compares the *current* AGL against
+/// this minimum to decide whether a sustained climb-back has begun.
+///
+/// Reset to `None` when a go-around is classified (climb starts a
+/// fresh approach window) and when the FSM exits Final into Landing
+/// (a successful touchdown invalidates the approach minimum).
+fn update_lowest_approach_agl(stats: &mut FlightStats, snap: &SimSnapshot) {
+    let agl = snap.altitude_agl_ft as f32;
+    // Only track positive AGL — a brief negative reading from a sim
+    // glitch (terrain mesh hiccup) would poison the minimum and make
+    // every subsequent sample look like a 200 ft go-around climb.
+    if agl < 0.0 {
+        return;
+    }
+    stats.lowest_agl_during_approach_ft = Some(
+        stats
+            .lowest_agl_during_approach_ft
+            .map_or(agl, |prev| prev.min(agl)),
+    );
+}
+
+/// Detect a go-around in progress: aircraft has climbed
+/// `GO_AROUND_AGL_RECOVERY_FT` above the lowest AGL seen during this
+/// approach, sustained `GO_AROUND_DWELL_SECS` of positive V/S above
+/// `GO_AROUND_MIN_VS_FPM`, while airborne with engines running.
+///
+/// Returns `Some(FlightPhase::Climb)` when classified — the caller
+/// should swap `next_phase` to that value so the FSM bumps back to
+/// Climb. Side effects on confirmation: bumps `stats.go_around_count`,
+/// pushes a human-readable line into `stats.pending_acars_logs`,
+/// clears the lowest-AGL tracker (next descent starts a fresh
+/// window), and clears the dwell timer.
+fn check_go_around(
+    stats: &mut FlightStats,
+    snap: &SimSnapshot,
+    now: DateTime<Utc>,
+) -> Option<FlightPhase> {
+    let lowest = stats.lowest_agl_during_approach_ft?;
+    let agl = snap.altitude_agl_ft as f32;
+    // Need at least *some* descent to have happened — otherwise a
+    // pilot intercepting the glideslope from above would trip the
+    // detector the moment we entered Approach.
+    if lowest > 1500.0 {
+        return None;
+    }
+    let conds = agl > lowest + GO_AROUND_AGL_RECOVERY_FT
+        && snap.vertical_speed_fpm > GO_AROUND_MIN_VS_FPM
+        && !snap.on_ground
+        && snap.engines_running > 0;
+    if conds {
+        let pending = stats.go_around_climb_pending_since.get_or_insert(now);
+        if (now - *pending).num_seconds() >= GO_AROUND_DWELL_SECS {
+            stats.go_around_count = stats.go_around_count.saturating_add(1);
+            tracing::info!(
+                count = stats.go_around_count,
+                agl_ft = agl,
+                lowest_ft = lowest,
+                vs_fpm = snap.vertical_speed_fpm,
+                "go-around classified — phase reverting to Climb"
+            );
+            stats.pending_acars_logs.push(format!(
+                "Go-around #{} at {:.0} ft AGL (V/S {:.0} fpm)",
+                stats.go_around_count, agl, snap.vertical_speed_fpm
+            ));
+            stats.lowest_agl_during_approach_ft = None;
+            stats.go_around_climb_pending_since = None;
+            return Some(FlightPhase::Climb);
+        }
+    } else {
+        // Conditions broke — reset dwell so the next sustained climb
+        // starts a fresh timer. Without this, brief bumps would
+        // accumulate seconds and falsely confirm the go-around.
+        stats.go_around_climb_pending_since = None;
+    }
+    None
 }
 
 /// Compute population standard deviations of V/S and bank over the
@@ -2474,6 +2687,12 @@ fn flight_info(flight: &ActiveFlight) -> ActiveFlightInfo {
         last_heartbeat_at: stats.last_heartbeat_at.map(|t| t.to_rfc3339()),
         queued_position_count: stats.queued_position_count,
         divert_hint: stats.divert_hint.clone(),
+        touch_and_go_count: stats
+            .touchdown_events
+            .iter()
+            .filter(|e| matches!(e.kind, TouchdownKind::TouchAndGo))
+            .count() as u32,
+        go_around_count: stats.go_around_count,
     }
 }
 
@@ -4437,6 +4656,30 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                 });
             }
 
+            // Drain any T&G / go-around log lines that the FSM
+            // queued during this tick (or accumulated since the
+            // last tick — the touchdown sampler runs at 30 Hz, the
+            // streamer ticks at ~5 s, so multiple events can stack
+            // up between drains). Order is preserved so the PIREP
+            // detail page reads chronologically.
+            {
+                let mut stats = flight.stats.lock().expect("flight stats");
+                if !stats.pending_acars_logs.is_empty() {
+                    let drained: Vec<String> =
+                        std::mem::take(&mut stats.pending_acars_logs);
+                    drop(stats);
+                    let now_ts = Utc::now().to_rfc3339();
+                    for line in drained {
+                        acars_log_entries.push(api_client::LogEntry {
+                            log: line,
+                            lat: Some(snap.lat),
+                            lon: Some(snap.lon),
+                            created_at: Some(now_ts.clone()),
+                        });
+                    }
+                }
+            }
+
             // Try to drain any positions we couldn't ship in earlier
             // ticks before sending the new one — keeps phpVMS's row
             // ordering chronological even after a network gap.
@@ -4991,12 +5234,16 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
             // and bank stddev over this window become the "Approach
             // Stability" sub-score in the Landing Analyzer.
             push_approach_sample(&mut stats, snap);
-            // 1500 ft AGL was too eager — pilots reported a 3 min
-            // "Final" segment because most aircraft intercept the
-            // ILS at that altitude and still have several miles to
-            // run. Real-world Final starts ~700 ft AGL (FAF crossed
-            // for non-precision, decision height area for ILS).
-            if snap.altitude_agl_ft < 700.0 {
+            // Track lowest AGL during approach for go-around detection.
+            update_lowest_approach_agl(&mut stats, snap);
+            if let Some(ga_phase) = check_go_around(&mut stats, snap, now) {
+                next_phase = ga_phase;
+            } else if snap.altitude_agl_ft < 700.0 {
+                // 1500 ft AGL was too eager — pilots reported a 3 min
+                // "Final" segment because most aircraft intercept the
+                // ILS at that altitude and still have several miles to
+                // run. Real-world Final starts ~700 ft AGL (FAF crossed
+                // for non-precision, decision height area for ILS).
                 next_phase = FlightPhase::Final;
             }
         }
@@ -5006,6 +5253,10 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
             // measuring only Approach would underweight the truly
             // important last 700 ft AGL.
             push_approach_sample(&mut stats, snap);
+            update_lowest_approach_agl(&mut stats, snap);
+            if let Some(ga_phase) = check_go_around(&mut stats, snap, now) {
+                next_phase = ga_phase;
+            }
             // Approach runway: snapshot whatever ATC currently has us
             // cleared for. May still change before touchdown, so we
             // refresh until wheels are down.
@@ -5321,6 +5572,101 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
                     let peak_g = stats.landing_peak_g_force.unwrap_or(0.0);
                     let score = LandingScore::classify(peak_vs, peak_g, stats.bounce_count);
                     stats.landing_score = Some(score);
+                }
+
+                // Touch-and-Go classifier — runs in parallel with the
+                // bounce/score windows. Looks for a sustained climb
+                // back above TOUCH_AND_GO_AGL_THRESHOLD_FT within
+                // TOUCH_AND_GO_WATCH_SECS of the touchdown. If the
+                // pilot really lifted off and is climbing out (= T&G),
+                // we record the touchdown as kind=TouchAndGo, reset
+                // the landing window for the next touchdown, and bump
+                // the FSM back to Climb so subsequent phase
+                // transitions work normally on the next descent.
+                let tg_in_window = elapsed_secs <= TOUCH_AND_GO_WATCH_SECS;
+                if tg_in_window {
+                    let agl = snap.altitude_agl_ft as f32;
+                    let conds_met = agl > TOUCH_AND_GO_AGL_THRESHOLD_FT
+                        && !snap.on_ground
+                        && snap.engines_running > 0;
+                    if conds_met {
+                        let pending = stats.touch_and_go_pending_since.get_or_insert(now);
+                        if (now - *pending).num_seconds() >= TOUCH_AND_GO_DWELL_SECS {
+                            // CONFIRMED: this was a touch-and-go.
+                            let event = TouchdownEvent {
+                                timestamp: touchdown,
+                                kind: TouchdownKind::TouchAndGo,
+                                peak_vs_fpm: stats.landing_peak_vs_fpm.unwrap_or(0.0),
+                                peak_g: stats.landing_peak_g_force.unwrap_or(0.0),
+                                lat: stats.landing_lat.unwrap_or(snap.lat),
+                                lon: stats.landing_lon.unwrap_or(snap.lon),
+                                sub_bounces: stats.bounce_count,
+                            };
+                            stats.touchdown_events.push(event.clone());
+                            let tg_count = stats
+                                .touchdown_events
+                                .iter()
+                                .filter(|e| matches!(e.kind, TouchdownKind::TouchAndGo))
+                                .count();
+                            tracing::info!(
+                                count = tg_count,
+                                peak_vs = event.peak_vs_fpm,
+                                peak_g = event.peak_g,
+                                sub_bounces = event.sub_bounces,
+                                "touch-and-go classified — resetting landing window"
+                            );
+                            stats.pending_acars_logs.push(format!(
+                                "Touch-and-go #{} — V/S {:.0} fpm, G {:.2}",
+                                tg_count, event.peak_vs_fpm, event.peak_g
+                            ));
+                            // Reset landing window so the NEXT touchdown
+                            // gets a fresh score window. Bounce count
+                            // resets too — T&Gs don't drag down the
+                            // final-landing's score.
+                            stats.landing_at = None;
+                            stats.landing_peak_vs_fpm = None;
+                            stats.landing_peak_g_force = None;
+                            stats.landing_score = None;
+                            stats.landing_score_announced = false;
+                            stats.landing_lat = None;
+                            stats.landing_lon = None;
+                            stats.bounce_count = 0;
+                            stats.bounce_armed_above_threshold = false;
+                            stats.touch_and_go_pending_since = None;
+                            // FSM: revert to Climb so the streamer's
+                            // phase-change handler emits "Phase: Climb"
+                            // and subsequent descent re-detection works.
+                            next_phase = FlightPhase::Climb;
+                        }
+                    } else {
+                        // Conditions broke (engines off, AGL dropped,
+                        // back on ground) — restart the dwell timer.
+                        stats.touch_and_go_pending_since = None;
+                    }
+                } else if stats.landing_score.is_some()
+                    && stats
+                        .touchdown_events
+                        .last()
+                        .map(|e| e.timestamp != touchdown)
+                        .unwrap_or(true)
+                {
+                    // T&G watch window expired without a climb-back →
+                    // this was a real (final) landing. Push the
+                    // TouchdownEvent for the audit trail, exactly once.
+                    let event = TouchdownEvent {
+                        timestamp: touchdown,
+                        kind: TouchdownKind::FinalLanding,
+                        peak_vs_fpm: stats.landing_peak_vs_fpm.unwrap_or(0.0),
+                        peak_g: stats.landing_peak_g_force.unwrap_or(0.0),
+                        lat: stats.landing_lat.unwrap_or(snap.lat),
+                        lon: stats.landing_lon.unwrap_or(snap.lon),
+                        sub_bounces: stats.bounce_count,
+                    };
+                    stats.touchdown_events.push(event);
+                    tracing::info!(
+                        total_touchdowns = stats.touchdown_events.len(),
+                        "final landing recorded as TouchdownEvent"
+                    );
                 }
             }
             if snap.groundspeed_kt < 30.0 && snap.on_ground {
@@ -5763,6 +6109,33 @@ fn build_pirep_fields(
         f.insert("Bounces".into(), stats.bounce_count.to_string());
     }
 
+    // ---- Touch-and-Go + Go-Around counters (v0.1.26) ----
+    // Only surface when nonzero — every routine PIREP has zero of
+    // both, no point adding empty rows. The detailed touchdown list
+    // (peak V/S + G per event) lives in the Notes prose so it doesn't
+    // bloat the structured fields with N rows on a training flight.
+    let tg_count = stats
+        .touchdown_events
+        .iter()
+        .filter(|e| matches!(e.kind, TouchdownKind::TouchAndGo))
+        .count();
+    if tg_count > 0 || stats.touchdown_events.len() > 1 {
+        // "Touchdowns: 4 (3 T&G + final)" — gives the VA admin one
+        // glanceable line that matches the Notes story.
+        let total = stats.touchdown_events.len();
+        let suffix = if tg_count == 0 {
+            String::new()
+        } else if total == tg_count {
+            format!(" ({} T&G)", tg_count)
+        } else {
+            format!(" ({} T&G + final)", tg_count)
+        };
+        f.insert("Touchdowns".into(), format!("{}{}", total, suffix));
+    }
+    if stats.go_around_count > 0 {
+        f.insert("Go-Arounds".into(), stats.go_around_count.to_string());
+    }
+
     // ---- Approach Stability + Rollout (Landing Analyzer Stage 1) ----
     if let Some(sd) = stats.approach_vs_stddev_fpm {
         f.insert("Approach V/S Stddev".into(), format!("{:.0} fpm", sd));
@@ -6022,6 +6395,41 @@ fn build_pirep_notes(flight: &ActiveFlight, stats: &FlightStats) -> String {
                 score.numeric()
             );
         }
+    }
+
+    // ---- Touchdown history (T&G + final) ----
+    // Only render when something noteworthy happened: at least one
+    // T&G, OR more than one touchdown event total. A routine A→B with
+    // a single final landing skips this section to keep notes short.
+    let tg_count = stats
+        .touchdown_events
+        .iter()
+        .filter(|e| matches!(e.kind, TouchdownKind::TouchAndGo))
+        .count();
+    if tg_count > 0 || stats.touchdown_events.len() > 1 {
+        start_section(&mut s, "TOUCHDOWNS");
+        wrote_section = true;
+        for (i, ev) in stats.touchdown_events.iter().enumerate() {
+            let label = match ev.kind {
+                TouchdownKind::TouchAndGo => "T&G",
+                TouchdownKind::FinalLanding => "Final",
+            };
+            let _ = writeln!(
+                s,
+                "  #{:<2} {:<5} {} V/S {:+.0} fpm · G {:.2} · bounces {}",
+                i + 1,
+                label,
+                ev.timestamp.format("%H:%M:%S"),
+                ev.peak_vs_fpm,
+                ev.peak_g,
+                ev.sub_bounces,
+            );
+        }
+    }
+    if stats.go_around_count > 0 {
+        start_section(&mut s, "GO-AROUNDS");
+        wrote_section = true;
+        let _ = writeln!(s, "  Count         {}", stats.go_around_count);
     }
 
     // ---- Runway ----
@@ -8284,3 +8692,180 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running AeroACARS");
 }
+
+// ----------------------------------------------------------------------
+// Unit tests for Touch-and-Go + Go-Around helpers (v0.1.26).
+//
+// These cover the two pure-ish helpers that drive the FSM-side
+// detectors. Tests construct minimal SimSnapshot values via Default
+// (provided by sim-core) and walk the helpers through synthetic
+// telemetry sequences. They DON'T exercise the FSM end-to-end —
+// `step_flight` has many side-channels that are hard to fake without
+// a full `ActiveFlight` setup. The integration coverage comes from
+// real in-sim flights against a dev-server PIREP.
+// ----------------------------------------------------------------------
+#[cfg(test)]
+mod touch_and_go_go_around_tests {
+    use super::*;
+    use chrono::TimeZone;
+    use sim_core::SimSnapshot;
+
+    fn t0() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 5, 3, 12, 0, 0).unwrap()
+    }
+
+    fn snap_at(agl_ft: f64, vs_fpm: f32, on_ground: bool) -> SimSnapshot {
+        let mut s = SimSnapshot::default();
+        s.altitude_agl_ft = agl_ft;
+        s.vertical_speed_fpm = vs_fpm;
+        s.on_ground = on_ground;
+        s.engines_running = 2;
+        s
+    }
+
+    // ---- update_lowest_approach_agl ----
+
+    #[test]
+    fn lowest_agl_starts_unset_and_takes_first_sample() {
+        let mut stats = FlightStats::default();
+        assert_eq!(stats.lowest_agl_during_approach_ft, None);
+        update_lowest_approach_agl(&mut stats, &snap_at(2500.0, -800.0, false));
+        assert_eq!(stats.lowest_agl_during_approach_ft, Some(2500.0));
+    }
+
+    #[test]
+    fn lowest_agl_only_decreases_never_increases() {
+        let mut stats = FlightStats::default();
+        update_lowest_approach_agl(&mut stats, &snap_at(2500.0, -800.0, false));
+        update_lowest_approach_agl(&mut stats, &snap_at(1200.0, -700.0, false));
+        update_lowest_approach_agl(&mut stats, &snap_at(800.0, -600.0, false));
+        // A climb-correction during approach must NOT erase the minimum.
+        update_lowest_approach_agl(&mut stats, &snap_at(900.0, 200.0, false));
+        assert_eq!(stats.lowest_agl_during_approach_ft, Some(800.0));
+    }
+
+    #[test]
+    fn lowest_agl_ignores_negative_glitch_samples() {
+        let mut stats = FlightStats::default();
+        update_lowest_approach_agl(&mut stats, &snap_at(1200.0, -700.0, false));
+        // Brief sim/terrain-mesh glitch reporting -50 ft AGL — must not
+        // poison the minimum, otherwise every later sample looks like a
+        // 200 ft go-around climb.
+        update_lowest_approach_agl(&mut stats, &snap_at(-50.0, -700.0, false));
+        assert_eq!(stats.lowest_agl_during_approach_ft, Some(1200.0));
+    }
+
+    // ---- check_go_around ----
+
+    #[test]
+    fn go_around_does_nothing_without_a_prior_minimum() {
+        let mut stats = FlightStats::default();
+        // No update_lowest_approach_agl called → no minimum tracked.
+        let out = check_go_around(&mut stats, &snap_at(2000.0, 1500.0, false), t0());
+        assert!(out.is_none());
+        assert_eq!(stats.go_around_count, 0);
+    }
+
+    #[test]
+    fn go_around_fires_after_dwell_seconds() {
+        let mut stats = FlightStats::default();
+        // Establish approach minimum at 400 ft AGL.
+        update_lowest_approach_agl(&mut stats, &snap_at(400.0, -600.0, false));
+        let now = t0();
+        // Climb-back: 700 ft AGL with V/S +1200 fpm — meets all
+        // conditions (700 > 400+200, 1200 > 500, airborne, engines on).
+        let climb = snap_at(700.0, 1200.0, false);
+        // First tick: arms the dwell, doesn't classify yet.
+        let out = check_go_around(&mut stats, &climb, now);
+        assert!(out.is_none());
+        assert!(stats.go_around_climb_pending_since.is_some());
+        // After GO_AROUND_DWELL_SECS the classification fires.
+        let out2 = check_go_around(
+            &mut stats,
+            &climb,
+            now + chrono::Duration::seconds(GO_AROUND_DWELL_SECS + 1),
+        );
+        assert!(matches!(out2, Some(FlightPhase::Climb)));
+        assert_eq!(stats.go_around_count, 1);
+        // Lowest tracker reset so the next descent starts a fresh window.
+        assert_eq!(stats.lowest_agl_during_approach_ft, None);
+        assert_eq!(stats.go_around_climb_pending_since, None);
+        // ACARS log line was queued for the streamer.
+        assert_eq!(stats.pending_acars_logs.len(), 1);
+        assert!(stats.pending_acars_logs[0].contains("Go-around"));
+    }
+
+    #[test]
+    fn go_around_does_not_fire_below_recovery_threshold() {
+        let mut stats = FlightStats::default();
+        update_lowest_approach_agl(&mut stats, &snap_at(400.0, -600.0, false));
+        let now = t0();
+        // Only +150 ft above lowest — below GO_AROUND_AGL_RECOVERY_FT.
+        // Even with V/S +1500 we should NOT classify.
+        let weak = snap_at(550.0, 1500.0, false);
+        check_go_around(&mut stats, &weak, now);
+        let out = check_go_around(
+            &mut stats,
+            &weak,
+            now + chrono::Duration::seconds(GO_AROUND_DWELL_SECS + 1),
+        );
+        assert!(out.is_none());
+        assert_eq!(stats.go_around_count, 0);
+    }
+
+    #[test]
+    fn go_around_dwell_resets_when_conditions_break() {
+        let mut stats = FlightStats::default();
+        update_lowest_approach_agl(&mut stats, &snap_at(400.0, -600.0, false));
+        let now = t0();
+        // Brief climb arms the dwell.
+        check_go_around(&mut stats, &snap_at(700.0, 1200.0, false), now);
+        assert!(stats.go_around_climb_pending_since.is_some());
+        // V/S drops back below threshold mid-dwell — reset expected.
+        check_go_around(
+            &mut stats,
+            &snap_at(700.0, 200.0, false),
+            now + chrono::Duration::seconds(3),
+        );
+        assert!(stats.go_around_climb_pending_since.is_none());
+        assert_eq!(stats.go_around_count, 0);
+    }
+
+    #[test]
+    fn go_around_does_not_fire_when_aircraft_caught_glideslope_high() {
+        let mut stats = FlightStats::default();
+        // Pilot intercepted the GS from above — minimum is still very
+        // high (3000 ft AGL during approach intercept). A brief +800
+        // fpm during the level-off MUST NOT trigger GA.
+        update_lowest_approach_agl(&mut stats, &snap_at(3000.0, -800.0, false));
+        let now = t0();
+        let blip = snap_at(3300.0, 800.0, false);
+        check_go_around(&mut stats, &blip, now);
+        let out = check_go_around(
+            &mut stats,
+            &blip,
+            now + chrono::Duration::seconds(GO_AROUND_DWELL_SECS + 1),
+        );
+        // lowest > 1500 ft → detector is gated off entirely.
+        assert!(out.is_none());
+        assert_eq!(stats.go_around_count, 0);
+    }
+
+    #[test]
+    fn go_around_requires_engines_running() {
+        let mut stats = FlightStats::default();
+        update_lowest_approach_agl(&mut stats, &snap_at(400.0, -600.0, false));
+        let now = t0();
+        let mut climb = snap_at(700.0, 1200.0, false);
+        climb.engines_running = 0; // engines off → not really going around
+        check_go_around(&mut stats, &climb, now);
+        let out = check_go_around(
+            &mut stats,
+            &climb,
+            now + chrono::Duration::seconds(GO_AROUND_DWELL_SECS + 1),
+        );
+        assert!(out.is_none());
+        assert_eq!(stats.go_around_count, 0);
+    }
+}
+
