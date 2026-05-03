@@ -147,6 +147,23 @@ const GO_AROUND_MIN_VS_FPM: f32 = 500.0;
 /// (GSX repositioning, ground-handling wackeln, etc.). 50 ft is well
 /// above gear-strut oscillation and runway-end short-hop noise.
 const WAS_AIRBORNE_AGL_FT: f32 = 50.0;
+/// Upper bound on AGL we'll trust for the `was_airborne` mark. Live bug
+/// 2026-05-03 (PMDG B738, GSX pushback): MSFS reported AGL=53819 ft
+/// for ~60 s right after the SimConnect handshake while the terrain
+/// engine was still loading — the aircraft was sitting on a stand
+/// at EDDH but the SimVar said it was at FL538 with on_ground=false.
+/// `was_airborne` flipped true from that loading glitch, and 30 min
+/// later the universal Arrived-fallback (gated by was_airborne)
+/// fired during the GSX pushback because pushback motion happens to
+/// match the conditions. The fix is to ignore obvious garbage AGL
+/// values: real pre-flight terrain data is bounded; nothing in the
+/// real world makes a parked aircraft suddenly "airborne at FL538".
+const WAS_AIRBORNE_AGL_MAX_FT: f32 = 30000.0;
+/// Minimum number of consecutive ticks the airborne conditions must
+/// hold before we flip `was_airborne`. Gates against single-tick
+/// glitches where MSFS briefly reports !on_ground during scenery
+/// load even with sane AGL. 2 ticks ≈ 5-10 s at the streamer cadence.
+const WAS_AIRBORNE_DWELL_TICKS: u8 = 2;
 
 /// If at the moment the FSM reaches Arrived the aircraft is farther
 /// than this from the planned `arr_airport`, we treat it as a divert
@@ -796,6 +813,13 @@ struct FlightStats {
     /// "you're in KFLL, planned was MKJS — divert?". Aircraft had
     /// never even left the gate.
     was_airborne: bool,
+    /// Consecutive-tick counter for the airborne dwell filter. Bumps
+    /// on every tick where the airborne conditions hold; clears the
+    /// moment any condition fails. Hits `WAS_AIRBORNE_DWELL_TICKS`
+    /// → `was_airborne` flips true. Live bug 2026-05-03 (B738/GSX
+    /// pushback): a single glitch tick at FL538 was enough to flip
+    /// the flag. Sustained filter hardens that.
+    airborne_dwell_ticks: u8,
 
     /// Wann das Flugzeug zum ersten Mal nach `tug_done` zum Stehen
     /// kam (gs < 0.5 kt). Triggert das 10-Sekunden-Dwell-Fenster
@@ -5072,8 +5096,34 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
     // Arrived-fallback so neither GSX repositioning nor a few-meter
     // wackeln at the gate accidentally promotes the FSM to Arrived
     // pre-flight. See WAS_AIRBORNE_AGL_FT for the threshold rationale.
-    if !snap.on_ground && snap.altitude_agl_ft as f32 > WAS_AIRBORNE_AGL_FT {
-        stats.was_airborne = true;
+    // `was_airborne` flag — three-layer defense against false positives
+    // (live bug 2026-05-03: PMDG B738, MSFS reported AGL=53819 ft for
+    // 60 s during scenery load and the flag flipped true; 30 min later
+    // the GSX pushback fired the universal Arrived-fallback through
+    // the now-poisoned gate):
+    //
+    //   1. AGL must be in a sane range — > 50 ft AND < 30000 ft.
+    //      53819 ft would have been ignored.
+    //   2. `block_off_at` must be set — chronologically the aircraft
+    //      can't be airborne before it's even been block-off.
+    //      Belt-and-braces against any other future loading glitch
+    //      that produces sane-looking but pre-flight airborne values.
+    //   3. Conditions must hold for WAS_AIRBORNE_DWELL_TICKS in a
+    //      row — single-tick glitches don't poison the flag.
+    let airborne_now = !snap.on_ground
+        && stats.block_off_at.is_some()
+        && {
+            let agl = snap.altitude_agl_ft as f32;
+            agl > WAS_AIRBORNE_AGL_FT && agl < WAS_AIRBORNE_AGL_MAX_FT
+        };
+    if airborne_now {
+        stats.airborne_dwell_ticks =
+            stats.airborne_dwell_ticks.saturating_add(1);
+        if stats.airborne_dwell_ticks >= WAS_AIRBORNE_DWELL_TICKS {
+            stats.was_airborne = true;
+        }
+    } else {
+        stats.airborne_dwell_ticks = 0;
     }
 
     // Touchdown ring-buffer is now populated by the dedicated 30 Hz
