@@ -6,7 +6,7 @@
   "tabs": {
     "dashboard": "Dashboard",
     "cockpit": "Cockpit",
-    "briefing": "Briefing",
+    "briefing": "My Flights",
     "landing": "Landing",
     "log": "ACARS log",
     "settings": "Settings",
@@ -189,7 +189,7 @@
   "cockpit": {
     "empty_title": "No active flight",
     "empty_hint": "Head to Briefing to start a booked flight or adopt an in-progress PIREP.",
-    "go_briefing": "Open briefing"
+    "go_briefing": "Go to my flights"
   },
   "recording": {
     "status": {
@@ -347,6 +347,10 @@
     "simulator_connecting": "Connecting…",
     "simulator_disconnected": "Not connected",
     "checking_session": "Restoring session…"
+  },
+  "pilot_header": {
+    "location_tooltip": "Your current station — your next flight departs from here (= where your last PIREP landed).",
+    "home_tooltip": "Home base — your career anchor in the phpVMS system."
   },
   "actions": {
     "toggle_theme_dark": "Switch to dark mode",
@@ -652,10 +656,7 @@
     "start_disabled_active_flight": "Another flight is already active",
     "start_disabled_not_on_ground": "You must be on the ground to start the flight",
     "start_disabled_no_position": "Waiting for sim position … (may take a moment after a sim reload)",
-    "sim_position_label": "Sim position:",
-    "sim_position_none": "not received yet",
-    "sim_position_resync": "Re-check",
-    "sim_position_resync_hint": "Clear the sim-position cache and wait for the next frame — use when the distance check looks wrong despite being parked at the airport",
+    "sim_position_warning": "Sim position not received yet — give it a moment, or hit \"Refresh\" top-right if the distance shown below looks wrong.",
     "start_disabled_too_far": "You are {{distance}} nm from {{airport}} — start the flight at the departure airport",
     "distance_to_departure": "Distance to the departure airport",
     "from_airport": "from {{airport}}",

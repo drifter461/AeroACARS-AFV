@@ -7,24 +7,30 @@ interface Props {
 }
 
 /**
- * Pilot identity card for the Briefing tab. Big airline logo on the
- * left (key visual the user asked for), pilot name + chips on the
- * right, and current/home airports as a compact pair so the pilot can
- * tell at a glance whether the right aircraft is parked nearby.
+ * Slim pilot identity row above the bids list. Replaces the older big
+ * "card" layout (which competed visually with the bid list and made
+ * the tab feel like three competing zones — profile / sim status /
+ * bids — instead of a clear "here are your flights" page).
+ *
+ * Single horizontal line:
+ *   [Logo]  Name · Ident · Rank · Airline    📍 EDDL  🏠 EDLE   [⏻]
+ *
+ * 📍 = `curr_airport` (where the pilot is stationed in phpVMS — last
+ * PIREP's destination). Tooltip explains it so nobody confuses it with
+ * "current FLIGHT".
+ *
+ * 🏠 = `home_airport` (career home base). Tooltip explains.
+ *
+ * Logout is icon-only (⏻) on the right — secondary action, doesn't
+ * shout for attention. Hover tooltip shows the localised "Logout".
  */
 export function PilotHeader({ profile, onLogout }: Props) {
   const { t } = useTranslation();
   const airline = profile.airline;
-  const initials = (profile.name || "?")
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((s) => s[0]?.toUpperCase() ?? "")
-    .join("");
 
   return (
-    <section className="pilot-header">
-      <div className="pilot-header__logo">
+    <section className="pilot-header pilot-header--slim">
+      <div className="pilot-header__logo-slim">
         {airline?.logo ? (
           <img src={airline.logo} alt={airline.name} />
         ) : (
@@ -34,51 +40,61 @@ export function PilotHeader({ profile, onLogout }: Props) {
         )}
       </div>
 
-      <div className="pilot-header__identity">
-        <h2 className="pilot-header__name">{profile.name}</h2>
-        <div className="pilot-header__chips">
-          {profile.ident && (
-            <span className="pilot-header__chip">{profile.ident}</span>
-          )}
-          {profile.rank?.name && (
-            <span className="pilot-header__chip pilot-header__chip--muted">
+      <div className="pilot-header__identity-slim">
+        <span className="pilot-header__name-slim">{profile.name}</span>
+        {profile.ident && (
+          <>
+            <span className="pilot-header__sep" aria-hidden="true">·</span>
+            <span className="pilot-header__chip-slim">{profile.ident}</span>
+          </>
+        )}
+        {profile.rank?.name && (
+          <>
+            <span className="pilot-header__sep" aria-hidden="true">·</span>
+            <span className="pilot-header__chip-slim pilot-header__chip-slim--muted">
               {profile.rank.name}
             </span>
-          )}
-          {airline && (
-            <span className="pilot-header__chip pilot-header__chip--muted">
-              {airline.icao} · {airline.name}
+          </>
+        )}
+        {airline && (
+          <>
+            <span className="pilot-header__sep" aria-hidden="true">·</span>
+            <span className="pilot-header__chip-slim pilot-header__chip-slim--muted">
+              {airline.icao}
             </span>
-          )}
-        </div>
+          </>
+        )}
       </div>
 
-      <div className="pilot-header__locations">
-        <div className="pilot-header__loc">
-          <span className="pilot-header__loc-label">
-            {t("dashboard.current_short")}
-          </span>
-          <span className="pilot-header__loc-value">
+      <div className="pilot-header__locations-slim">
+        <span
+          className="pilot-header__loc-slim"
+          title={t("pilot_header.location_tooltip")}
+        >
+          <span className="pilot-header__loc-icon" aria-hidden="true">📍</span>
+          <span className="pilot-header__loc-value-slim">
             {profile.curr_airport ?? "—"}
           </span>
-        </div>
-        <div className="pilot-header__loc">
-          <span className="pilot-header__loc-label">
-            {t("dashboard.home_short")}
-          </span>
-          <span className="pilot-header__loc-value">
+        </span>
+        <span
+          className="pilot-header__loc-slim"
+          title={t("pilot_header.home_tooltip")}
+        >
+          <span className="pilot-header__loc-icon" aria-hidden="true">🏠</span>
+          <span className="pilot-header__loc-value-slim">
             {profile.home_airport ?? "—"}
           </span>
-        </div>
+        </span>
       </div>
 
       <button
         type="button"
-        className="pilot-header__logout"
+        className="pilot-header__logout-slim"
         onClick={onLogout}
-        title={initials}
+        title={t("actions.logout")}
+        aria-label={t("actions.logout")}
       >
-        {t("actions.logout")}
+        ⏻
       </button>
     </section>
   );

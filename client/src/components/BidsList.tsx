@@ -176,34 +176,35 @@ export function BidsList({
     return () => clearInterval(id);
   }, [hasActiveFlight, fetchBids]);
 
+  /** Combined refresh: bid list + sim-position cache (v0.1.29).
+   *
+   *  Pre-v0.1.29 we had two visually-equal buttons that did different
+   *  things — "Aktualisieren" refreshed the bids, "Neu prüfen"
+   *  refreshed the sim position. Pilots reported confusion: which
+   *  button does what, why are there two? Consolidated into a single
+   *  intuitive "Aktualisieren" action that pulls everything fresh —
+   *  what a pilot expects when they hit refresh.
+   *
+   *  Side effect: if a stale-snapshot ever causes a phantom distance
+   *  failure (the SCEL bug class), the same refresh now also clears
+   *  the cache. Two birds, one button.
+   */
   async function handleRefresh() {
     if (refreshing) return;
     setRefreshing(true);
-    await fetchBids();
-    setRefreshing(false);
-  }
-
-  /** Pilot-initiated re-sync of the sim adapter's cached snapshot.
-   *  Used when the bid distance check shows a wildly wrong number
-   *  (e.g. "3142.5 nm from SCEL" while parked at SCEL) because the
-   *  cached lat/lon is stale and our 5 s automatic stale-timeout
-   *  hasn't fired (sim trickled stray data through the load). The
-   *  command clears the adapter's snapshot; the next live frame from
-   *  the sim repopulates it within ~1 s. UI shows a spinner during
-   *  the brief re-sync window. */
-  const [resyncing, setResyncing] = useState(false);
-  async function handleSimResync() {
-    if (resyncing) return;
-    setResyncing(true);
-    try {
-      await invoke("sim_force_resync");
-    } catch {
-      // Adapter command is fire-and-forget; failures only happen if
-      // the sim adapter mutex is poisoned (= app already broken).
-    }
-    // Visible spinner for ~1 s so the pilot sees something happen
-    // even when the sim instantly delivers a fresh frame.
-    setTimeout(() => setResyncing(false), 1000);
+    // Fire both in parallel — the sim resync is fire-and-forget so it
+    // doesn't slow down the network round-trip for bids.
+    await Promise.all([
+      fetchBids(),
+      invoke("sim_force_resync").catch(() => {
+        // Adapter command failures only happen if the mutex is
+        // poisoned (= app already broken). Don't fail the whole
+        // refresh because of it.
+      }),
+    ]);
+    // Tiny visible spinner tail so the pilot sees confirmation even
+    // when both calls return instantly.
+    setTimeout(() => setRefreshing(false), 400);
   }
 
   // Whenever the bids change, fetch the coordinates of every unique departure
@@ -292,21 +293,26 @@ export function BidsList({
     }
   }
 
-  // Status line about the cached sim position. Shows the current
-  // lat/lon (rounded) so a stale value is visible at a glance, plus
-  // a "Re-check" button that force-clears the adapter's cache. The
-  // row only appears when a sim is selected (= simState != null) so
-  // pilots flying without a sim adapter (rare; offline flights) don't
-  // see a confusing "no position" warning. Live bug 2026-05-03: pilot
-  // saw "3142.5 nm von SCEL" because the cached snapshot was from
-  // the menu screen — without this row, the only way out was app
-  // restart.
+  // Sim-position health check. v0.1.29 onwards we ONLY surface the
+  // warning row when something actually looks wrong — in the happy
+  // path (sim connected, position fresh and real) the row is
+  // invisible so it doesn't clutter the page. Two failure modes
+  // catch the bugs we've actually seen:
+  //
+  //   * sim says it's connected but lat/lon is exactly 0,0 →
+  //     adapter's default-uninitialised state (= no real frame yet).
+  //   * sim says it's connected and we have lat/lon, but the bid
+  //     list shows "X nm from <airport>" with X far above any sane
+  //     threshold (set by tooFar in the bid card below) AND the
+  //     pilot tries to start anyway. We can't easily pre-compute
+  //     this here because it depends on the airport coords cache,
+  //     so the per-bid card is responsible for showing the warning
+  //     inline (start-button title + start-disabled state). This
+  //     row only catches the "no position at all" case.
   const hasSimPosition =
     simSnapshot !== null &&
     !(simSnapshot.lat === 0 && simSnapshot.lon === 0);
-  const simPositionLabel = hasSimPosition && simSnapshot
-    ? `${simSnapshot.lat.toFixed(3)}°, ${simSnapshot.lon.toFixed(3)}°`
-    : t("bids.sim_position_none");
+  const showPositionWarning = simState === "connected" && !hasSimPosition;
 
   return (
     <section className="bids">
@@ -324,24 +330,15 @@ export function BidsList({
         </button>
       </header>
 
-      {simState === "connected" && (
-        <div className="bids__sim-position" role="status">
-          <span className="bids__sim-position-icon" aria-hidden="true">
-            {hasSimPosition ? "📍" : "⏳"}
+      {showPositionWarning && (
+        <div
+          className="bids__sim-position bids__sim-position--warn"
+          role="status"
+        >
+          <span className="bids__sim-position-icon" aria-hidden="true">⚠️</span>
+          <span className="bids__sim-position-message">
+            {t("bids.sim_position_warning")}
           </span>
-          <span className="bids__sim-position-label">
-            {t("bids.sim_position_label")}
-          </span>
-          <span className="bids__sim-position-value">{simPositionLabel}</span>
-          <button
-            type="button"
-            className="bids__sim-position-resync"
-            onClick={handleSimResync}
-            disabled={resyncing}
-            title={t("bids.sim_position_resync_hint")}
-          >
-            {resyncing ? "…" : "⟲"} {t("bids.sim_position_resync")}
-          </button>
         </div>
       )}
 
