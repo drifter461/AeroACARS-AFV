@@ -183,6 +183,29 @@ export function BidsList({
     setRefreshing(false);
   }
 
+  /** Pilot-initiated re-sync of the sim adapter's cached snapshot.
+   *  Used when the bid distance check shows a wildly wrong number
+   *  (e.g. "3142.5 nm from SCEL" while parked at SCEL) because the
+   *  cached lat/lon is stale and our 5 s automatic stale-timeout
+   *  hasn't fired (sim trickled stray data through the load). The
+   *  command clears the adapter's snapshot; the next live frame from
+   *  the sim repopulates it within ~1 s. UI shows a spinner during
+   *  the brief re-sync window. */
+  const [resyncing, setResyncing] = useState(false);
+  async function handleSimResync() {
+    if (resyncing) return;
+    setResyncing(true);
+    try {
+      await invoke("sim_force_resync");
+    } catch {
+      // Adapter command is fire-and-forget; failures only happen if
+      // the sim adapter mutex is poisoned (= app already broken).
+    }
+    // Visible spinner for ~1 s so the pilot sees something happen
+    // even when the sim instantly delivers a fresh frame.
+    setTimeout(() => setResyncing(false), 1000);
+  }
+
   // Whenever the bids change, fetch the coordinates of every unique departure
   // airport in the background. Results are cached server-side too, so this is
   // cheap on subsequent calls.
@@ -269,6 +292,22 @@ export function BidsList({
     }
   }
 
+  // Status line about the cached sim position. Shows the current
+  // lat/lon (rounded) so a stale value is visible at a glance, plus
+  // a "Re-check" button that force-clears the adapter's cache. The
+  // row only appears when a sim is selected (= simState != null) so
+  // pilots flying without a sim adapter (rare; offline flights) don't
+  // see a confusing "no position" warning. Live bug 2026-05-03: pilot
+  // saw "3142.5 nm von SCEL" because the cached snapshot was from
+  // the menu screen — without this row, the only way out was app
+  // restart.
+  const hasSimPosition =
+    simSnapshot !== null &&
+    !(simSnapshot.lat === 0 && simSnapshot.lon === 0);
+  const simPositionLabel = hasSimPosition && simSnapshot
+    ? `${simSnapshot.lat.toFixed(3)}°, ${simSnapshot.lon.toFixed(3)}°`
+    : t("bids.sim_position_none");
+
   return (
     <section className="bids">
       <header className="bids__header">
@@ -284,6 +323,27 @@ export function BidsList({
           {refreshing ? "…" : "⟳"} <span>{t("bids.refresh")}</span>
         </button>
       </header>
+
+      {simState === "connected" && (
+        <div className="bids__sim-position" role="status">
+          <span className="bids__sim-position-icon" aria-hidden="true">
+            {hasSimPosition ? "📍" : "⏳"}
+          </span>
+          <span className="bids__sim-position-label">
+            {t("bids.sim_position_label")}
+          </span>
+          <span className="bids__sim-position-value">{simPositionLabel}</span>
+          <button
+            type="button"
+            className="bids__sim-position-resync"
+            onClick={handleSimResync}
+            disabled={resyncing}
+            title={t("bids.sim_position_resync_hint")}
+          >
+            {resyncing ? "…" : "⟲"} {t("bids.sim_position_resync")}
+          </button>
+        </div>
+      )}
 
       {state.kind === "loading" && <p className="bids__hint">{t("bids.loading")}</p>}
 
@@ -326,8 +386,22 @@ export function BidsList({
             // and within MAX_START_DISTANCE_NM of the departure airport.
             const dptIcao = f.dpt_airport_id.trim().toUpperCase();
             const dptCoords = airports[dptIcao];
+            // Defensive: a snapshot reporting EXACTLY 0,0 lat/lon is
+            // never a real airport — both adapters return that as
+            // their default uninitialised value, and the open ocean
+            // off the African coast is the only real point matching
+            // (no real flight starts there). Treat as "no position
+            // yet" rather than computing a 5000-nm phantom distance.
+            // Belt-and-braces alongside the backend stale-snapshot
+            // clear (commits in adapter.rs) so a brief race window
+            // between Connected-state and first-real-position can't
+            // surface a wrong "too far" gate to the pilot.
+            const hasRealPosition =
+              simSnapshot !== null &&
+              !(simSnapshot.lat === 0 && simSnapshot.lon === 0);
             let distanceToDptNm: number | null = null;
             if (
+              hasRealPosition &&
               simSnapshot &&
               dptCoords &&
               dptCoords.lat !== null &&
@@ -344,11 +418,14 @@ export function BidsList({
             const tooFar =
               distanceToDptNm !== null &&
               distanceToDptNm > MAX_START_DISTANCE_NM;
+            const noPositionYet =
+              simState === "connected" && !hasRealPosition;
 
             const startDisabled =
               startingId !== null ||
               hasActiveFlight ||
               simState !== "connected" ||
+              noPositionYet ||
               !onGround ||
               tooFar;
 
@@ -357,6 +434,8 @@ export function BidsList({
               startTitle = t("bids.start_disabled_no_sim");
             } else if (hasActiveFlight) {
               startTitle = t("bids.start_disabled_active_flight");
+            } else if (noPositionYet) {
+              startTitle = t("bids.start_disabled_no_position");
             } else if (!onGround) {
               startTitle = t("bids.start_disabled_not_on_ground");
             } else if (tooFar && distanceToDptNm !== null) {

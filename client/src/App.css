@@ -3285,6 +3285,53 @@ input:disabled {
   opacity: 0.6;
 }
 
+/* Sim-position status row — appears between header and bids list
+ * when a sim is connected. Carries the cached lat/lon plus a manual
+ * "Re-check" button so the pilot can force-clear the snapshot when
+ * the auto-stale-detection didn't kick in (e.g. brief sim pause
+ * during flight switch). Visually low-key (matches .bids__hint
+ * styling) so it doesn't compete with the bid list itself. */
+.bids__sim-position {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 10px 0;
+  padding: 8px 14px;
+  font-size: 12px;
+  color: var(--text-muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.bids__sim-position-icon {
+  font-size: 14px;
+}
+
+.bids__sim-position-label {
+  color: var(--text-muted);
+}
+
+.bids__sim-position-value {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.bids__sim-position-resync {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  font-size: 11px;
+}
+
+.bids__sim-position-resync:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
 .bids__hint {
   margin: 0;
   color: var(--text-muted);

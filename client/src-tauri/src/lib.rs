@@ -5327,6 +5327,22 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
                     .unwrap_or(now);
                 stats.landing_at = Some(actual_td_at);
 
+                // Snapshot the buffer entry AT the actual touchdown
+                // moment. Used below for IAS / pitch / heading
+                // capture so they reflect the real TD-instant values,
+                // not the post-rollout numbers that `snap` carries
+                // (current snap is up to 5 s late on the streamer
+                // tick, time enough for a typical airliner to bleed
+                // ~17 kt IAS and derotate the nose to negative pitch).
+                // Live bug 2026-05-03: pilot at 135 kt touchdown saw
+                // "IAS bei TD: 118 kt" + "pitch -4.9°" because we
+                // were reading post-derotation values.
+                let td_buf_sample = stats
+                    .snapshot_buffer
+                    .iter()
+                    .find(|s| s.on_ground)
+                    .cloned();
+
                 // V/S capture — GEES-aligned: prefer the latched
                 // SimVar `PLANE TOUCHDOWN NORMAL VELOCITY` (already
                 // sign-corrected in the adapter). It's the cleanest
@@ -5375,11 +5391,40 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
                 stats.landing_g_force = Some(touchdown_g);
                 stats.landing_peak_g_force = Some(touchdown_g);
 
-                stats.landing_pitch_deg =
-                    Some(snap.touchdown_pitch_deg.unwrap_or(snap.pitch_deg));
-                stats.landing_heading_deg =
-                    Some(snap.touchdown_heading_mag_deg.unwrap_or(snap.heading_deg_magnetic));
-                stats.landing_speed_kt = Some(snap.indicated_airspeed_kt);
+                // IAS / pitch / heading: prefer the buffered sample
+                // at the actual TD moment (see `td_buf_sample` above).
+                // Fall back chain — buffered sample → MSFS-latched
+                // touchdown SimVars → live snap. The `snap` fallback
+                // is the worst case (post-rollout values), kept only
+                // for resumed flights where the buffer is empty.
+                stats.landing_pitch_deg = Some(
+                    snap.touchdown_pitch_deg
+                        .or_else(|| td_buf_sample.as_ref().map(|s| s.pitch_deg))
+                        .unwrap_or(snap.pitch_deg),
+                );
+                // Heading capture: MSFS gives us a magnetic-heading
+                // touchdown latch; the buffer carries true-heading
+                // only. When we fall back to the buffer we approximate
+                // magnetic from true via the live magvar delta
+                // (true−magnetic at the streamer tick) — small error
+                // since magvar doesn't change in 5 s of rollout.
+                stats.landing_heading_deg = Some(
+                    snap.touchdown_heading_mag_deg
+                        .or_else(|| {
+                            td_buf_sample.as_ref().map(|s| {
+                                let magvar =
+                                    snap.heading_deg_true - snap.heading_deg_magnetic;
+                                s.heading_true_deg - magvar
+                            })
+                        })
+                        .unwrap_or(snap.heading_deg_magnetic),
+                );
+                stats.landing_speed_kt = Some(
+                    td_buf_sample
+                        .as_ref()
+                        .map(|s| s.indicated_airspeed_kt)
+                        .unwrap_or(snap.indicated_airspeed_kt),
+                );
                 stats.landing_fuel_kg = Some(snap.fuel_total_kg);
 
                 // ---- Tier 2/3 BeatMyLanding-aligned extras ----
@@ -5387,9 +5432,37 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
                 // Position + true heading at the touchdown edge — used
                 // for runway lookup and disambiguation between parallel
                 // runway pairs (08L/08R) via heading match.
-                stats.landing_lat = Some(snap.lat);
-                stats.landing_lon = Some(snap.lon);
-                stats.landing_heading_true_deg = Some(snap.heading_deg_true);
+                //
+                // Pulls from the buffered TD-moment sample (same
+                // reasoning as the IAS / pitch / heading capture
+                // above): `snap` is up to 5 s late on the streamer
+                // tick, time enough for a typical airliner to roll
+                // 50–100 m down the runway and drift left/right via
+                // nose-wheel correction — the centerline offset
+                // sign would invert if the pilot touched down 3 m
+                // left and then drifted through center to right of
+                // centerline during the rollout. Live bug 2026-05-03
+                // (MKJS RWY 07: pilot reported 3 m left, app showed
+                // 2.7 m right). Buffer fallback to `snap` only when
+                // the buffer is empty (resumed flight).
+                stats.landing_lat = Some(
+                    td_buf_sample
+                        .as_ref()
+                        .map(|s| s.lat)
+                        .unwrap_or(snap.lat),
+                );
+                stats.landing_lon = Some(
+                    td_buf_sample
+                        .as_ref()
+                        .map(|s| s.lon)
+                        .unwrap_or(snap.lon),
+                );
+                stats.landing_heading_true_deg = Some(
+                    td_buf_sample
+                        .as_ref()
+                        .map(|s| s.heading_true_deg)
+                        .unwrap_or(snap.heading_deg_true),
+                );
 
                 // Touchdown profile — full buffer reframed to ms-relative
                 // timestamps. PIREP renders this as a tiny V/S curve so
@@ -5444,9 +5517,18 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
                 // `approach_runway` (from `ATC RUNWAY SELECTED`) — the
                 // runway_match value is the authoritative one because
                 // it's derived from where the wheels actually touched,
-                // not the ATC clearance.
+                // not the ATC clearance. Uses the buffered TD-moment
+                // lat/lon/heading (same reasoning as `landing_lat`
+                // capture above) so the centerline-offset sign and
+                // along-track distance reflect the real touchdown
+                // point, not where the aircraft has rolled to during
+                // the streamer's 5 s edge-detection lag.
+                let (rw_lat, rw_lon, rw_hdg_true) = td_buf_sample
+                    .as_ref()
+                    .map(|s| (s.lat, s.lon, s.heading_true_deg))
+                    .unwrap_or((snap.lat, snap.lon, snap.heading_deg_true));
                 stats.runway_match =
-                    runway::lookup_runway(snap.lat, snap.lon, snap.heading_deg_true);
+                    runway::lookup_runway(rw_lat, rw_lon, rw_hdg_true);
                 if let Some(rw) = &stats.runway_match {
                     tracing::info!(
                         airport = %rw.airport_ident,
@@ -7722,6 +7804,28 @@ fn sim_status(app: AppHandle, state: tauri::State<'_, AppState>) -> SimStatus {
     }
 }
 
+/// Pilot-initiated re-sync of the active sim adapter's cached
+/// snapshot. Clears the lat/lon/etc. cache so `sim_status` returns
+/// `state: "connecting"` + `snapshot: None` until the next genuine
+/// frame arrives. Lets the briefing tab recover from edge cases the
+/// automatic 5 s stale-timeout doesn't cover (sim paused while
+/// changing flight, SimConnect trickles stale data, etc.) without
+/// any "skip the gate" override semantics.
+#[tauri::command]
+fn sim_force_resync(app: AppHandle, state: tauri::State<'_, AppState>) {
+    let kind = read_sim_config(&app).kind;
+    if kind.is_xplane() {
+        state.xplane.lock().expect("xplane lock").clear_snapshot();
+        return;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if kind.is_msfs() {
+            state.msfs.lock().expect("msfs lock").clear_snapshot();
+        }
+    }
+}
+
 // ---- Live SimVar / LVar inspector (Settings → Debug) ----
 //
 // These commands forward to the MsfsAdapter's inspector watchlist
@@ -8717,6 +8821,7 @@ pub fn run() {
             sim_get_kind,
             sim_set_kind,
             sim_status,
+            sim_force_resync,
             airport_get,
             flight_status,
             flight_start,

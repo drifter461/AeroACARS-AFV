@@ -46,6 +46,48 @@ fn de_str_or_int<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
     d.deserialize_any(V)
 }
 
+/// `Option<String>` variant of `de_str_or_int`. Reuses the same string-or-int
+/// visitor but accepts JSON `null` / missing as `None`. Needed because
+/// phpVMS encodes optional id fields (route_code, callsign, alt_airport_id,
+/// flight_type, route) as integers when the underlying value is numeric,
+/// strings when alphanumeric, and null when missing. Without this we'd
+/// fail the entire bids list parse on a single legacy flight whose
+/// route_code was stored as an integer in the database.
+fn de_opt_str_or_int<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    struct V;
+    impl<'de> Visitor<'de> for V {
+        type Value = Option<String>;
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("string, integer, or null")
+        }
+        fn visit_unit<E: de::Error>(self) -> Result<Option<String>, E> {
+            Ok(None)
+        }
+        fn visit_none<E: de::Error>(self) -> Result<Option<String>, E> {
+            Ok(None)
+        }
+        fn visit_some<D: Deserializer<'de>>(self, d: D) -> Result<Option<String>, D::Error> {
+            de_str_or_int(d).map(Some)
+        }
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<Option<String>, E> {
+            Ok(Some(v.to_owned()))
+        }
+        fn visit_string<E: de::Error>(self, v: String) -> Result<Option<String>, E> {
+            Ok(Some(v))
+        }
+        fn visit_i64<E: de::Error>(self, v: i64) -> Result<Option<String>, E> {
+            Ok(Some(v.to_string()))
+        }
+        fn visit_u64<E: de::Error>(self, v: u64) -> Result<Option<String>, E> {
+            Ok(Some(v.to_string()))
+        }
+        fn visit_f64<E: de::Error>(self, v: f64) -> Result<Option<String>, E> {
+            Ok(Some(v.to_string()))
+        }
+    }
+    d.deserialize_any(V)
+}
+
 /// Mirror of `de_str_or_int` for fields we want as `i64`. phpVMS encodes
 /// numeric ids inconsistently — sometimes as JSON numbers, sometimes as
 /// strings (notably on the Eurowings test instance). Tolerating both
@@ -210,12 +252,17 @@ pub struct Airline {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Airport {
+    /// phpVMS encodes airport ids inconsistently across instances —
+    /// usually ICAO strings, sometimes integers (legacy databases).
+    /// Permissive here so a single misencoded airport doesn't fail the
+    /// whole bids/flight list parse.
+    #[serde(deserialize_with = "de_str_or_int")]
     pub id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_str_or_int")]
     pub icao: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_str_or_int")]
     pub iata: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_str_or_int")]
     pub name: Option<String>,
     #[serde(default)]
     pub lat: Option<f64>,
@@ -241,22 +288,35 @@ pub struct Distance {
 }
 
 /// Subset of phpVMS's Flight resource we use in Phase 1. Permissive on optional fields.
+///
+/// Every `String` / `Option<String>` id-ish field uses a permissive
+/// deserializer because phpVMS is inconsistent across instances: a
+/// numeric flight_id stored in the DB comes back as a JSON integer on
+/// some sites (legacy auto-increment IDs) and as a string on others
+/// (UUID setups). Live bug from a GSG pilot 2026-05-03: `/api/user/bids`
+/// returned `"flight_number": 6431` (integer, no quotes), failing the
+/// entire bids parse with "invalid type: integer '6431', expected a
+/// string". Lesson: assume nothing about wire types, only types we
+/// fully control end-to-end deserve a strict shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Flight {
+    #[serde(deserialize_with = "de_str_or_int")]
     pub id: String,
     /// phpVMS encodes this as a JSON number when the value is purely numeric
-    /// (e.g. `284`) and as a string otherwise (e.g. `"VL12A"`). Accept both.
+    /// (e.g. `284` or `6431`) and as a string otherwise (e.g. `"VL12A"`).
     #[serde(deserialize_with = "de_str_or_int")]
     pub flight_number: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_str_or_int")]
     pub route_code: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_str_or_int")]
     pub route_leg: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_str_or_int")]
     pub callsign: Option<String>,
+    #[serde(deserialize_with = "de_str_or_int")]
     pub dpt_airport_id: String,
+    #[serde(deserialize_with = "de_str_or_int")]
     pub arr_airport_id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_str_or_int")]
     pub alt_airport_id: Option<String>,
     /// Scheduled flight time in minutes.
     #[serde(default)]
@@ -264,9 +324,9 @@ pub struct Flight {
     /// Cruise level (e.g. 360 == FL360).
     #[serde(default)]
     pub level: Option<i32>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_str_or_int")]
     pub route: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_str_or_int")]
     pub flight_type: Option<String>,
     #[serde(default)]
     pub distance: Option<Distance>,
@@ -1291,6 +1351,73 @@ mod tests {
         "#;
         let ofp = parse_simbrief_ofp(xml).expect("parses");
         assert_eq!(ofp.alternate.as_deref(), Some("LFBO"));
+    }
+
+    /// Reproduces the live bug from a GSG pilot 2026-05-03: the
+    /// `/api/user/bids` response contained `"flight_number": 6431`
+    /// (integer, no quotes), failing the entire bids parse with
+    /// "invalid type: integer '6431', expected a string at line 1
+    /// column 289". After the fix all id-ish String fields tolerate
+    /// integers via de_str_or_int / de_opt_str_or_int.
+    #[test]
+    fn flight_parses_integer_flight_number_and_id() {
+        let json = r#"{
+            "id": 6431,
+            "flight_number": 6431,
+            "dpt_airport_id": 17,
+            "arr_airport_id": "LFMN",
+            "alt_airport_id": null,
+            "route_code": 42,
+            "callsign": 6431
+        }"#;
+        let f: Flight = serde_json::from_str(json).expect("parses");
+        assert_eq!(f.id, "6431");
+        assert_eq!(f.flight_number, "6431");
+        assert_eq!(f.dpt_airport_id, "17");
+        assert_eq!(f.arr_airport_id, "LFMN");
+        assert_eq!(f.alt_airport_id, None);
+        assert_eq!(f.route_code.as_deref(), Some("42"));
+        assert_eq!(f.callsign.as_deref(), Some("6431"));
+    }
+
+    /// Strings still parse as strings (regression guard — the
+    /// permissive deserializer must not break the canonical phpVMS
+    /// shape where everything is a string).
+    #[test]
+    fn flight_still_parses_canonical_string_shape() {
+        let json = r#"{
+            "id": "VL12A",
+            "flight_number": "VL12A",
+            "dpt_airport_id": "EDDF",
+            "arr_airport_id": "LEBL",
+            "alt_airport_id": "LEMD",
+            "route_code": "STAR1",
+            "callsign": "DLH123"
+        }"#;
+        let f: Flight = serde_json::from_str(json).expect("parses");
+        assert_eq!(f.id, "VL12A");
+        assert_eq!(f.flight_number, "VL12A");
+        assert_eq!(f.alt_airport_id.as_deref(), Some("LEMD"));
+    }
+
+    /// Bid wrapping a Flight — full path the live bug took.
+    #[test]
+    fn bid_with_integer_flight_number_parses() {
+        let json = r#"{
+            "id": 7,
+            "user_id": 42,
+            "flight_id": 6431,
+            "flight": {
+                "id": 6431,
+                "flight_number": 6431,
+                "dpt_airport_id": "LFMN",
+                "arr_airport_id": "EDLE"
+            }
+        }"#;
+        let b: Bid = serde_json::from_str(json).expect("parses");
+        assert_eq!(b.id, 7);
+        assert_eq!(b.flight_id, "6431");
+        assert_eq!(b.flight.flight_number, "6431");
     }
 
     #[test]

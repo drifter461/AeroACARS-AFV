@@ -134,6 +134,21 @@ impl MsfsAdapter {
         self.shared.snapshot.lock().unwrap().clone()
     }
 
+    /// Force-clear the cached snapshot + touchdown so the next read
+    /// returns `None` until SimConnect delivers a fresh frame. Used by
+    /// the UI's "Re-check sim position" button when the pilot suspects
+    /// the cached lat/lon is stale (e.g. flight changed in MSFS but
+    /// our 5 s stale-timeout hasn't fired because SimConnect kept
+    /// trickling data through the pause). State is downgraded to
+    /// Connecting so the UI shows "waiting for sim position …" until
+    /// the next real packet lands.
+    pub fn clear_snapshot(&self) {
+        *self.shared.snapshot.lock().unwrap() = None;
+        *self.shared.touchdown.lock().unwrap() = None;
+        *self.shared.state.lock().unwrap() = ConnectionState::Connecting;
+        tracing::info!("MSFS snapshot cleared by user (force-resync)");
+    }
+
     pub fn last_error(&self) -> Option<String> {
         self.shared.last_error.lock().unwrap().clone()
     }
@@ -204,6 +219,20 @@ fn worker_loop(shared: Arc<Shared>, stop: Arc<AtomicBool>, kind: SimKind) {
                 // run_dispatch only returns when stop is signalled or
                 // the connection has gone stale. Either way, drop and
                 // try again at the top of the loop.
+                //
+                // CRITICAL: clear the cached snapshot + touchdown so a
+                // post-reconnect read can't return stale data from the
+                // pre-disconnect session. Without this, a pilot who
+                // loaded MSFS at the default airport (KSEA), then
+                // changed the flight to a remote airport (SCEL),
+                // would see a phantom "3142.5 nm from SCEL" check
+                // failure because our cached snapshot still showed
+                // the old KSEA position from before the load. Live
+                // bug 2026-05-03. State stays "Disconnected" until
+                // the next snapshot lands.
+                *shared.snapshot.lock().unwrap() = None;
+                *shared.touchdown.lock().unwrap() = None;
+                *shared.state.lock().unwrap() = ConnectionState::Connecting;
             }
             Err(e) => {
                 let msg = format!("SimConnect_Open failed: {e}");
@@ -214,6 +243,13 @@ fn worker_loop(shared: Arc<Shared>, stop: Arc<AtomicBool>, kind: SimKind) {
         sleep_or_stop(&stop, Duration::from_secs(2));
     }
     *shared.state.lock().unwrap() = ConnectionState::Disconnected;
+    // Final cleanup on full stop (app exit / sim kind change). Same
+    // reasoning as in the reconnect branch — the next adapter
+    // instance must not be able to read stale data through a shared
+    // mutex (defensive even though Shared lifetime is bound to one
+    // adapter today).
+    *shared.snapshot.lock().unwrap() = None;
+    *shared.touchdown.lock().unwrap() = None;
 }
 
 fn run_dispatch(
@@ -313,15 +349,37 @@ fn run_dispatch(
                                     snap.touchdown_lon = Some(td.lon_rad.to_degrees());
                                 }
                             }
+                            // First-frame logging: fire once per dispatch
+                            // session (= per SimConnect handle) so we get
+                            // an info-line per real reconnect but don't
+                            // log on every snap. Driven by the local
+                            // `got_first` flag.
                             if !got_first {
                                 got_first = true;
-                                *shared.state.lock().unwrap() = ConnectionState::Connected;
                                 tracing::info!(
                                     aircraft = ?snap.aircraft_title,
                                     profile = ?snap.aircraft_profile,
                                     "MSFS first snapshot received"
                                 );
                                 log_first_snapshot_diagnostics(&snap);
+                            }
+                            // Connection-state bump: read SHARED state on
+                            // every frame so a manual `clear_snapshot()`
+                            // (Fix #8 user button) which set state to
+                            // Connecting gets correctly transitioned back
+                            // to Connected on the next live frame.
+                            // Without this, a local-only `got_first` flag
+                            // would stay true across the manual clear,
+                            // and the state would freeze at Connecting
+                            // until the next reconnect cycle even though
+                            // fresh snapshots are flowing again.
+                            // Mirrors how the X-Plane listener handles
+                            // this exact case.
+                            {
+                                let mut s = shared.state.lock().unwrap();
+                                if *s != ConnectionState::Connected {
+                                    *s = ConnectionState::Connected;
+                                }
                             }
                             *shared.snapshot.lock().unwrap() = Some(snap);
                         }

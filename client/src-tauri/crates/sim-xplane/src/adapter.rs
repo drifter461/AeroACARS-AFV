@@ -18,7 +18,17 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// Time without any RREF packet after which we declare the X-Plane
+/// connection stale. Mirrors `STALE_TIMEOUT` on the MSFS adapter
+/// (5 s) — long enough to survive a brief sim pause / loading screen,
+/// short enough that a quit-and-reload doesn't leave us showing the
+/// pre-quit position to the briefing tab. Live bug 2026-05-03: pilot
+/// loaded MSFS at default airport, switched flight to SCEL, saw
+/// "3142.5 nm von SCEL" because adapter still served the old position.
+/// Same class of bug exists here — fix it preemptively.
+const STALE_TIMEOUT: Duration = Duration::from_secs(5);
 
 use sim_core::{SimKind, SimSnapshot, Simulator};
 
@@ -173,6 +183,26 @@ impl XPlaneAdapter {
         *self.shared.state.lock().unwrap()
     }
 
+    /// Force-clear the parsed RREF state so `snapshot()` returns
+    /// `None` until X-Plane delivers a fresh batch of values. Used by
+    /// the UI's "Re-check sim position" button when the pilot
+    /// suspects the cached lat/lon is stale (e.g. flight switched in
+    /// X-Plane but our 5 s STALE_TIMEOUT hasn't fired because UDP
+    /// kept trickling stray packets through the load). Connection
+    /// state is downgraded to Connecting so the UI shows "waiting
+    /// for sim position …" until the next real packet lands.
+    pub fn clear_snapshot(&self) {
+        *self.shared.parsed.lock().unwrap() = XPlaneState::default();
+        for v in self.shared.seen.lock().unwrap().iter_mut() {
+            *v = false;
+        }
+        for v in self.shared.last_values.lock().unwrap().iter_mut() {
+            *v = 0.0;
+        }
+        *self.shared.state.lock().unwrap() = ConnectionState::Connecting;
+        tracing::info!("X-Plane snapshot cleared by user (force-resync)");
+    }
+
     pub fn snapshot(&self) -> Option<SimSnapshot> {
         let parsed = self.shared.parsed.lock().unwrap();
         if !parsed.got_first_packet {
@@ -272,6 +302,7 @@ fn run_listener(shared: Arc<AdapterShared>) {
 
     // Listen.
     let mut buf = vec![0u8; 8192];
+    let mut last_packet_at: Option<Instant> = None;
     while !shared.stop.load(Ordering::SeqCst) {
         match socket.recv_from(&mut buf) {
             Ok((n, _peer)) => {
@@ -279,6 +310,7 @@ fn run_listener(shared: Arc<AdapterShared>) {
                 if pairs.is_empty() {
                     continue;
                 }
+                last_packet_at = Some(Instant::now());
                 let mut parsed = shared.parsed.lock().unwrap();
                 let mut seen = shared.seen.lock().unwrap();
                 let mut last = shared.last_values.lock().unwrap();
@@ -300,12 +332,44 @@ fn run_listener(shared: Arc<AdapterShared>) {
                 }
             }
             Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {
-                // No data this tick — loop and re-check stop flag.
-                continue;
+                // No data this tick — check stale timeout below, then loop.
             }
             Err(e) => {
                 tracing::warn!(error = %e, "X-Plane UDP recv error");
                 std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+
+        // Stale-snapshot guard: if we WERE connected but haven't
+        // seen any packet for STALE_TIMEOUT, treat the connection
+        // as dropped — clear the parsed state (so snapshot() returns
+        // None until fresh data arrives) and downgrade the connection
+        // state. The next packet will repopulate parsed and snap us
+        // back to Connected without intervention. Without this, if
+        // the pilot quits X-Plane and re-loads at a different airport,
+        // our snapshot() would silently keep serving the old position
+        // until a new packet overwrites every relevant DataRef.
+        if let Some(at) = last_packet_at {
+            if at.elapsed() > STALE_TIMEOUT {
+                let mut parsed = shared.parsed.lock().unwrap();
+                if parsed.got_first_packet {
+                    tracing::warn!(
+                        "X-Plane: no RREF packets for {:?} — clearing snapshot, marking connecting",
+                        STALE_TIMEOUT
+                    );
+                    *parsed = XPlaneState::default();
+                    let mut seen = shared.seen.lock().unwrap();
+                    for v in seen.iter_mut() {
+                        *v = false;
+                    }
+                    let mut last = shared.last_values.lock().unwrap();
+                    for v in last.iter_mut() {
+                        *v = 0.0;
+                    }
+                    *shared.state.lock().unwrap() = ConnectionState::Connecting;
+                }
+                // Reset so we don't fire the warning every tick.
+                last_packet_at = None;
             }
         }
     }

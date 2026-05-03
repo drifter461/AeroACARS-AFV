@@ -70,6 +70,7 @@ mod stub {
         pub fn snapshot(&self) -> Option<SimSnapshot> {
             None
         }
+        pub fn clear_snapshot(&self) {}
         pub fn last_error(&self) -> Option<String> {
             Some("MSFS adapter is Windows-only".into())
         }

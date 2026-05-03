@@ -104,6 +104,12 @@ pub const CATALOG: &[DatarefEntry] = &[
         field: FieldId::Longitude,
     },
     DatarefEntry {
+        // X-Plane reports MSL altitude in METERS via `elevation`.
+        // The misleading `_ft` in the FieldId is historic — we
+        // convert to feet at the snapshot boundary, alongside AGL.
+        // Live-bug 2026-05-03: pilot saw "HÖHE 5.554 ft / AGL
+        // 18.113 ft" at FL180 because we treated meters as feet
+        // (5554 m × 3.28084 = 18221 ft, ≈ AGL).
         name: "sim/flightmodel/position/elevation",
         field: FieldId::AltitudeMslFt,
     },
@@ -313,13 +319,31 @@ pub const CATALOG: &[DatarefEntry] = &[
         name: "sim/cockpit2/ice/ice_pitot_heat_on_pilot",
         field: FieldId::PitotHeat,
     },
-    // QNH (hPa) and ambient temp.
+    // QNH (hPa) and ambient temp — both rewired 2026-05-03 after
+    // a live pilot bug report:
+    //
+    // Old QNH DataRef `sim/weather/region/altimeter_temperature_effect`
+    // is NOT pressure — it's a unitless temperature-correction
+    // factor for the cold-weather altimeter. We were storing that
+    // factor in `qnh_inhg` and multiplying by 33.86 → producing
+    // garbage (typical reading: ~1.0 → "33 hPa", way off).
+    //
+    // Old OAT DataRef `sim/weather/region/temperatures_aloft_deg_c[0]`
+    // is the SURFACE temperature (index 0 of the aloft array), not
+    // the temperature at aircraft altitude. Pilot at FL180 saw
+    // "+22°C" while the cockpit PFD correctly showed SAT −18°C.
+    //
+    // The cockpit2/temperature DataRef is the actual aircraft-level
+    // ambient (= SAT in modern X-Plane). The barometer_current_inhg
+    // DataRef is the standard altimeter reading the pilot would
+    // dial into the Kollsman window — same value across X-Plane 11
+    // and 12, no version branching needed.
     DatarefEntry {
-        name: "sim/weather/region/altimeter_temperature_effect",
-        field: FieldId::QnhInHg, // we'll parse this as inHg-equivalent for now; Phase 3 review
+        name: "sim/weather/barometer_current_inhg",
+        field: FieldId::QnhInHg,
     },
     DatarefEntry {
-        name: "sim/weather/region/temperatures_aloft_deg_c[0]",
+        name: "sim/cockpit2/temperature/outside_air_temp_degc",
         field: FieldId::OatC,
     },
     // Mach number.
@@ -336,7 +360,10 @@ pub const CATALOG: &[DatarefEntry] = &[
 pub struct XPlaneState {
     pub lat: f64,
     pub lon: f64,
-    pub altitude_msl_ft: f64,
+    /// Stored in METERS (X-Plane native — `sim/flightmodel/position/elevation`
+    /// reports meters MSL, not feet, despite the historic field name).
+    /// Convert to feet at snapshot time alongside AGL.
+    pub altitude_msl_m: f64,
     /// Stored in METERS (X-Plane native). Convert at snapshot time.
     pub altitude_agl_m: f64,
     pub heading_true_deg: f32,
@@ -401,7 +428,7 @@ impl XPlaneState {
         match entry.field {
             FieldId::Latitude => self.lat = value as f64,
             FieldId::Longitude => self.lon = value as f64,
-            FieldId::AltitudeMslFt => self.altitude_msl_ft = value as f64,
+            FieldId::AltitudeMslFt => self.altitude_msl_m = value as f64, // misnamed: stored in m
             FieldId::AltitudeAglFt => self.altitude_agl_m = value as f64, // misnamed: stored in m
             FieldId::HeadingDegTrue => self.heading_true_deg = value,
             FieldId::HeadingDegMagnetic => self.heading_magnetic_deg = value,
@@ -479,7 +506,7 @@ impl XPlaneState {
             timestamp: chrono::Utc::now(),
             lat: self.lat,
             lon: self.lon,
-            altitude_msl_ft: self.altitude_msl_ft,
+            altitude_msl_ft: self.altitude_msl_m / M_PER_FT,
             altitude_agl_ft: self.altitude_agl_m / M_PER_FT,
             heading_deg_true: self.heading_true_deg,
             heading_deg_magnetic: self.heading_magnetic_deg,
