@@ -4700,6 +4700,19 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                     drop(stats);
                     let now_ts = Utc::now().to_rfc3339();
                     for line in drained {
+                        // Mirror to the in-app activity log so the
+                        // pilot sees the T&G / go-around immediately
+                        // in the cockpit dashboard, not just after the
+                        // PIREP is filed and they look at phpVMS. The
+                        // 5 s dedupe window is fine here — successive
+                        // T&Gs are >1 min apart (FSM has to descend
+                        // back to Approach in between).
+                        log_activity_handle(
+                            &app,
+                            ActivityLevel::Info,
+                            line.clone(),
+                            None,
+                        );
                         acars_log_entries.push(api_client::LogEntry {
                             log: line,
                             lat: Some(snap.lat),
