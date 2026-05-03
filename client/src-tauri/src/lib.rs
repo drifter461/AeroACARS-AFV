@@ -105,6 +105,21 @@ const KG_TO_LB: f64 = 2.20462262;
 const ARRIVED_FALLBACK_RADIUS_NM: f64 = 2.0;
 const ARRIVED_FALLBACK_DWELL_SECS: i64 = 30;
 
+/// If at the moment the FSM reaches Arrived the aircraft is farther
+/// than this from the planned `arr_airport`, we treat it as a divert
+/// candidate and surface a banner asking the pilot to confirm the
+/// actual destination. Same threshold as ARRIVED_FALLBACK_RADIUS_NM
+/// so we don't paint divert banners on perfectly-normal arrivals
+/// where the FSM happened to fire from the slightly-larger fallback
+/// instead of the strict on-block path.
+const DIVERT_DETECT_RADIUS_NM: f64 = 2.0;
+/// How far from the actual touchdown point we'll search the local
+/// runways DB for a matching airport. 50 nmi covers any sensible
+/// real-world divert (typical divert distances: 20-100 nmi). Larger
+/// than 50 likely means we either missed the airport in our DB or
+/// the pilot landed somewhere genuinely off-grid (private strip).
+const DIVERT_NEAREST_SEARCH_RADIUS_NM: f64 = 50.0;
+
 /// How often we POST `/pireps/{id}/update` purely to bump `pireps.updated_at`
 /// and keep phpVMS's `RemoveExpiredLiveFlights` cron from soft-deleting
 /// the in-flight PIREP. The cron runs hourly and looks at `updated_at`,
@@ -680,6 +695,15 @@ struct FlightStats {
     /// short hops, and emergency landings near destination.
     arrived_fallback_pending_since: Option<DateTime<Utc>>,
 
+    /// Detected divert situation — populated once when the FSM reaches
+    /// Arrived OR the universal fallback fires AND the aircraft is
+    /// >= `DIVERT_DETECT_RADIUS_NM` from the planned `arr_airport`.
+    /// Surfaced via `flight_status` so the cockpit can render a
+    /// "Divert detected" banner and let the pilot file with the
+    /// correct `arr_airport_id`. None when we landed at the planned
+    /// destination as expected.
+    divert_hint: Option<DivertHint>,
+
     /// Wann das Flugzeug zum ersten Mal nach `tug_done` zum Stehen
     /// kam (gs < 0.5 kt). Triggert das 10-Sekunden-Dwell-Fenster
     /// bevor die Phase auf TaxiOut wechselt — entspricht dem echten
@@ -1111,6 +1135,30 @@ impl FlightStats {
     }
 }
 
+/// Cached divert detection result, surfaced via `flight_status` so the
+/// cockpit UI can render a "you landed at X, not the planned Y"
+/// banner with action buttons. Populated once per flight when the FSM
+/// reaches Arrived AND the aircraft is too far from `arr_airport`.
+#[derive(Debug, Clone, Serialize)]
+pub struct DivertHint {
+    /// Best-guess actual landing airport ICAO. None when the local
+    /// runways DB found nothing within `DIVERT_NEAREST_SEARCH_RADIUS_NM`
+    /// (private strip, off-DB military, scenery-only field).
+    pub actual_icao: Option<String>,
+    /// What the bid had as the planned destination.
+    pub planned_arr_icao: String,
+    /// What the bid had as the planned alternate, if any. Used to
+    /// boost UI confidence — when actual_icao == planned_alt_icao
+    /// we say "diverted to planned alternate" with high confidence.
+    pub planned_alt_icao: Option<String>,
+    /// Distance from the touchdown point to the planned arrival,
+    /// in nautical miles. Used in the banner copy.
+    pub distance_to_planned_nmi: f64,
+    /// One of: "alternate" (matched planned alt), "nearest" (closest
+    /// airport in DB), "unknown" (nothing found, manual override).
+    pub kind: &'static str,
+}
+
 #[derive(Serialize)]
 pub struct ActiveFlightInfo {
     pirep_id: String,
@@ -1158,6 +1206,11 @@ pub struct ActiveFlightInfo {
     /// means the streamer hit a network failure recently and the
     /// dashboard should warn the pilot.
     queued_position_count: u32,
+    /// Divert hint when the FSM noticed the aircraft landed somewhere
+    /// other than the planned `arr_airport`. The cockpit renders a
+    /// banner ("you landed at LFBO, planned was LEBL — file as divert
+    /// to LFBO?") with action buttons. None for normal arrivals.
+    divert_hint: Option<DivertHint>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1958,6 +2011,38 @@ fn current_client(state: &tauri::State<'_, AppState>) -> Result<Client, UiError>
         .ok_or_else(|| UiError::new("not_logged_in", "no active session"))
 }
 
+/// Find the N nearest airports to the active flight's CURRENT
+/// position. Powers the manual-divert modal in the cockpit so the
+/// pilot can pick from a list of nearby fields (or type a custom
+/// ICAO if their actual landing strip isn't in our local DB).
+///
+/// Returns an empty vec when no flight is active or no airport is
+/// within `DIVERT_NEAREST_SEARCH_RADIUS_NM` of the current position.
+#[tauri::command]
+fn divert_nearest_airports(
+    state: tauri::State<'_, AppState>,
+    limit: Option<usize>,
+) -> Result<Vec<runway::NearestAirport>, UiError> {
+    let limit = limit.unwrap_or(5).clamp(1, 20);
+    let (lat, lon) = {
+        let guard = state.active_flight.lock().expect("active_flight lock");
+        let Some(flight) = guard.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let stats = flight.stats.lock().expect("flight stats");
+        match (stats.last_lat, stats.last_lon) {
+            (Some(la), Some(lo)) => (la, lo),
+            _ => return Ok(Vec::new()),
+        }
+    };
+    Ok(runway::find_nearest_airports(
+        lat,
+        lon,
+        DIVERT_NEAREST_SEARCH_RADIUS_NM * 1852.0,
+        limit,
+    ))
+}
+
 /// Re-fetch the pilot profile from phpVMS. Returns the fresh profile
 /// (or None if not logged in / fetch failed). Mostly used by the UI to
 /// pick up `curr_airport` after a PIREP files — phpVMS updates the
@@ -2260,6 +2345,7 @@ fn flight_info(flight: &ActiveFlight) -> ActiveFlightInfo {
         last_position_at: stats.last_position_at.map(|t| t.to_rfc3339()),
         last_heartbeat_at: stats.last_heartbeat_at.map(|t| t.to_rfc3339()),
         queued_position_count: stats.queued_position_count,
+        divert_hint: stats.divert_hint.clone(),
     }
 }
 
@@ -3414,11 +3500,24 @@ async fn compute_distance_to_airport(
 /// of the minimum-quality checks in `validate_for_filing` fail — the UI then
 /// surfaces a dialog letting the user cancel the flight or file as a manual
 /// PIREP via [`flight_end_manual`].
+/// `divert_to` is optional and carries the ICAO of the actual landing
+/// airport when the pilot is filing a divert. JS side passes this when
+/// the user clicks "Submit as divert to X" on the divert-detected
+/// banner. When `Some`, the proximity-to-planned-arrival validation is
+/// skipped, the FileBody includes `arr_airport_id` to override the
+/// bid's planned destination, and a "DIVERT: X → Y" line is prepended
+/// to the notes.
 #[tauri::command]
 async fn flight_end(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
+    divert_to: Option<String>,
 ) -> Result<(), UiError> {
+    let divert_to = divert_to
+        .as_deref()
+        .map(|s| s.trim().to_uppercase())
+        .filter(|s| !s.is_empty());
+
     // Pull the arrival ICAO so we can resolve its coords without holding
     // the active_flight lock across the network call.
     let arr_icao = {
@@ -3432,7 +3531,14 @@ async fn flight_end(
     // pre-flight-filing gate ("not_at_arrival") so the pilot can't
     // file a flight from 200 nm out — they have to taxi to the gate or
     // file as a manual divert via flight_end_manual.
-    let distance_to_arr_nm = compute_distance_to_airport(&app, &state, &arr_icao).await;
+    //
+    // SKIPPED entirely when filing as a divert — by definition the
+    // pilot is NOT at the planned arrival, that's the whole point.
+    let distance_to_arr_nm = if divert_to.is_some() {
+        None
+    } else {
+        compute_distance_to_airport(&app, &state, &arr_icao).await
+    };
 
     // Validate WITHOUT removing the flight from state, so a failed validation
     // leaves the user able to retry, edit-and-file-manual, or cancel.
@@ -3538,7 +3644,17 @@ async fn flight_end(
         let score = stats.landing_score.map(|s| s.numeric());
         let distance_nm = stats.distance_nm;
         let fields = build_pirep_fields(&flight, &stats);
-        let notes = build_pirep_notes(&flight, &stats);
+        let mut notes = build_pirep_notes(&flight, &stats);
+        // Prepend a divert banner to the notes so the VA admin sees
+        // immediately on the PIREP page that this wasn't a normal
+        // arrival. Format mirrors what most ACARS clients write
+        // ("DIVERT: <planned> → <actual>") so admins can grep.
+        if let Some(actual) = divert_to.as_deref() {
+            notes = format!(
+                "DIVERT: {} → {} (planned destination not reached)\n\n{}",
+                arr_icao, actual, notes
+            );
+        }
 
         FileBody {
             flight_time,
@@ -3552,6 +3668,7 @@ async fn flight_end(
             notes: Some(notes),
             fares,
             fields: Some(fields),
+            arr_airport_id: divert_to.clone(),
         }
     };
     tracing::info!(
@@ -3861,6 +3978,14 @@ async fn flight_end_manual(
             notes: Some(notes),
             fares,
             fields: Some(fields),
+            // The manual flow already had a `divert_to` parameter for
+            // notes — pre-fix it only annotated the notes block and left
+            // the admin to update arr_airport_id by hand. Now we override
+            // the field directly too, same way the auto-divert flow does.
+            arr_airport_id: divert_to
+                .as_ref()
+                .map(|s| s.trim().to_uppercase())
+                .filter(|s| !s.is_empty()),
         }
     };
     // Flip the PIREP `source` to MANUAL (1) before submitting. PhpVMS's
@@ -5131,40 +5256,96 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
         FlightPhase::Preflight | FlightPhase::Boarding
     );
     if !already_done && !pre_block_off && stats.block_off_at.is_some() {
-        let near_dest = match runway::airport_position(&flight.arr_airport) {
-            Some((apt_lat, apt_lon)) => {
-                let m = runway::distance_m(snap.lat, snap.lon, apt_lat, apt_lon);
-                m / 1852.0 <= ARRIVED_FALLBACK_RADIUS_NM
-            }
-            // Airport not in the local DB → fall back to "engines off
-            // for 30 s on ground anywhere" rather than blocking the
-            // pilot. Worst case: a paused-on-runway scenario triggers
-            // Arrived early. The pilot still has Discard / Cancel.
-            None => true,
-        };
-        let conditions_met = snap.on_ground && snap.engines_running == 0 && near_dest;
-        if conditions_met {
-            let pending_at = stats
-                .arrived_fallback_pending_since
-                .get_or_insert(now);
+        let arr_pos = runway::airport_position(&flight.arr_airport);
+        let dist_to_planned_nmi = arr_pos
+            .map(|(la, lo)| runway::distance_m(snap.lat, snap.lon, la, lo) / 1852.0)
+            .unwrap_or(f64::INFINITY);
+        let near_planned = dist_to_planned_nmi <= ARRIVED_FALLBACK_RADIUS_NM;
+        // We treat "no airport in local DB" as near_planned=true so we
+        // don't block the file path for obscure ICAO codes — same as
+        // the original fallback behaviour.
+        let near_planned = near_planned || arr_pos.is_none();
+
+        let conditions_basic = snap.on_ground && snap.engines_running == 0;
+        if conditions_basic {
+            let pending_at = stats.arrived_fallback_pending_since.get_or_insert(now);
             let elapsed = (now - *pending_at).num_seconds();
             if elapsed >= ARRIVED_FALLBACK_DWELL_SECS {
-                tracing::info!(
-                    prev_phase = ?prev_phase,
-                    elapsed,
-                    near_dest,
-                    "Arrived fallback fired — forcing FSM to Arrived"
-                );
-                next_phase = FlightPhase::Arrived;
-                if stats.block_on_at.is_none() {
-                    stats.block_on_at = Some(now);
+                // Two paths to Arrived from here:
+                //
+                //   1. near_planned    → normal arrival, original fallback behaviour
+                //   2. far from planned → DIVERT — find nearest airport, populate
+                //                          divert_hint so the cockpit can ask the
+                //                          pilot to confirm the actual destination
+                //                          and file with the correct arr_airport_id
+                let mut detected_hint: Option<DivertHint> = None;
+                if !near_planned && dist_to_planned_nmi >= DIVERT_DETECT_RADIUS_NM {
+                    let nearby = runway::find_nearest_airports(
+                        snap.lat,
+                        snap.lon,
+                        DIVERT_NEAREST_SEARCH_RADIUS_NM * 1852.0,
+                        1,
+                    );
+                    // Only count as "at airport X" when the nearest
+                    // runway threshold is within the same on-airport
+                    // tolerance we use for the planned-arrival check.
+                    let nearest_icao = nearby
+                        .into_iter()
+                        .next()
+                        .filter(|na| {
+                            na.distance_m / 1852.0 <= ARRIVED_FALLBACK_RADIUS_NM
+                        })
+                        .map(|na| na.icao);
+                    let alt_match = nearest_icao
+                        .as_deref()
+                        .zip(stats.planned_alternate.as_deref())
+                        .map(|(a, b)| a.eq_ignore_ascii_case(b))
+                        .unwrap_or(false);
+                    let kind = if alt_match {
+                        "alternate"
+                    } else if nearest_icao.is_some() {
+                        "nearest"
+                    } else {
+                        "unknown"
+                    };
+                    detected_hint = Some(DivertHint {
+                        actual_icao: nearest_icao,
+                        planned_arr_icao: flight.arr_airport.clone(),
+                        planned_alt_icao: stats.planned_alternate.clone(),
+                        distance_to_planned_nmi: dist_to_planned_nmi,
+                        kind,
+                    });
+                    tracing::info!(
+                        planned = %flight.arr_airport,
+                        actual = ?detected_hint.as_ref().and_then(|h| h.actual_icao.as_deref()),
+                        dist_nmi = dist_to_planned_nmi,
+                        kind,
+                        "divert detected"
+                    );
                 }
-                // Helicopters often don't fire a touchdown event the
-                // way the analyzer expects. If we never recorded
-                // landing_at, stamp it now so the file body has a
-                // sensible flight_time.
-                if stats.landing_at.is_none() && stats.takeoff_at.is_some() {
-                    stats.landing_at = Some(now);
+
+                if near_planned || detected_hint.is_some() {
+                    tracing::info!(
+                        prev_phase = ?prev_phase,
+                        elapsed,
+                        near_planned,
+                        diverted = detected_hint.is_some(),
+                        "Arrived fallback fired — forcing FSM to Arrived"
+                    );
+                    next_phase = FlightPhase::Arrived;
+                    if stats.block_on_at.is_none() {
+                        stats.block_on_at = Some(now);
+                    }
+                    // Helicopters often don't fire a touchdown event the
+                    // way the analyzer expects. If we never recorded
+                    // landing_at, stamp it now so the file body has a
+                    // sensible flight_time.
+                    if stats.landing_at.is_none() && stats.takeoff_at.is_some() {
+                        stats.landing_at = Some(now);
+                    }
+                    if let Some(hint) = detected_hint {
+                        stats.divert_hint = Some(hint);
+                    }
                 }
             }
         } else {
@@ -7528,6 +7709,7 @@ pub fn run() {
             phpvms_load_session,
             phpvms_get_bids,
             phpvms_refresh_profile,
+            divert_nearest_airports,
             sim_get_kind,
             sim_set_kind,
             sim_status,

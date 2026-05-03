@@ -264,6 +264,97 @@ pub fn distance_m(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
     haversine_m(lat1, lon1, lat2, lon2)
 }
 
+/// One result row from `find_nearest_airports`. Distance in meters
+/// from the query point. The `position` is the same average-of-runway-
+/// thresholds point that `airport_position()` would return.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct NearestAirport {
+    pub icao: String,
+    pub lat: f64,
+    pub lon: f64,
+    pub distance_m: f64,
+    /// Longest runway at this airport, in feet — useful for the UI to
+    /// show "is this strip even big enough for what I'm flying" without
+    /// pulling extra data.
+    pub longest_runway_ft: f32,
+}
+
+/// Find airports within `max_radius_m` of the given point, sorted by
+/// distance ascending, capped at `limit` results.
+///
+/// Used by the divert-detection logic: when a pilot lands somewhere
+/// other than their planned `arr_airport`, we surface the nearest few
+/// airports as the "you actually landed at X" candidate list. The
+/// result is grouped per airport (multiple runways collapsed) and
+/// each group keeps the single closest runway threshold as its
+/// distance — so a long runway whose far end is closer than the near
+/// end of a tiny grass strip wins on proximity even if the centroids
+/// would tie.
+///
+/// Returns an empty vec when no airport is in range — caller decides
+/// how to recover (we typically fall back to "manual override").
+pub fn find_nearest_airports(
+    lat: f64,
+    lon: f64,
+    max_radius_m: f64,
+    limit: usize,
+) -> Vec<NearestAirport> {
+    use std::collections::HashMap;
+    let table = runways();
+    let mut by_apt: HashMap<&str, (f64, f64, f64, f32)> = HashMap::new();
+    // Coarse bounding-box pre-filter so we don't haversine the entire
+    // world catalog. 1 degree latitude ≈ 111 km, so for a 50 nmi
+    // (~93 km) max-radius we look ~1 degree out generously.
+    let bbox_deg = (max_radius_m / 100_000.0).max(0.5);
+    for row in table.iter() {
+        let approx_lat = (row.le_lat + row.he_lat) / 2.0;
+        let approx_lon = (row.le_lon + row.he_lon) / 2.0;
+        if (approx_lat - lat).abs() > bbox_deg
+            || (approx_lon - lon).abs() > bbox_deg
+        {
+            continue;
+        }
+        // Use the closer of the two threshold positions for each
+        // runway as that runway's distance to the query. The pilot
+        // touched down somewhere on the field — the nearer threshold
+        // is the better proxy than the centroid.
+        let d_le = haversine_m(lat, lon, row.le_lat, row.le_lon);
+        let d_he = haversine_m(lat, lon, row.he_lat, row.he_lon);
+        let d = d_le.min(d_he);
+        if d > max_radius_m {
+            continue;
+        }
+        let entry = by_apt
+            .entry(&row.airport_ident)
+            .or_insert((approx_lat, approx_lon, d, 0.0));
+        if d < entry.2 {
+            entry.0 = approx_lat;
+            entry.1 = approx_lon;
+            entry.2 = d;
+        }
+        if row.length_ft > entry.3 {
+            entry.3 = row.length_ft;
+        }
+    }
+    let mut out: Vec<NearestAirport> = by_apt
+        .into_iter()
+        .map(|(icao, (la, lo, d, len))| NearestAirport {
+            icao: icao.to_string(),
+            lat: la,
+            lon: lo,
+            distance_m: d,
+            longest_runway_ft: len,
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        a.distance_m
+            .partial_cmp(&b.distance_m)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    out.truncate(limit);
+    out
+}
+
 /// Look up the runway for a touchdown coordinate.
 ///
 /// `aircraft_heading_true_deg` is used to disambiguate between the two

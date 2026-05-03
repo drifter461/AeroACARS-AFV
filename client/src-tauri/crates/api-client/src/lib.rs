@@ -517,6 +517,15 @@ pub struct FileBody {
     /// Spec §24.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fields: Option<std::collections::HashMap<String, String>>,
+    /// Override the planned arrival airport when filing — used for
+    /// diverts. phpVMS' FileRequest.rules() validates this field, and
+    /// the controller writes it through to the Pirep model on file.
+    /// When set, the PIREP shows up in the VA's PIREP list with the
+    /// ACTUAL landing airport instead of the bid's planned one.
+    /// Pair with a `notes` block that explains the divert (we do that
+    /// in `flight_end_with_divert`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arr_airport_id: Option<String>,
 }
 
 /// Minimal fare entry for filing — phpVMS uses `id` to look up the fare class

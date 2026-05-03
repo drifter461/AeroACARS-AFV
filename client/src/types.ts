@@ -299,6 +299,29 @@ export interface ActiveFlightInfo {
   /** Positions sitting in the offline queue waiting to replay.
    *  0 means we're online and current. */
   queued_position_count: number;
+  /** Set when the FSM noticed the aircraft landed somewhere other than
+   *  the planned `arr_airport`. The cockpit renders a banner asking
+   *  the pilot to confirm the actual destination so the PIREP can be
+   *  filed with the correct `arr_airport_id`. Null on normal arrivals. */
+  divert_hint: DivertHint | null;
+}
+
+/** See `DivertHint` in lib.rs — populated by the FSM when on-ground +
+ *  engines-off + far-from-planned-arrival. */
+export interface DivertHint {
+  /** Best-guess actual landing airport ICAO. May be null when the
+   *  local runways DB found nothing within ~50 nmi (private strip,
+   *  off-DB military, scenery-only field). UI then falls back to
+   *  manual entry. */
+  actual_icao: string | null;
+  planned_arr_icao: string;
+  planned_alt_icao: string | null;
+  /** Distance from the touchdown point to the planned arrival, nmi. */
+  distance_to_planned_nmi: number;
+  /** "alternate" (matched planned alt — high confidence),
+   *  "nearest"   (found something else nearby),
+   *  "unknown"   (no airport in range — manual override required). */
+  kind: "alternate" | "nearest" | "unknown";
 }
 
 export interface AirportInfo {

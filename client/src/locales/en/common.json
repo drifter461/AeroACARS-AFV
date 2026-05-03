@@ -284,6 +284,25 @@
     "refresh_button_label": "Refresh storage statistics",
     "refresh_button_title": "Refresh"
   },
+  "divert": {
+    "title_alternate": "Divert to planned alternate detected",
+    "title_nearest": "Different landing field detected",
+    "title_unknown": "Landing field not recognised",
+    "body_alternate": "You landed at <strong>{{actual}}</strong> (your planned alternate) instead of <strong>{{planned}}</strong> (~{{distance}} nmi from destination).",
+    "body_nearest": "You landed at <strong>{{actual}}</strong> instead of the planned <strong>{{planned}}</strong> (~{{distance}} nmi from destination).",
+    "body_unknown": "You landed ~{{distance}} nmi away from <strong>{{planned}}</strong>, but we couldn't match the actual airport against our database. Please enter the ICAO manually.",
+    "submit_as_divert": "Submit as divert to {{actual}}",
+    "submit_as_planned": "Submit as planned ({{planned}}) anyway",
+    "manual_override": "Override: pick a different airport…",
+    "manual_modal_title": "Choose actual landing destination",
+    "manual_modal_hint": "Pick from the nearest airports or enter an ICAO code manually.",
+    "manual_modal_custom_label": "Custom ICAO",
+    "manual_modal_custom_placeholder": "e.g. EDDF",
+    "manual_modal_submit": "File with this destination",
+    "manual_modal_cancel": "Cancel",
+    "submitting": "Submitting…",
+    "filed_ok": "PIREP filed — {{from}} → {{to}}"
+  },
   "phpvms_status": {
     "title": "phpVMS API",
     "badge_heartbeat": "Heartbeat",

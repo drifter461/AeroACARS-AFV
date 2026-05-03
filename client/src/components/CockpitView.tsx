@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { ActiveFlightInfo, LoginResult, SimSnapshot } from "../types";
 import { ResumeFlightBanner } from "./ResumeFlightBanner";
 import { ActiveFlightPanel } from "./ActiveFlightPanel";
+import { DivertBanner } from "./DivertBanner";
 
 interface Props {
   session: LoginResult;
@@ -54,6 +55,11 @@ export function CockpitView({
     }
     if (!autoFile) return;
     if (activeFlight.phase !== "arrived") return;
+    // Suppress auto-file when we've detected a divert. The pilot must
+    // explicitly choose "submit as divert to X" / "submit as planned"
+    // / "override" via the DivertBanner — silently filing with the
+    // wrong arr_airport_id would defeat the whole point.
+    if (activeFlight.divert_hint) return;
     if (autoFiledRef.current === activeFlight.pirep_id) return;
     autoFiledRef.current = activeFlight.pirep_id;
     void (async () => {
@@ -102,6 +108,13 @@ export function CockpitView({
         onAdopted={setActiveFlight}
         onCancelled={() => setActiveFlight(null)}
       />
+
+      {!activeFlight.was_just_resumed && (
+        <DivertBanner
+          activeFlight={activeFlight}
+          onResolved={() => setActiveFlight(null)}
+        />
+      )}
 
       {!activeFlight.was_just_resumed && (
         <ActiveFlightPanel

@@ -2623,6 +2623,185 @@ input:disabled {
   flex-shrink: 0;
 }
 
+/* ===== Divert banner (cockpit) ===== */
+
+.divert-banner {
+  background: color-mix(in srgb, var(--warning) 10%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--warning) 60%, var(--border));
+  border-radius: 12px;
+  padding: 16px 20px;
+  margin-bottom: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.divert-banner__header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.divert-banner__icon {
+  font-size: 22px;
+  color: var(--warning);
+  line-height: 1;
+}
+
+.divert-banner__title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.divert-banner__body {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.45;
+}
+
+.divert-banner__error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 12px;
+}
+
+.divert-banner__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* ===== Generic modal (used by divert override) ===== */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: 20px;
+}
+
+.modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 22px 24px;
+  width: 100%;
+  max-width: 520px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+}
+
+.modal__title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.modal__hint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.modal__loading,
+.modal__empty {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  text-align: center;
+  padding: 8px 0;
+}
+
+.modal__error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 12px;
+}
+
+.modal__footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.divert-modal__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.divert-modal__candidate {
+  width: 100%;
+  text-align: left;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 10px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.divert-modal__candidate:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface-2));
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+}
+
+.divert-modal__candidate:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.divert-modal__icao {
+  font-weight: 600;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 14px;
+}
+
+.divert-modal__meta {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.divert-modal__custom {
+  display: grid;
+  grid-template-columns: max-content 1fr auto;
+  gap: 8px;
+  align-items: center;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.divert-modal__custom label {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.divert-modal__custom input {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  text-transform: uppercase;
+}
+
 /* ===== Active flight ===== */
 
 .active-flight {

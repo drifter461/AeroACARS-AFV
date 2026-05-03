@@ -284,6 +284,25 @@
     "refresh_button_label": "Speicher-Statistiken aktualisieren",
     "refresh_button_title": "Aktualisieren"
   },
+  "divert": {
+    "title_alternate": "Divert zum geplanten Alternate erkannt",
+    "title_nearest": "Anderer Landeplatz erkannt",
+    "title_unknown": "Landeplatz nicht erkannt",
+    "body_alternate": "Du bist gelandet in <strong>{{actual}}</strong> (geplanter Alternate) statt geplant <strong>{{planned}}</strong> (~{{distance}} nmi vom Ziel entfernt).",
+    "body_nearest": "Du bist gelandet in <strong>{{actual}}</strong> statt geplant <strong>{{planned}}</strong> (~{{distance}} nmi vom Ziel entfernt).",
+    "body_unknown": "Du bist gelandet ~{{distance}} nmi entfernt vom geplanten Ziel <strong>{{planned}}</strong>, aber wir konnten den tatsächlichen Flughafen in unserer Datenbank nicht eindeutig identifizieren. Bitte ICAO manuell eingeben.",
+    "submit_as_divert": "Als Divert nach {{actual}} einreichen",
+    "submit_as_planned": "Trotzdem nach {{planned}} einreichen",
+    "manual_override": "Override: anderen Flughafen wählen…",
+    "manual_modal_title": "Tatsächliches Landeziel wählen",
+    "manual_modal_hint": "Wähle aus den nächstgelegenen Flughäfen oder gib einen ICAO-Code manuell ein.",
+    "manual_modal_custom_label": "Custom ICAO",
+    "manual_modal_custom_placeholder": "z.B. EDDF",
+    "manual_modal_submit": "Mit diesem Ziel einreichen",
+    "manual_modal_cancel": "Abbrechen",
+    "submitting": "Sende…",
+    "filed_ok": "PIREP eingereicht — {{from}} → {{to}}"
+  },
   "phpvms_status": {
     "title": "phpVMS API",
     "badge_heartbeat": "Heartbeat",
