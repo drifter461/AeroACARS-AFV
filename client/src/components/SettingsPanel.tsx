@@ -197,35 +197,111 @@ export function SettingsPanel({
   );
 }
 
+/**
+ * Live status card for the phpVMS API connection — keeps the same
+ * visual language as the SimDebugPanel above so the Settings → Debug
+ * area reads as a single coherent block. Re-renders once a second to
+ * keep the relative ages live.
+ *
+ * State-color mapping mirrors the simulator card:
+ *   - no active flight        → disconnected (grey)
+ *   - heartbeat ≤ 45 s ago    → connected (green pulse)
+ *   - heartbeat 45-90 s       → connecting (yellow pulse, "stale")
+ *   - heartbeat > 90 s / never→ connecting (yellow, but with a stale label)
+ * "Connecting" is reused for both warn cases because phpVMS doesn't
+ * have an "error" CSS variant in the sim-panel system; a yellow pulse
+ * is the right level of "this is fishy, look at me" without false-
+ * alarming red on a single dropped packet.
+ */
 function PhpvmsHeartbeatDebug({ activeFlight }: { activeFlight: ActiveFlightInfo | null }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const id = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(id);
   }, []);
+
+  const ageSec = (iso: string | null): number | null => {
+    if (!iso) return null;
+    return Math.max(0, Math.floor((now - new Date(iso).getTime()) / 1000));
+  };
+  const fmtAge = (sec: number | null): string => {
+    if (sec === null) return "—";
+    if (sec < 60) return `vor ${sec}s`;
+    const m = Math.floor(sec / 60);
+    const r = sec % 60;
+    return r === 0 ? `vor ${m}m` : `vor ${m}m ${r}s`;
+  };
+
   if (!activeFlight) {
     return (
-      <div className="settings__debug-row">
-        <strong>phpVMS Heartbeat:</strong> kein aktiver Flug
-      </div>
+      <section className="sim-panel sim-panel--disconnected">
+        <header className="sim-panel__header">
+          <div className="sim-panel__header-left">
+            <h2>phpVMS API</h2>
+            <span className="sim-panel__kind">Heartbeat</span>
+          </div>
+          <span className="sim-panel__state">
+            <span className="sim-panel__dot" /> Inaktiv
+          </span>
+        </header>
+        <p className="sim-panel__hint">
+          Kein aktiver Flug — die Telemetrie zur phpVMS-Site startet, sobald
+          du einen Flug beginnst (oder einen laufenden adoptierst).
+        </p>
+      </section>
     );
   }
-  const fmt = (iso: string | null): string => {
-    if (!iso) return "—";
-    const ageSec = Math.max(0, Math.floor((now - new Date(iso).getTime()) / 1000));
-    if (ageSec < 90) return `vor ${ageSec}s`;
-    const min = Math.floor(ageSec / 60);
-    const rem = ageSec % 60;
-    return `vor ${min}m ${rem}s`;
-  };
+
+  const heartbeatAge = ageSec(activeFlight.last_heartbeat_at);
+  const positionAge = ageSec(activeFlight.last_position_at);
+  // Heartbeat fires every 30s by design — anything beyond ~45s means a
+  // posted call failed or the streamer hasn't gotten its first one in yet.
+  const isStale = heartbeatAge === null || heartbeatAge > 45;
+  const state = isStale ? "connecting" : "connected";
+  const stateLabel = isStale ? "Warte auf Heartbeat" : "Aktiv";
+  // Truncate the PIREP id for the badge — full id is ~16 chars, that's
+  // too wide for a header pill. The first 6 chars are enough to
+  // disambiguate in practice.
+  const pirepBadge = activeFlight.pirep_id.length > 8
+    ? `${activeFlight.pirep_id.slice(0, 6)}…`
+    : activeFlight.pirep_id;
+
   return (
-    <div className="settings__debug-row">
-      <strong>phpVMS:</strong>{" "}
-      letzte Position {fmt(activeFlight.last_position_at)} ·{" "}
-      letzter Heartbeat {fmt(activeFlight.last_heartbeat_at)}
-      {activeFlight.queued_position_count > 0 && (
-        <> · {activeFlight.queued_position_count} queued</>
-      )}
-    </div>
+    <section className={`sim-panel sim-panel--${state}`}>
+      <header className="sim-panel__header">
+        <div className="sim-panel__header-left">
+          <h2>phpVMS API</h2>
+          <span className="sim-panel__kind">PIREP {pirepBadge}</span>
+        </div>
+        <span className={`sim-panel__state sim-panel__state--${state}`}>
+          <span className="sim-panel__dot" /> {stateLabel}
+        </span>
+      </header>
+      <dl className="sim-panel__compact">
+        <dt>Letzte Position</dt>
+        <dd>
+          {fmtAge(positionAge)}
+          {positionAge !== null && positionAge > 60 && (
+            <span className="sim-panel__compact-muted"> · stale</span>
+          )}
+        </dd>
+        <dt>Letzter Heartbeat</dt>
+        <dd>
+          {fmtAge(heartbeatAge)}
+          {heartbeatAge === null && (
+            <span className="sim-panel__compact-muted"> · noch nicht gesendet</span>
+          )}
+        </dd>
+        {activeFlight.queued_position_count > 0 && (
+          <>
+            <dt>Position-Queue</dt>
+            <dd>
+              {activeFlight.queued_position_count}{" "}
+              <span className="sim-panel__compact-muted">ausstehend (offline)</span>
+            </dd>
+          </>
+        )}
+      </dl>
+    </section>
   );
 }
