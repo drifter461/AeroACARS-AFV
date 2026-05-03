@@ -14,7 +14,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.22"
+version = "0.1.23"
 edition = "2021"
 license = "MIT"
 authors = ["Thomas Kant <github@MANFahrer-GF>", "AeroACARS contributors"]
@@ -105,6 +105,10 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
+# HTTP client for the in-app GitHub-release-notes fetch. The
+# api-client and metar crates already use reqwest via the workspace
+# dep; we just need it directly here for `fetch_release_notes`.
+reqwest.workspace = true
 
 # Bundled CSV parser for the embedded ourairports runway table
 # (used by `src/runway.rs` to map a touchdown coord → runway).

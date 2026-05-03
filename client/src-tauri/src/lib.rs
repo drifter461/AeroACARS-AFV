@@ -2065,6 +2065,79 @@ async fn phpvms_refresh_profile(
     }
 }
 
+/// Single GitHub release record — the subset we render in the
+/// in-app "What's new" modal. Source: anonymous GET against
+/// <https://api.github.com/repos/MANFahrer-GF/AeroACARS/releases/tags/v{version}>
+/// (GitHub allows 60 anonymous req/h per IP, way more than we'd ever
+/// hit since we cache the result for the modal's lifetime).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReleaseNotes {
+    /// Release name (typically "AeroACARS v0.1.23"). Used as the
+    /// modal header.
+    pub name: String,
+    /// Tag name ("v0.1.23"). Used as a stable identifier so the
+    /// frontend can store "last-seen" in localStorage.
+    pub tag_name: String,
+    /// Markdown body — bilingual format with `## 🇩🇪 Deutsch` and
+    /// `## 🇬🇧 English` section markers. Frontend splits and renders
+    /// just the matching language.
+    pub body: String,
+    /// ISO-8601 publish timestamp.
+    pub published_at: String,
+    /// Direct link to the GitHub release page — used as a fallback
+    /// "View on GitHub" button in the modal.
+    pub html_url: String,
+}
+
+/// Fetch the GitHub release notes for a specific version tag. Used by
+/// the in-app "What's new" modal that fires once per version after
+/// the auto-updater swaps the binary in.
+///
+/// Returns `Err(...)` for network failures or non-200 responses;
+/// frontend falls back to "open on GitHub" in those cases. We
+/// deliberately don't authenticate the request — at one fetch per
+/// app-start the 60-req/h anonymous limit is irrelevant, and pulling
+/// secrets into a release-notes feature would be silly.
+#[tauri::command]
+async fn fetch_release_notes(version: String) -> Result<ReleaseNotes, UiError> {
+    let tag = if version.starts_with('v') {
+        version.clone()
+    } else {
+        format!("v{version}")
+    };
+    let url = format!(
+        "https://api.github.com/repos/MANFahrer-GF/AeroACARS/releases/tags/{tag}"
+    );
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .user_agent(concat!("AeroACARS/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| UiError::new("network", e.to_string()))?;
+    let response = client
+        .get(&url)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| UiError::new("network", e.to_string()))?;
+    let status = response.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Err(UiError::new(
+            "not_found",
+            format!("no release with tag {tag}"),
+        ));
+    }
+    if !status.is_success() {
+        return Err(UiError::new(
+            "github_error",
+            format!("GitHub returned HTTP {}", status.as_u16()),
+        ));
+    }
+    response
+        .json::<ReleaseNotes>()
+        .await
+        .map_err(|e| UiError::new("parse", e.to_string()))
+}
+
 /// `GET /api/user/bids` — the pilot's open bids.
 #[tauri::command]
 async fn phpvms_get_bids(
@@ -7710,6 +7783,7 @@ pub fn run() {
             phpvms_get_bids,
             phpvms_refresh_profile,
             divert_nearest_airports,
+            fetch_release_notes,
             sim_get_kind,
             sim_set_kind,
             sim_status,

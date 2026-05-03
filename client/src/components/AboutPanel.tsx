@@ -14,7 +14,13 @@ import type { AppInfo } from "../types";
  * this tab when they want to know "what is this thing made of"; it
  * isn't shoved in their face on every other screen.
  */
-export function AboutPanel() {
+interface Props {
+  /** Open the in-app release-notes modal for the given version. App
+   *  passes a setter that mounts `<ReleaseNotesModal version={...}>`. */
+  onShowReleaseNotes: (version: string) => void;
+}
+
+export function AboutPanel({ onShowReleaseNotes }: Props) {
   const { t } = useTranslation();
   const [info, setInfo] = useState<AppInfo | null>(null);
 
@@ -46,6 +52,25 @@ export function AboutPanel() {
           </p>
         )}
         {info && <p className="about__credit">{info.credit}</p>}
+        {info && (
+          <div className="about__hero-actions">
+            <button
+              type="button"
+              className="button button--ghost"
+              onClick={() => onShowReleaseNotes(info.version)}
+            >
+              {t("release_notes.about_button")}
+            </button>
+            <a
+              className="button button--ghost"
+              href="https://github.com/MANFahrer-GF/AeroACARS/releases"
+              target="_blank"
+              rel="noreferrer"
+            >
+              {t("release_notes.about_all_releases")}
+            </a>
+          </div>
+        )}
       </header>
 
       <div className="about__section">

@@ -284,6 +284,17 @@
     "refresh_button_label": "Refresh storage statistics",
     "refresh_button_title": "Refresh"
   },
+  "release_notes": {
+    "modal_title": "What's new in {{version}}",
+    "published_prefix": "published",
+    "open_on_github": "Open on GitHub ↗",
+    "dismiss": "Got it, close",
+    "loading": "Loading release notes …",
+    "error_offline": "Couldn't load release notes from GitHub — are you offline?",
+    "error_no_release": "No release notes available on GitHub for this version yet.",
+    "about_button": "Show release notes",
+    "about_all_releases": "All releases on GitHub"
+  },
   "divert": {
     "title_alternate": "Divert to planned alternate detected",
     "title_nearest": "Different landing field detected",

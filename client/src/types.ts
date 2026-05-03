@@ -306,6 +306,19 @@ export interface ActiveFlightInfo {
   divert_hint: DivertHint | null;
 }
 
+/** Mirrors the Rust-side `ReleaseNotes` struct. Returned by the
+ *  `fetch_release_notes` Tauri command for the in-app "What's new"
+ *  modal. `body` is markdown with optional `## 🇩🇪 Deutsch` /
+ *  `## 🇬🇧 English` section markers — the modal splits and renders
+ *  just the section matching the current i18n locale. */
+export interface ReleaseNotes {
+  name: string;
+  tag_name: string;
+  body: string;
+  published_at: string;
+  html_url: string;
+}
+
 /** See `DivertHint` in lib.rs — populated by the FSM when on-ground +
  *  engines-off + far-from-planned-arrival. */
 export interface DivertHint {

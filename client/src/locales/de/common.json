@@ -284,6 +284,17 @@
     "refresh_button_label": "Speicher-Statistiken aktualisieren",
     "refresh_button_title": "Aktualisieren"
   },
+  "release_notes": {
+    "modal_title": "Was ist neu in {{version}}",
+    "published_prefix": "veröffentlicht am",
+    "open_on_github": "Auf GitHub öffnen ↗",
+    "dismiss": "Verstanden, schließen",
+    "loading": "Lade Release-Notes …",
+    "error_offline": "Konnte die Release-Notes nicht von GitHub laden — bist du offline?",
+    "error_no_release": "Für diese Version existieren noch keine Release-Notes auf GitHub.",
+    "about_button": "Release-Notes anzeigen",
+    "about_all_releases": "Alle Releases auf GitHub"
+  },
   "divert": {
     "title_alternate": "Divert zum geplanten Alternate erkannt",
     "title_nearest": "Anderer Landeplatz erkannt",

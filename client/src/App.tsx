@@ -6,6 +6,7 @@ import { LoginPage } from "./components/LoginPage";
 import { CockpitView } from "./components/CockpitView";
 import { BriefingView } from "./components/BriefingView";
 import { SettingsPanel } from "./components/SettingsPanel";
+import { ReleaseNotesModal } from "./components/ReleaseNotesModal";
 import { ActivityLogPanel } from "./components/ActivityLogPanel";
 import { AboutPanel } from "./components/AboutPanel";
 import { LandingPanel } from "./components/LandingPanel";
@@ -28,6 +29,20 @@ const AUTO_DELETE_LOGS_STORAGE_KEY = "aeroacars.autoDeleteFlightLogs";
 /** Days threshold for the auto-purge sweep. Mirrors the wording of the
  *  Settings hint — keep both in sync if you ever change it. */
 const AUTO_DELETE_LOGS_DAYS = 30;
+
+/** Tracks the version for which the "What's new" modal was last
+ *  shown. App start compares this against the running version and
+ *  pops the modal once when they differ. Stays sticky through
+ *  re-launches so we don't re-show on every startup. */
+const RELEASE_NOTES_LAST_SEEN_KEY = "aeroacars.releaseNotes.lastSeenVersion";
+
+function loadLastSeenReleaseNotesVersion(): string | null {
+  return localStorage.getItem(RELEASE_NOTES_LAST_SEEN_KEY);
+}
+
+function saveLastSeenReleaseNotesVersion(version: string): void {
+  localStorage.setItem(RELEASE_NOTES_LAST_SEEN_KEY, version);
+}
 
 function loadDebugMode(): boolean {
   return localStorage.getItem(DEBUG_STORAGE_KEY) === "1";
@@ -106,7 +121,38 @@ function App() {
   const [autoDeleteFlightLogs, setAutoDeleteFlightLogs] = useState<boolean>(
     () => loadAutoDeleteFlightLogs(),
   );
+  /** Version we should pop the release-notes modal for. Set on first
+   *  mount when the running version differs from the lastSeen
+   *  localStorage entry, AND when the user manually triggers it via
+   *  the About panel. Cleared by ReleaseNotesModal.onClose. */
+  const [releaseNotesVersion, setReleaseNotesVersion] = useState<string | null>(
+    null,
+  );
   const { status: simStatus, snapshot: simSnapshot } = useSimSession();
+
+  // One-shot: if the app version has changed since the user last saw
+  // the release-notes modal, fire it on next mount. New installs
+  // (no lastSeen) silently set lastSeen=current to avoid greeting
+  // first-timers with a "what changed since v0.0.0" message.
+  useEffect(() => {
+    void (async () => {
+      try {
+        const info = await invoke<{ version: string } | null>("app_info");
+        if (!info?.version) return;
+        const lastSeen = loadLastSeenReleaseNotesVersion();
+        if (lastSeen === null) {
+          // First launch ever on this device — don't pop, just remember.
+          saveLastSeenReleaseNotesVersion(info.version);
+          return;
+        }
+        if (lastSeen !== info.version) {
+          setReleaseNotesVersion(info.version);
+        }
+      } catch {
+        // app_info missing or errored — silently skip
+      }
+    })();
+  }, []);
 
   // Auto-purge stale flight log files once per app launch when the
   // toggle is on. Fires on mount only — re-toggling at runtime doesn't
@@ -413,7 +459,19 @@ function App() {
         />
       )}
 
-      {status.kind === "loggedIn" && tab === "about" && <AboutPanel />}
+      {status.kind === "loggedIn" && tab === "about" && (
+        <AboutPanel onShowReleaseNotes={(v) => setReleaseNotesVersion(v)} />
+      )}
+
+      {releaseNotesVersion && (
+        <ReleaseNotesModal
+          version={releaseNotesVersion}
+          onClose={() => {
+            saveLastSeenReleaseNotesVersion(releaseNotesVersion);
+            setReleaseNotesVersion(null);
+          }}
+        />
+      )}
     </main>
   );
 }
