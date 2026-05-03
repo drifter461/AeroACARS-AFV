@@ -349,8 +349,8 @@
     "checking_session": "Restoring session…"
   },
   "pilot_header": {
-    "location_tooltip": "Your current station — your next flight departs from here (= where your last PIREP landed).",
-    "home_tooltip": "Home base — your career anchor in the phpVMS system."
+    "location_tooltip": "Location per website ({{airline}}) — where your last PIREP landed. If this looks stale after a flight, hit \"Refresh\" top-right.",
+    "home_tooltip": "Home base per website ({{airline}}) — your career anchor."
   },
   "actions": {
     "toggle_theme_dark": "Switch to dark mode",

@@ -40,6 +40,8 @@ type State =
   | { kind: "empty" }
   | { kind: "ready"; bids: Bid[] };
 
+import type { Profile } from "../types";
+
 interface Props {
   baseUrl: string;
   /** Sim connection state to gate the Start Flight button. */
@@ -52,6 +54,11 @@ interface Props {
   onSelect?: (bid: Bid | null) => void;
   /** Notify the parent that a flight just started. */
   onFlightStarted?: (flight: ActiveFlightInfo) => void;
+  /** Called whenever the user hits the Refresh button — passes a fresh
+   *  profile fetched from phpVMS so the parent can update the cached
+   *  session and the PilotHeader picks up new curr_airport/etc. without
+   *  requiring a logout/login cycle. v0.1.30. */
+  onProfileRefreshed?: (profile: Profile) => void;
 }
 
 const KNOWN_ERROR_CODES = new Set([
@@ -122,6 +129,7 @@ export function BidsList({
   hasActiveFlight,
   onSelect,
   onFlightStarted,
+  onProfileRefreshed,
 }: Props) {
   const { t, i18n } = useTranslation();
   const [state, setState] = useState<State>({ kind: "loading" });
@@ -176,32 +184,35 @@ export function BidsList({
     return () => clearInterval(id);
   }, [hasActiveFlight, fetchBids]);
 
-  /** Combined refresh: bid list + sim-position cache (v0.1.29).
+  /** Combined refresh: bid list + sim-position cache + pilot profile.
    *
-   *  Pre-v0.1.29 we had two visually-equal buttons that did different
-   *  things — "Aktualisieren" refreshed the bids, "Neu prüfen"
-   *  refreshed the sim position. Pilots reported confusion: which
-   *  button does what, why are there two? Consolidated into a single
-   *  intuitive "Aktualisieren" action that pulls everything fresh —
-   *  what a pilot expects when they hit refresh.
+   *  v0.1.30 added the profile re-fetch: pilots reported the
+   *  "Standort" (curr_airport) chip in the header staying wrong even
+   *  after their PIREP filed and phpVMS server-side updated the
+   *  pilot's location. Cause: the cached LoginResult only ever held
+   *  the login-time profile; a manual logout/login was the only way
+   *  to refresh it. Now hitting "Aktualisieren" also pulls a fresh
+   *  profile and bubbles it up to the parent so the header updates.
    *
-   *  Side effect: if a stale-snapshot ever causes a phantom distance
-   *  failure (the SCEL bug class), the same refresh now also clears
-   *  the cache. Two birds, one button.
+   *  All three calls fire in parallel — the slowest network call
+   *  bounds the spinner duration; the sim resync and any profile
+   *  failure are non-fatal.
    */
   async function handleRefresh() {
     if (refreshing) return;
     setRefreshing(true);
-    // Fire both in parallel — the sim resync is fire-and-forget so it
-    // doesn't slow down the network round-trip for bids.
-    await Promise.all([
+    const [, , freshProfile] = await Promise.all([
       fetchBids(),
       invoke("sim_force_resync").catch(() => {
         // Adapter command failures only happen if the mutex is
         // poisoned (= app already broken). Don't fail the whole
         // refresh because of it.
       }),
+      invoke<Profile | null>("phpvms_refresh_profile").catch(() => null),
     ]);
+    if (freshProfile && onProfileRefreshed) {
+      onProfileRefreshed(freshProfile);
+    }
     // Tiny visible spinner tail so the pilot sees confirmation even
     // when both calls return instantly.
     setTimeout(() => setRefreshing(false), 400);

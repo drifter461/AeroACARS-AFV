@@ -4,6 +4,7 @@ import type {
   ActiveFlightInfo,
   Bid,
   LoginResult,
+  Profile,
   SimConnectionState,
   SimSnapshot,
 } from "../types";
@@ -17,6 +18,9 @@ interface Props {
   onLogout: () => void;
   simState: SimConnectionState;
   simSnapshot: SimSnapshot | null;
+  /** Called when BidsList' refresh handler returns a fresh profile so
+   *  App.tsx can update the cached session + the PilotHeader rerenders. */
+  onProfileRefreshed?: (profile: Profile) => void;
 }
 
 /**
@@ -33,6 +37,7 @@ export function BriefingView({
   onLogout,
   simState,
   simSnapshot,
+  onProfileRefreshed,
 }: Props) {
   const { t } = useTranslation();
   const [, setSelectedBid] = useState<Bid | null>(null);
@@ -58,6 +63,7 @@ export function BriefingView({
         hasActiveFlight={activeFlight !== null}
         onSelect={setSelectedBid}
         onFlightStarted={setActiveFlight}
+        onProfileRefreshed={onProfileRefreshed}
       />
     </>
   );

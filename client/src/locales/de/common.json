@@ -349,8 +349,8 @@
     "checking_session": "Sitzung wird wiederhergestellt…"
   },
   "pilot_header": {
-    "location_tooltip": "Standort — wo Sie gerade stationiert sind. Der nächste Flug startet von hier (= wo Ihr letzter PIREP gelandet ist).",
-    "home_tooltip": "Heimatbasis — Ihr Karriere-Ankerpunkt im phpVMS-System."
+    "location_tooltip": "Standort laut Webseite ({{airline}}) — wo Ihr letzter PIREP gelandet ist. Falls der Wert nach einem Flug nicht aktuell wirkt, oben rechts auf „Aktualisieren\" klicken.",
+    "home_tooltip": "Heimatbasis laut Webseite ({{airline}}) — Ihr Karriere-Ankerpunkt."
   },
   "actions": {
     "toggle_theme_dark": "Dunkles Design",

@@ -460,6 +460,21 @@ function App() {
           onLogout={handleLogout}
           simState={simState}
           simSnapshot={simSnapshot}
+          onProfileRefreshed={(fresh) => {
+            // Bubbled up from BidsList' Aktualisieren button.
+            // Update the cached session so PilotHeader picks up
+            // a new curr_airport / rank / airline without a
+            // logout/login cycle. v0.1.30 — fixes the "Standort
+            // bleibt veraltet"-Beschwerde.
+            setStatus((prev) =>
+              prev.kind === "loggedIn"
+                ? {
+                    kind: "loggedIn",
+                    session: { ...prev.session, profile: fresh },
+                  }
+                : prev,
+            );
+          }}
         />
       )}
 

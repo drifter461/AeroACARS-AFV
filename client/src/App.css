@@ -831,13 +831,16 @@ button:disabled {
 .pilot-header--slim {
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 10px 14px 14px 14px;
-  background: transparent;
-  border: none;
-  border-radius: 0;
+  gap: 18px;
+  padding: 12px 16px;
+  /* Subtle surface tint so the row reads as "header" rather than
+   * floating elements on the page background — feedback v0.1.29:
+   * "Leiste wirkt verloren". Light enough that it doesn't compete
+   * with the bid cards below. */
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
   box-shadow: none;
-  border-bottom: 1px solid var(--border);
   margin-bottom: 18px;
 }
 
@@ -848,11 +851,20 @@ button:disabled {
   }
 }
 
+/* Wide airline logo container — 180×80 (= GSG native size, 2.25:1
+ * ratio). Forced white background regardless of theme so all airline
+ * logos pop properly: Lufthansa, Turkish, GSG etc. are designed for
+ * white. Padding + thin border keep the white block from looking
+ * harsh in the dark theme. v0.1.30 — feedback was "Logo viel zu
+ * klein, ist Aushängeschild der Airline". Native size = no upscaling
+ * = stays sharp. Other airlines whose logos have different aspect
+ * ratios stay correctly proportioned via `object-fit: contain`. */
 .pilot-header__logo-slim {
-  width: 36px;
-  height: 36px;
-  border-radius: 8px;
-  background: var(--surface-2);
+  width: 180px;
+  height: 80px;
+  padding: 6px 10px;
+  border-radius: 10px;
+  background: #ffffff;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -862,22 +874,39 @@ button:disabled {
 }
 
 .pilot-header__logo-slim img {
-  max-width: 30px;
-  max-height: 30px;
+  max-width: 100%;
+  max-height: 100%;
   object-fit: contain;
 }
 
+/* Fallback when airline.logo is empty: show the airline ICAO inside
+ * the same 180×80 white container so the layout doesn't shift. */
+.pilot-header__logo-slim .pilot-header__logo-fallback {
+  font-size: 28px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  color: var(--accent);
+}
+
 .pilot-header__identity-slim {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.pilot-header__identity-line {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 6px;
   min-width: 0;
-  flex: 1 1 auto;
 }
 
 .pilot-header__name-slim {
-  font-size: 14px;
+  font-size: 17px;
   font-weight: 700;
   letter-spacing: -0.01em;
   color: var(--text);
