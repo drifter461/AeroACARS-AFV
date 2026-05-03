@@ -91,6 +91,20 @@ const DISTANCE_EPSILON_M: f64 = 5.0;
 /// and the PIREP `file` endpoint expect pounds — convert at the boundary.
 const KG_TO_LB: f64 = 2.20462262;
 
+/// Universal "we're done here" fallback for the FSM. Catches helicopters
+/// (no taxi-out / taxi-in / parking-brake convention), short hops,
+/// emergency landings near the destination, and anything else where the
+/// normal Pushback → Cruise → BlocksOn chain doesn't fire cleanly.
+///
+/// When the aircraft is on-ground with engines off, sitting within
+/// `ARRIVED_FALLBACK_RADIUS_NM` of the destination airport for at
+/// least `ARRIVED_FALLBACK_DWELL_SECS`, the FSM jumps straight to
+/// `Arrived` regardless of what phase it's currently in (apart from
+/// pre-block-off phases — we won't accidentally end a flight that
+/// hasn't started yet).
+const ARRIVED_FALLBACK_RADIUS_NM: f64 = 2.0;
+const ARRIVED_FALLBACK_DWELL_SECS: i64 = 30;
+
 /// How often we POST `/pireps/{id}/update` purely to bump `pireps.updated_at`
 /// and keep phpVMS's `RemoveExpiredLiveFlights` cron from soft-deleting
 /// the in-flight PIREP. The cron runs hourly and looks at `updated_at`,
@@ -656,6 +670,15 @@ struct FlightStats {
     takeoff_at: Option<DateTime<Utc>>,
     landing_at: Option<DateTime<Utc>>,
     block_on_at: Option<DateTime<Utc>>,
+
+    /// First tick at which the universal "we're done" fallback saw all
+    /// the conditions satisfied (on-ground, engines off, within 2 nmi
+    /// of arrival). Once now − this ≥ `ARRIVED_FALLBACK_DWELL_SECS`
+    /// the FSM jumps to Arrived regardless of prior phase. Cleared
+    /// the moment any condition stops being true (so a brief engine
+    /// restart or move resets the dwell). Powers helicopter flights,
+    /// short hops, and emergency landings near destination.
+    arrived_fallback_pending_since: Option<DateTime<Utc>>,
 
     /// Wann das Flugzeug zum ersten Mal nach `tug_done` zum Stehen
     /// kam (gs < 0.5 kt). Triggert das 10-Sekunden-Dwell-Fenster
@@ -5003,6 +5026,74 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
         | FlightPhase::Preflight => {}
     }
 
+    // Universal "we're done" fallback. The normal FSM chain assumes a
+    // fixed-wing flight with a Pushback → Cruise → BlocksOn arc, and
+    // a parking brake / engines-off shutdown sequence. None of that
+    // applies cleanly to:
+    //   * helicopters (no taxi-out / no parking brake / vertical
+    //     takeoff and landing — the FSM gets stuck around TaxiOut)
+    //   * very-short hops with no real cruise phase
+    //   * engine-failure / emergency landings near the destination
+    //   * aircraft profiles that don't wire `parking_brake` at all
+    //
+    // The escape hatch: once the aircraft has actually started
+    // moving (block_off recorded), if it's now sitting on-ground
+    // with engines off within 2 nmi of the arrival airport for at
+    // least 30 s, we force `Arrived` regardless of prior phase.
+    // Block_on_at gets back-filled here so the PIREP file logic
+    // (which reads it for flight-time / chocks-on) still works.
+    let already_done = matches!(
+        next_phase,
+        FlightPhase::Arrived | FlightPhase::PirepSubmitted
+    );
+    let pre_block_off = matches!(
+        next_phase,
+        FlightPhase::Preflight | FlightPhase::Boarding
+    );
+    if !already_done && !pre_block_off && stats.block_off_at.is_some() {
+        let near_dest = match runway::airport_position(&flight.arr_airport) {
+            Some((apt_lat, apt_lon)) => {
+                let m = runway::distance_m(snap.lat, snap.lon, apt_lat, apt_lon);
+                m / 1852.0 <= ARRIVED_FALLBACK_RADIUS_NM
+            }
+            // Airport not in the local DB → fall back to "engines off
+            // for 30 s on ground anywhere" rather than blocking the
+            // pilot. Worst case: a paused-on-runway scenario triggers
+            // Arrived early. The pilot still has Discard / Cancel.
+            None => true,
+        };
+        let conditions_met = snap.on_ground && snap.engines_running == 0 && near_dest;
+        if conditions_met {
+            let pending_at = stats
+                .arrived_fallback_pending_since
+                .get_or_insert(now);
+            let elapsed = (now - *pending_at).num_seconds();
+            if elapsed >= ARRIVED_FALLBACK_DWELL_SECS {
+                tracing::info!(
+                    prev_phase = ?prev_phase,
+                    elapsed,
+                    near_dest,
+                    "Arrived fallback fired — forcing FSM to Arrived"
+                );
+                next_phase = FlightPhase::Arrived;
+                if stats.block_on_at.is_none() {
+                    stats.block_on_at = Some(now);
+                }
+                // Helicopters often don't fire a touchdown event the
+                // way the analyzer expects. If we never recorded
+                // landing_at, stamp it now so the file body has a
+                // sensible flight_time.
+                if stats.landing_at.is_none() && stats.takeoff_at.is_some() {
+                    stats.landing_at = Some(now);
+                }
+            }
+        } else {
+            stats.arrived_fallback_pending_since = None;
+        }
+    } else {
+        stats.arrived_fallback_pending_since = None;
+    }
+
     stats.was_on_ground = Some(snap.on_ground);
     stats.was_parking_brake = Some(snap.parking_brake);
 
@@ -7143,8 +7234,13 @@ fn auto_start_set_enabled(
     state: tauri::State<'_, AppState>,
 ) -> Result<(), UiError> {
     let was = state.auto_start_enabled.swap(enabled, Ordering::Relaxed);
+    // The watcher task itself runs for the entire app lifetime (spawned
+    // once in `.setup()`); flipping this flag is enough — no need to
+    // spawn or kill anything here. Earlier versions did spawn-on-toggle,
+    // which had a first-launch failure mode on Mac where the watcher
+    // never came up at all and toggling off→on didn't recover (because
+    // the gate `!was` blocked re-spawn after an IPC race).
     if enabled && !was {
-        spawn_auto_start_watcher(app.clone());
         log_activity_handle(
             &app,
             ActivityLevel::Info,
@@ -7171,9 +7267,12 @@ fn spawn_auto_start_watcher(app: AppHandle) {
         loop {
             tokio::time::sleep(Duration::from_secs(AUTO_START_INTERVAL_SECS)).await;
             let state = app.state::<AppState>();
+            // No-op when disabled — the watcher itself runs forever now
+            // (spawned once at app start), the toggle just gates the
+            // body. Used to `break` and rely on a re-spawn on next
+            // toggle, which raced with first-launch IPC on Mac.
             if !state.auto_start_enabled.load(Ordering::Relaxed) {
-                tracing::info!("auto-start watcher exiting (disabled)");
-                break;
+                continue;
             }
             // Skip if a flight is already active.
             {
@@ -7349,6 +7448,15 @@ pub fn run() {
             let state = app.state::<AppState>();
             let log = state.activity_log.lock().expect("activity_log lock");
             save_activity_log(&log);
+            drop(log);
+            // Spawn the auto-start watcher exactly once, here, for the
+            // lifetime of the app. The watcher itself short-circuits when
+            // the toggle flag is off — flipping the flag at runtime is
+            // enough, no need to spawn-on-toggle. Earlier versions did
+            // spawn-on-toggle; that had a Mac-first-launch failure mode
+            // where the very first toggle's IPC call lost the spawn race
+            // and the user had to restart the app to recover.
+            spawn_auto_start_watcher(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

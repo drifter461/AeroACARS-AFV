@@ -24,7 +24,13 @@ use sim_core::{SimKind, SimSnapshot, Simulator};
 
 use crate::dataref::{XPlaneState, CATALOG};
 use crate::rref::{decode_response, encode_request};
+use crate::web_api::{AircraftInfo, DrefIdCache, WebApiClient};
 use crate::{SUBSCRIPTION_HZ, XPLANE_LISTEN_PORT};
+
+/// How often the Web API poller asks X-Plane for the aircraft info.
+/// Aircraft identity rarely changes mid-flight (load a new plane =
+/// new flight), so 30 s is plenty.
+const AIRCRAFT_POLL_INTERVAL_SECS: u64 = 30;
 
 #[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -60,6 +66,12 @@ struct AdapterShared {
     seen: Mutex<Vec<bool>>,
     /// Per-index last raw float value (for debug panel display).
     last_values: Mutex<Vec<f32>>,
+    /// Aircraft identity from the X-Plane 12.1+ Web API. Empty
+    /// `AircraftInfo` (all fields None) until the poller's first
+    /// successful response, OR forever if the Web API is unreachable
+    /// (X-Plane <12.1, or pilot didn't enable Settings → Network →
+    /// Web Server).
+    aircraft: Mutex<AircraftInfo>,
     /// Tells the worker thread to stop. Polled in the recv loop.
     stop: AtomicBool,
 }
@@ -67,6 +79,10 @@ struct AdapterShared {
 pub struct XPlaneAdapter {
     shared: Arc<AdapterShared>,
     worker: Option<JoinHandle<()>>,
+    /// Web API poller (X-Plane 12.1+ Settings → Network → Web Server).
+    /// Independently joined so we always tear down both threads on
+    /// `stop()` even if one already exited.
+    web_api_worker: Option<JoinHandle<()>>,
     /// Cached SimKind so `snapshot()` knows whether to stamp
     /// `Simulator::XPlane11` or `XPlane12`.
     kind: SimKind,
@@ -86,11 +102,13 @@ impl XPlaneAdapter {
             parsed: Mutex::new(XPlaneState::default()),
             seen: Mutex::new(vec![false; CATALOG.len()]),
             last_values: Mutex::new(vec![0.0; CATALOG.len()]),
+            aircraft: Mutex::new(AircraftInfo::default()),
             stop: AtomicBool::new(false),
         });
         Self {
             shared,
             worker: None,
+            web_api_worker: None,
             kind: SimKind::XPlane12,
         }
     }
@@ -109,6 +127,7 @@ impl XPlaneAdapter {
         *self.shared.state.lock().unwrap() = ConnectionState::Connecting;
         *self.shared.last_error.lock().unwrap() = None;
         *self.shared.parsed.lock().unwrap() = XPlaneState::default();
+        *self.shared.aircraft.lock().unwrap() = AircraftInfo::default();
         for v in self.shared.seen.lock().unwrap().iter_mut() {
             *v = false;
         }
@@ -116,21 +135,35 @@ impl XPlaneAdapter {
             *v = 0.0;
         }
         self.shared.stop.store(false, Ordering::SeqCst);
-        let shared_for_thread = Arc::clone(&self.shared);
-        let handle = std::thread::Builder::new()
+        let shared_for_udp = Arc::clone(&self.shared);
+        let udp_handle = std::thread::Builder::new()
             .name("xplane-udp".into())
-            .spawn(move || run_listener(shared_for_thread))
+            .spawn(move || run_listener(shared_for_udp))
             .expect("spawn xplane-udp thread");
-        self.worker = Some(handle);
+        self.worker = Some(udp_handle);
+        let shared_for_web = Arc::clone(&self.shared);
+        let web_handle = std::thread::Builder::new()
+            .name("xplane-web-api".into())
+            .spawn(move || run_web_api_poller(shared_for_web))
+            .expect("spawn xplane-web-api thread");
+        self.web_api_worker = Some(web_handle);
         tracing::info!(?kind, "X-Plane adapter started");
     }
 
     pub fn stop(&mut self) {
-        if let Some(handle) = self.worker.take() {
+        let had_worker = self.worker.is_some() || self.web_api_worker.is_some();
+        if had_worker {
             self.shared.stop.store(true, Ordering::SeqCst);
+        }
+        if let Some(handle) = self.worker.take() {
             // Wait briefly for the thread to exit gracefully so we
             // unsubscribe RREFs before returning. 250 ms is plenty —
             // the recv loop has a 100 ms read timeout.
+            let _ = handle.join();
+        }
+        if let Some(handle) = self.web_api_worker.take() {
+            // The Web API poller wakes from its sleep every 100 ms to
+            // re-check the stop flag; join is fast.
             let _ = handle.join();
         }
         *self.shared.state.lock().unwrap() = ConnectionState::Disconnected;
@@ -149,7 +182,24 @@ impl XPlaneAdapter {
             SimKind::XPlane11 => Simulator::XPlane11,
             _ => Simulator::XPlane12,
         };
-        Some(parsed.to_snapshot(sim))
+        let mut snap = parsed.to_snapshot(sim);
+        // Overlay aircraft identity from the Web API poller (X-Plane
+        // 12.1+ Settings → Network → Web Server). Stays None until the
+        // first successful poll, OR forever when the Web API isn't
+        // reachable (X-Plane <12.1, or pilot didn't enable it). The
+        // SimSnapshot fields default to None in that path so the
+        // existing "(unknown)" UI label still shows.
+        let aircraft = self.shared.aircraft.lock().unwrap();
+        if aircraft.descrip.is_some() {
+            snap.aircraft_title = aircraft.descrip.clone();
+        }
+        if aircraft.icao.is_some() {
+            snap.aircraft_icao = aircraft.icao.clone();
+        }
+        if aircraft.tailnum.is_some() {
+            snap.aircraft_registration = aircraft.tailnum.clone();
+        }
+        Some(snap)
     }
 
     pub fn last_error(&self) -> Option<String> {
@@ -267,4 +317,85 @@ fn run_listener(shared: Arc<AdapterShared>) {
         let _ = socket.send_to(&req, &xplane_addr);
     }
     tracing::info!("X-Plane UDP listener stopped");
+}
+
+/// Long-running poller that reads aircraft identity from the X-Plane
+/// 12.1+ Web API (`http://localhost:8086`) and stashes the result in
+/// `shared.aircraft`. Runs in its own thread so it can do blocking
+/// HTTP without stalling the 50 Hz UDP listener.
+///
+/// Cadence is sparse (`AIRCRAFT_POLL_INTERVAL_SECS`) because aircraft
+/// identity rarely changes mid-flight. On repeated failures
+/// (X-Plane <12.1, or Web API not enabled in Settings → Network)
+/// we back off further so we don't spam.
+fn run_web_api_poller(shared: Arc<AdapterShared>) {
+    let client = WebApiClient::new();
+    let mut id_cache = DrefIdCache::default();
+    let mut consecutive_failures: u32 = 0;
+    let mut last_logged_path: Option<String> = None;
+    tracing::info!("X-Plane Web API poller started");
+    while !shared.stop.load(Ordering::SeqCst) {
+        match client.fetch_aircraft_info(&mut id_cache) {
+            Ok(info) => {
+                if consecutive_failures > 0 {
+                    tracing::info!(
+                        "X-Plane Web API recovered after {} failed polls",
+                        consecutive_failures
+                    );
+                }
+                consecutive_failures = 0;
+                if info.has_any() {
+                    // Log on first detection AND on aircraft change
+                    // (e.g. pilot loaded a different plane). Identity
+                    // by `relative_path` since it's the .acf path —
+                    // unique even when two planes share a description.
+                    let path = info.relative_path.clone();
+                    let changed = last_logged_path != path;
+                    if changed {
+                        tracing::info!(
+                            descrip = ?info.descrip,
+                            icao = ?info.icao,
+                            tailnum = ?info.tailnum,
+                            "X-Plane aircraft detected via Web API"
+                        );
+                        last_logged_path = path;
+                    }
+                }
+                *shared.aircraft.lock().unwrap() = info;
+            }
+            Err(e) => {
+                consecutive_failures += 1;
+                // Log once at info level on the first failure so the
+                // pilot has something to grep for. Subsequent failures
+                // stay at debug — a permanently-disabled Web API
+                // would otherwise spam.
+                if consecutive_failures == 1 {
+                    tracing::info!(
+                        error = %e,
+                        "X-Plane Web API unavailable — aircraft identity will stay (unknown). \
+                         Enable in X-Plane → Settings → Network → Web Server (X-Plane 12.1+)."
+                    );
+                } else {
+                    tracing::debug!(error = %e, "X-Plane Web API poll failed");
+                }
+            }
+        }
+        // Sleep between polls. Back off after repeated failures so we
+        // don't keep slamming a sim that obviously isn't going to
+        // answer. Wake every 100 ms to re-check the stop flag.
+        let secs = if consecutive_failures > 5 {
+            AIRCRAFT_POLL_INTERVAL_SECS * 4
+        } else {
+            AIRCRAFT_POLL_INTERVAL_SECS
+        };
+        let ticks = secs * 10;
+        for _ in 0..ticks {
+            if shared.stop.load(Ordering::SeqCst) {
+                tracing::info!("X-Plane Web API poller stopped");
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    tracing::info!("X-Plane Web API poller stopped");
 }

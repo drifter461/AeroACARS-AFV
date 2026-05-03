@@ -46,6 +46,7 @@ mod adapter;
 mod dataref;
 mod probe;
 mod rref;
+mod web_api;
 
 pub use adapter::{ConnectionState, XPlaneAdapter};
 pub use probe::is_xplane_running;
