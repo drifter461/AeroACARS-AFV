@@ -1137,6 +1137,38 @@ struct FlightStats {
     /// Autobrake setting label ("OFF" / "LO" / "MED" / "MAX") for
     /// the activity log. Reset on every flight.
     last_logged_autobrake: Option<String>,
+
+    // ---- PMDG SDK tracking (Phase H.4 / v0.2.0) ----
+    /// Once-per-flight banner: "PMDG 737-800 detected — premium
+    /// telemetry active". Fires the first tick we see PmdgState
+    /// in the snapshot, not before (so e.g. the user starts
+    /// AeroACARS, then loads PMDG → the banner appears at PMDG
+    /// load, not at app start).
+    pmdg_detected_logged: bool,
+    /// Once-per-flight V-speeds banner — fires when the FMC
+    /// finally has all four (V1, VR, V2, VREF) populated. We log
+    /// them once at that moment so the timeline shows when the
+    /// pilot completed the perf-init.
+    pmdg_v_speeds_logged: bool,
+    /// FMA mode tracking — combined string ("N1 / VNAV / LNAV")
+    /// so a single change in any sub-mode produces one log entry
+    /// rather than three.
+    last_logged_pmdg_fma: Option<String>,
+    /// MCP selected speed — tracked rounded to nearest knot.
+    last_logged_pmdg_mcp_speed: Option<i16>,
+    /// MCP selected heading.
+    last_logged_pmdg_mcp_heading: Option<u16>,
+    /// MCP selected altitude.
+    last_logged_pmdg_mcp_altitude: Option<u16>,
+    /// MCP selected V/S.
+    last_logged_pmdg_mcp_vs: Option<i16>,
+    /// AT armed state.
+    last_logged_pmdg_at_armed: Option<bool>,
+    /// AP engaged state (CMD A or B).
+    last_logged_pmdg_ap_engaged: Option<bool>,
+    /// Takeoff config warning (one-shot — only logs the on-edge,
+    /// not the off-edge).
+    last_logged_pmdg_to_warning: Option<bool>,
     // FCU debounce state — kept around for the planned switch to the
     // standard `AUTOPILOT * VAR` SimVars (the Fenix LVar variant
     // proved unreliable as encoder click counters; we don't log
@@ -7475,6 +7507,202 @@ fn detect_telemetry_changes(app: &AppHandle, flight: &ActiveFlight, snap: &SimSn
     // already, but those don't update via LVar anyway. User feedback
     // (2026-05-02): "die brauchen wir doch nicht bekommen wir doch
     // eh schon aus dem standart" → drop entirely.
+
+    // ---- PMDG SDK premium telemetry (Phase H.4 / v0.2.0) ----
+    // Activity-log entries derived from snap.pmdg, the cockpit-
+    // exact state we read via PMDG's SimConnect ClientData
+    // channel. No-op if no PMDG aircraft is loaded or the SDK
+    // isn't enabled (snap.pmdg is None in both cases).
+    if let Some(p) = &snap.pmdg {
+        // Once-per-flight: aircraft identification banner.
+        if !stats.pmdg_detected_logged {
+            stats.pmdg_detected_logged = true;
+            log_activity_handle(
+                app,
+                ActivityLevel::Info,
+                format!("{} — PMDG SDK aktiv", p.variant_label),
+                Some("Premium-Cockpit-Daten verfügbar (FMA, MCP, V-Speeds, FMC)".to_string()),
+            );
+        }
+
+        // Once-per-flight: V-speeds banner when all four are set.
+        // Pilots typically enter these via FMC PERF-INIT page; the
+        // banner timestamps when the perf-init was completed.
+        if !stats.pmdg_v_speeds_logged {
+            if let (Some(v1), Some(vr), Some(v2), Some(vref)) = (
+                p.fmc_v1_kt,
+                p.fmc_vr_kt,
+                p.fmc_v2_kt,
+                p.fmc_vref_kt,
+            ) {
+                stats.pmdg_v_speeds_logged = true;
+                log_activity_handle(
+                    app,
+                    ActivityLevel::Info,
+                    format!("V-Speeds gesetzt: V1 {v1} · VR {vr} · V2 {v2} · VREF {vref}"),
+                    None,
+                );
+            }
+        }
+
+        // FMA mode changes — single combined string so a switch from
+        // "N1 / VNAV / LNAV" to "SPD / VNAV / LNAV" produces ONE log
+        // entry, not three. Empty modes filtered out.
+        let fma_combined = format_fma(&p.fma_speed_mode, &p.fma_pitch_mode, &p.fma_roll_mode);
+        if stats.last_logged_pmdg_fma.as_deref() != Some(fma_combined.as_str()) {
+            if let Some(prev) = stats.last_logged_pmdg_fma.as_deref() {
+                if prev != fma_combined {
+                    log_activity_handle(
+                        app,
+                        ActivityLevel::Info,
+                        format!("FMA: {fma_combined}"),
+                        None,
+                    );
+                }
+            }
+            stats.last_logged_pmdg_fma = Some(fma_combined);
+        }
+
+        // MCP selected speed — round to nearest knot (or .01 Mach).
+        // We track as i16 so we get cheap equality. Value > 10 = knots,
+        // ≤ 10 = Mach × 100. Both are valid pilot intents.
+        if let Some(spd) = p.mcp_speed_raw {
+            let spd_int = if spd > 10.0 {
+                spd.round() as i16
+            } else {
+                (spd * 100.0).round() as i16
+            };
+            if stats.last_logged_pmdg_mcp_speed != Some(spd_int) {
+                if stats.last_logged_pmdg_mcp_speed.is_some() {
+                    let display = if spd > 10.0 {
+                        format!("{spd:.0} kt")
+                    } else {
+                        format!("M {spd:.2}")
+                    };
+                    log_activity_handle(
+                        app,
+                        ActivityLevel::Info,
+                        format!("MCP IAS → {display}"),
+                        None,
+                    );
+                }
+                stats.last_logged_pmdg_mcp_speed = Some(spd_int);
+            }
+        }
+
+        // MCP heading — round to nearest degree.
+        if let Some(hdg) = p.mcp_heading_deg {
+            if stats.last_logged_pmdg_mcp_heading != Some(hdg) {
+                if stats.last_logged_pmdg_mcp_heading.is_some() {
+                    log_activity_handle(
+                        app,
+                        ActivityLevel::Info,
+                        format!("MCP HDG → {hdg:03}°"),
+                        None,
+                    );
+                }
+                stats.last_logged_pmdg_mcp_heading = Some(hdg);
+            }
+        }
+
+        // MCP altitude — log only on significant changes (≥ 100 ft)
+        // so a moving knob doesn't spam.
+        if let Some(alt) = p.mcp_altitude_ft {
+            let last = stats.last_logged_pmdg_mcp_altitude;
+            let significant = match last {
+                Some(prev) => alt.abs_diff(prev) >= 100,
+                None => true,
+            };
+            if significant && last != Some(alt) {
+                if last.is_some() {
+                    log_activity_handle(
+                        app,
+                        ActivityLevel::Info,
+                        format!("MCP ALT → {alt} ft"),
+                        None,
+                    );
+                }
+                stats.last_logged_pmdg_mcp_altitude = Some(alt);
+            }
+        }
+
+        // MCP V/S — log on changes ≥ 100 fpm.
+        if let Some(vs) = p.mcp_vs_fpm {
+            let last = stats.last_logged_pmdg_mcp_vs;
+            let significant = match last {
+                Some(prev) => (vs - prev).abs() >= 100,
+                None => true,
+            };
+            if significant && last != Some(vs) {
+                if last.is_some() {
+                    log_activity_handle(
+                        app,
+                        ActivityLevel::Info,
+                        format!("MCP V/S → {vs:+} fpm"),
+                        None,
+                    );
+                }
+                stats.last_logged_pmdg_mcp_vs = Some(vs);
+            }
+        }
+
+        // A/T armed.
+        if stats.last_logged_pmdg_at_armed != Some(p.at_armed) {
+            if stats.last_logged_pmdg_at_armed.is_some() {
+                log_activity_handle(
+                    app,
+                    ActivityLevel::Info,
+                    format!("A/T {}", if p.at_armed { "armed" } else { "disarmed" }),
+                    None,
+                );
+            }
+            stats.last_logged_pmdg_at_armed = Some(p.at_armed);
+        }
+
+        // A/P engaged (CMD A or B).
+        if stats.last_logged_pmdg_ap_engaged != Some(p.ap_engaged) {
+            if stats.last_logged_pmdg_ap_engaged.is_some() {
+                log_activity_handle(
+                    app,
+                    ActivityLevel::Info,
+                    format!("A/P {}", if p.ap_engaged { "engaged" } else { "disengaged" }),
+                    None,
+                );
+            }
+            stats.last_logged_pmdg_ap_engaged = Some(p.ap_engaged);
+        }
+
+        // Takeoff config warning — only on rising edge (warning
+        // turning ON). Falling edge (pilot fixed it) doesn't warrant
+        // a log line.
+        if stats.last_logged_pmdg_to_warning != Some(p.takeoff_config_warning) {
+            if p.takeoff_config_warning {
+                log_activity_handle(
+                    app,
+                    ActivityLevel::Warn,
+                    "TAKEOFF CONFIG warning".to_string(),
+                    Some("Cockpit zeigt rote Warnung — TO-Setup unvollständig".to_string()),
+                );
+            }
+            stats.last_logged_pmdg_to_warning = Some(p.takeoff_config_warning);
+        }
+    }
+}
+
+/// Combine FMA sub-modes into a single human-readable string.
+/// Empty sub-modes are filtered out so a partially-engaged FMA
+/// reads "VNAV / LNAV" rather than " / VNAV / LNAV".
+fn format_fma(speed: &str, pitch: &str, roll: &str) -> String {
+    let parts: Vec<&str> = [speed, pitch, roll]
+        .iter()
+        .copied()
+        .filter(|s| !s.is_empty())
+        .collect();
+    if parts.is_empty() {
+        "—".to_string()
+    } else {
+        parts.join(" / ")
+    }
 }
 
 /// Activity-log helper for 3-state cabin signs (OFF / AUTO / ON).
