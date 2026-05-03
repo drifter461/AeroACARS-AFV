@@ -24,6 +24,10 @@ type Tab = "cockpit" | "briefing" | "landing" | "log" | "settings" | "about";
 const DEBUG_STORAGE_KEY = "aeroacars.debug";
 const AUTO_FILE_STORAGE_KEY = "aeroacars.autoFile";
 const AUTO_START_STORAGE_KEY = "aeroacars.autoStart";
+const AUTO_DELETE_LOGS_STORAGE_KEY = "aeroacars.autoDeleteFlightLogs";
+/** Days threshold for the auto-purge sweep. Mirrors the wording of the
+ *  Settings hint — keep both in sync if you ever change it. */
+const AUTO_DELETE_LOGS_DAYS = 30;
 
 function loadDebugMode(): boolean {
   return localStorage.getItem(DEBUG_STORAGE_KEY) === "1";
@@ -58,6 +62,18 @@ function saveAutoStart(value: boolean) {
   localStorage.setItem(AUTO_START_STORAGE_KEY, value ? "1" : "0");
 }
 
+/** Sweep stale per-flight JSONL recorder files at app start. Default
+ *  ON — keeps the app data dir from accumulating gigabytes over years
+ *  of flying. Pilots who want every flight retained forever can flip
+ *  the toggle off in Settings → Speicher. Only persisted "0" disables. */
+function loadAutoDeleteFlightLogs(): boolean {
+  return localStorage.getItem(AUTO_DELETE_LOGS_STORAGE_KEY) !== "0";
+}
+
+function saveAutoDeleteFlightLogs(value: boolean) {
+  localStorage.setItem(AUTO_DELETE_LOGS_STORAGE_KEY, value ? "1" : "0");
+}
+
 /**
  * Map a SimKind string to the brand label shown on the top-right
  * status pill. Pilots want to see WHICH sim is connected, not the
@@ -87,7 +103,22 @@ function App() {
   const [debugMode, setDebugMode] = useState<boolean>(() => loadDebugMode());
   const [autoFile, setAutoFile] = useState<boolean>(() => loadAutoFile());
   const [autoStart, setAutoStart] = useState<boolean>(() => loadAutoStart());
+  const [autoDeleteFlightLogs, setAutoDeleteFlightLogs] = useState<boolean>(
+    () => loadAutoDeleteFlightLogs(),
+  );
   const { status: simStatus, snapshot: simSnapshot } = useSimSession();
+
+  // Auto-purge stale flight log files once per app launch when the
+  // toggle is on. Fires on mount only — re-toggling at runtime doesn't
+  // re-sweep (next launch will). 30-day threshold matches the Settings
+  // hint copy.
+  useEffect(() => {
+    if (!loadAutoDeleteFlightLogs()) return;
+    void invoke("flight_logs_purge_older_than", {
+      olderThanDays: AUTO_DELETE_LOGS_DAYS,
+    }).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Sync the persisted auto-start flag to the Rust backend on every
   // mount/change. Backend default is OFF; localStorage is the source
@@ -190,6 +221,11 @@ function App() {
     // watcher. setState alone won't fire it (React batches), so we
     // also pre-emptively call here for snappier UX.
     void invoke("auto_start_set_enabled", { enabled: next }).catch(() => {});
+  }
+
+  function handleAutoDeleteFlightLogsChange(next: boolean) {
+    setAutoDeleteFlightLogs(next);
+    saveAutoDeleteFlightLogs(next);
   }
 
   const phpvmsConnected = status.kind === "loggedIn";
@@ -350,6 +386,8 @@ function App() {
           onAutoFileChange={handleAutoFileChange}
           autoStart={autoStart}
           onAutoStartChange={handleAutoStartChange}
+          autoDeleteFlightLogs={autoDeleteFlightLogs}
+          onAutoDeleteFlightLogsChange={handleAutoDeleteFlightLogsChange}
           theme={theme}
           onThemeChange={setTheme}
           simStatus={simStatus}

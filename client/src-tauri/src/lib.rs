@@ -2246,6 +2246,70 @@ fn flight_status(state: tauri::State<'_, AppState>) -> Option<ActiveFlightInfo> 
 }
 
 #[derive(Serialize)]
+struct FlightLogStatsDto {
+    count: u32,
+    total_bytes: u64,
+}
+
+/// Disk usage of the per-flight JSONL recorder files. Powers the
+/// Settings → Speicher section so the user knows how much is on disk
+/// before they hit "alle löschen".
+#[tauri::command]
+fn flight_logs_stats(app: AppHandle) -> Result<FlightLogStatsDto, UiError> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| UiError::new("no_app_data_dir", "no app data dir"))?;
+    let s = recorder::flight_logs_stats(dir).map_err(|e| {
+        UiError::new("flight_logs_stats_failed", format!("could not read flight logs dir: {e}"))
+    })?;
+    Ok(FlightLogStatsDto {
+        count: s.count,
+        total_bytes: s.total_bytes,
+    })
+}
+
+#[derive(Serialize)]
+struct DeletedDto {
+    deleted: u32,
+}
+
+/// Delete every per-flight JSONL recorder file. Triggered manually from
+/// Settings — never automatically — so the active flight's log (if it
+/// exists) gets removed too. The streamer just recreates it on the
+/// next event append.
+#[tauri::command]
+fn flight_logs_delete_all(app: AppHandle) -> Result<DeletedDto, UiError> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| UiError::new("no_app_data_dir", "no app data dir"))?;
+    let n = recorder::flight_logs_delete_all(dir).map_err(|e| {
+        UiError::new("flight_logs_delete_failed", format!("could not delete flight logs: {e}"))
+    })?;
+    tracing::info!(deleted = n, "flight logs purged (manual)");
+    Ok(DeletedDto { deleted: n })
+}
+
+/// Delete per-flight JSONL files older than `older_than_days` (mtime).
+/// Called from the JS layer once per app launch when the user has the
+/// auto-purge toggle on (default 30 days).
+#[tauri::command]
+fn flight_logs_purge_older_than(app: AppHandle, older_than_days: u32) -> Result<DeletedDto, UiError> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| UiError::new("no_app_data_dir", "no app data dir"))?;
+    let n = recorder::flight_logs_purge_older_than(dir, older_than_days).map_err(|e| {
+        UiError::new("flight_logs_purge_failed", format!("could not purge flight logs: {e}"))
+    })?;
+    if n > 0 {
+        tracing::info!(deleted = n, days = older_than_days, "flight logs purged (auto)");
+    }
+    Ok(DeletedDto { deleted: n })
+}
+
+#[derive(Serialize)]
 pub struct ResumableFlight {
     pirep_id: String,
     flight_number: String,
@@ -7320,6 +7384,9 @@ pub fn run() {
             detect_running_sim,
             auto_start_set_enabled,
             auto_start_get_enabled,
+            flight_logs_stats,
+            flight_logs_delete_all,
+            flight_logs_purge_older_than,
         ])
         .run(tauri::generate_context!())
         .expect("error while running AeroACARS");

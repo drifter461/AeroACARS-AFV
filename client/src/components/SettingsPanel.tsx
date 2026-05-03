@@ -24,6 +24,11 @@ interface Props {
    *  bid's departure airports. Persisted via App.tsx storage helpers. */
   autoStart: boolean;
   onAutoStartChange: (next: boolean) => void;
+  /** Auto-purge per-flight JSONL log files older than 30 days on
+   *  every app start. Persisted via App.tsx storage helpers; the
+   *  actual sweep call is fired once at mount inside App.tsx. */
+  autoDeleteFlightLogs: boolean;
+  onAutoDeleteFlightLogsChange: (next: boolean) => void;
   theme: Theme;
   onThemeChange: (next: Theme) => void;
   /** Latest sim telemetry — surfaced in the debug section when the
@@ -41,6 +46,8 @@ export function SettingsPanel({
   onAutoFileChange,
   autoStart,
   onAutoStartChange,
+  autoDeleteFlightLogs,
+  onAutoDeleteFlightLogsChange,
   theme,
   onThemeChange,
   simStatus,
@@ -168,6 +175,14 @@ export function SettingsPanel({
             </span>
           </span>
         </label>
+      </div>
+
+      <div className="settings__section">
+        <h3>Speicher</h3>
+        <FlightLogsManager
+          autoDelete={autoDeleteFlightLogs}
+          onAutoDeleteChange={onAutoDeleteFlightLogsChange}
+        />
       </div>
 
       <div className="settings__section">
@@ -303,5 +318,121 @@ function PhpvmsHeartbeatDebug({ activeFlight }: { activeFlight: ActiveFlightInfo
         )}
       </dl>
     </section>
+  );
+}
+
+/**
+ * Settings → Speicher: lets the pilot manage on-disk per-flight JSONL
+ * recorder files. Two controls:
+ *  - Toggle for the auto-purge sweep that the App.tsx mount triggers
+ *    (default ON, threshold 30 days).
+ *  - "Alle löschen jetzt" button (with confirm) for the manual nuke.
+ *
+ * The backing files are at `<app_data_dir>/flight_logs/<pirep_id>.jsonl`
+ * — see README → Troubleshooting for the exact OS-specific paths.
+ * Stats are loaded once on mount and re-fetched after a successful
+ * delete so the user sees the file count drop immediately.
+ */
+function FlightLogsManager({
+  autoDelete,
+  onAutoDeleteChange,
+}: {
+  autoDelete: boolean;
+  onAutoDeleteChange: (next: boolean) => void;
+}) {
+  const [stats, setStats] = useState<{ count: number; total_bytes: number } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = async () => {
+    try {
+      const s = await invoke<{ count: number; total_bytes: number }>("flight_logs_stats");
+      setStats(s);
+      setError(null);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  useEffect(() => {
+    void refresh();
+  }, []);
+
+  const handleDeleteAll = async () => {
+    const ok = window.confirm(
+      "Alle gespeicherten Fluglogs jetzt löschen? Das umfasst auch den aktuell laufenden Flug (falls einer aktiv ist) — die Datei wird dann beim nächsten Event neu angelegt. Dieser Schritt ist nicht rückgängig zu machen.",
+    );
+    if (!ok) return;
+    setBusy(true);
+    try {
+      const res = await invoke<{ deleted: number }>("flight_logs_delete_all");
+      await refresh();
+      window.alert(`${res.deleted} Fluglog-Datei${res.deleted === 1 ? "" : "en"} gelöscht.`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const fmtSize = (bytes: number): string => {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  };
+
+  return (
+    <>
+      <label className="settings__checkbox">
+        <input
+          type="checkbox"
+          checked={autoDelete}
+          onChange={(e) => onAutoDeleteChange(e.target.checked)}
+        />
+        <span>
+          <strong>Alte Fluglogs automatisch löschen</strong>
+          <span className="settings__row-hint">
+            Beim nächsten App-Start werden Fluglog-Dateien gelöscht, die älter
+            als <strong>30 Tage</strong> sind. Die laufende Aufzeichnung ist
+            nie betroffen.
+          </span>
+        </span>
+      </label>
+
+      <div className="storage-card">
+        <div className="storage-card__row">
+          <span className="storage-card__label">Aktuell auf der Festplatte</span>
+          <span className="storage-card__value">
+            {stats === null
+              ? "lädt …"
+              : stats.count === 0
+              ? "keine Fluglogs"
+              : `${stats.count} Datei${stats.count === 1 ? "" : "en"} · ${fmtSize(stats.total_bytes)}`}
+          </span>
+        </div>
+        <div className="storage-card__actions">
+          <button
+            type="button"
+            className="storage-card__btn storage-card__btn--danger"
+            onClick={handleDeleteAll}
+            disabled={busy || stats === null || stats.count === 0}
+          >
+            {busy ? "Lösche …" : "Alle Fluglogs jetzt löschen"}
+          </button>
+          <button
+            type="button"
+            className="storage-card__btn"
+            onClick={() => void refresh()}
+            disabled={busy}
+            aria-label="Speicher-Statistiken aktualisieren"
+            title="Aktualisieren"
+          >
+            ↻
+          </button>
+        </div>
+        {error && <p className="storage-card__error">{error}</p>}
+      </div>
+    </>
   );
 }

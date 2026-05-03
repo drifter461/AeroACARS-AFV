@@ -157,3 +157,81 @@ fn sanitize_pirep_id(raw: &str) -> String {
         .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
         .collect()
 }
+
+/// Aggregate stats across all per-flight log files under
+/// `<app_data_dir>/flight_logs/`. Used by the Settings → Storage panel
+/// to show "X Logs · Y MB belegen" before the user clicks delete.
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct FlightLogStats {
+    pub count: u32,
+    pub total_bytes: u64,
+}
+
+pub fn flight_logs_stats(app_data_dir: impl AsRef<Path>) -> Result<FlightLogStats, RecorderError> {
+    let dir = app_data_dir.as_ref().join(LOGS_SUBDIR);
+    if !dir.exists() {
+        return Ok(FlightLogStats::default());
+    }
+    let mut stats = FlightLogStats::default();
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        let meta = entry.metadata()?;
+        if meta.is_file() && entry.path().extension().and_then(|e| e.to_str()) == Some("jsonl") {
+            stats.count += 1;
+            stats.total_bytes += meta.len();
+        }
+    }
+    Ok(stats)
+}
+
+/// Delete every `*.jsonl` under `<app_data_dir>/flight_logs/`. Returns
+/// the count of files actually removed (best-effort — read errors on
+/// individual files are skipped, not reported).
+pub fn flight_logs_delete_all(app_data_dir: impl AsRef<Path>) -> Result<u32, RecorderError> {
+    let dir = app_data_dir.as_ref().join(LOGS_SUBDIR);
+    if !dir.exists() {
+        return Ok(0);
+    }
+    let mut removed = 0u32;
+    for entry in std::fs::read_dir(&dir)? {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+            if std::fs::remove_file(&path).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    Ok(removed)
+}
+
+/// Delete `*.jsonl` files whose mtime is older than `older_than_days`.
+/// Used by the Settings auto-purge toggle (default 30 days). Returns
+/// the count of files removed. Files whose mtime can't be read are
+/// left alone.
+pub fn flight_logs_purge_older_than(
+    app_data_dir: impl AsRef<Path>,
+    older_than_days: u32,
+) -> Result<u32, RecorderError> {
+    let dir = app_data_dir.as_ref().join(LOGS_SUBDIR);
+    if !dir.exists() {
+        return Ok(0);
+    }
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(u64::from(older_than_days) * 86_400))
+        .unwrap_or(std::time::UNIX_EPOCH);
+    let mut removed = 0u32;
+    for entry in std::fs::read_dir(&dir)? {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        let Ok(mtime) = meta.modified() else { continue };
+        if mtime < cutoff && std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
