@@ -762,7 +762,19 @@ impl Pmdg738Snapshot {
             fmc_flight_number: flight_num,
 
             apu_egt: raw.APU_EGTNeedle,
-            apu_running: raw.APU_EGTNeedle > 100.0, // proxy: real EGT only when running
+            // NG3 SDK has no explicit `APURunning` bool. We
+            // derive it from two PMDG fields:
+            //   * APU_Selector == 1 (= ON, not OFF or START)
+            //     means the pilot has the master switch on
+            //   * APU_EGTNeedle > 350 °C means the unit has
+            //     reached steady-state running temperature
+            //     (typical NG APU EGT idle: 400-500 °C; cold
+            //     APU: <50 °C; start ramp peaks ~450 °C briefly)
+            // Both true → running. Either alone isn't enough:
+            // selector==1 with cold EGT = pilot turned switch on
+            // but APU didn't start. Hot EGT with selector==0 =
+            // unit is cooling down after shutdown.
+            apu_running: raw.APU_Selector == 1 && raw.APU_EGTNeedle > 350.0,
 
             xpdr_mode: raw.XPDR_ModeSel,
         }

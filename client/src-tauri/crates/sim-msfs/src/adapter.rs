@@ -217,12 +217,26 @@ fn ng3_to_pmdg_state(s: &crate::pmdg::ng3::Pmdg738Snapshot) -> sim_core::PmdgSta
         speedbrake_extended: s.speedbrake_extended,
         takeoff_config_warning: s.takeoff_config_warning,
 
-        // NG3 doesn't expose ECL / thrust-limit-mode / apu-bit /
-        // wheel-chocks — leave these None / empty so downstream
-        // code can fall back to standard-SimVar derivations.
+        // NG3 doesn't have a dedicated `APURunning` bool in the
+        // SDK header (777 does), but we have something better
+        // than the standard SimVar APU_PCT_RPM heuristic:
+        // `Pmdg738Snapshot::apu_running` derives from
+        // (APU_Selector==ON && APU_EGTNeedle>350°C). That's a
+        // PMDG-cockpit-aware signal. Surface it here so the
+        // generic activity-log path uses it.
+        apu_running: Some(s.apu_running),
+        // Genuine NG3 SDK gaps — fields below don't exist in
+        // PMDG_NG3_SDK.h at all. Leave None so downstream code
+        // skips the matching activity-log entries silently.
+        // * thrust_limit_mode: NG3 has MCP_annunN1 + MAIN_N1SetSelector
+        //   but no EICAS-style mode label. 737 cockpit doesn't
+        //   show "TO/CLB/CRZ/G/A" the same way the 777 EICAS does.
+        // * ecl_complete: 737 NG is classic-cockpit, no Electronic
+        //   Checklist exists in real life or in PMDG. ECL came
+        //   with the 737 MAX (different aircraft).
+        // * wheel_chocks_set: not simulated by PMDG on the NG3.
         thrust_limit_mode: String::new(),
         ecl_complete: None,
-        apu_running: None,
         wheel_chocks_set: None,
     }
 }
