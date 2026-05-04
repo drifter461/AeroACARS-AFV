@@ -725,76 +725,18 @@ function BidDetails({ flight }: { flight: Flight }) {
   const originMismatch = !!ofpOrigin && ofpOrigin !== bidDpt;
   const destMismatch = !!ofpDest && ofpDest !== bidArr;
 
-  // Flight-Number-Match (v0.3.3 — bidirektional). Der Bid kann eine
-  // Flight-Number ODER einen ATC-Callsign tragen (oder beides), der OFP
-  // genauso. Damit der Banner nur bei echten Mismatches feuert (z.B.
-  // Pilot hat OFP für FR100 generiert, fliegt aber FR200), bauen wir
-  // **alle** sinnvollen Repräsentationen beider Seiten auf — mit und
-  // ohne Airline-Prefix — und matchen Cross-Product.
-  //
-  // Beispiele die jetzt alle als Match durchgehen:
-  //   * Bid `EWL 4368`  + OFP `EWL4368`  (klassisch)
-  //   * Bid `EWL 4368`  + OFP `4368`     (ohne Airline-Prefix)
-  //   * Bid `EWL 4368`  + OFP `EWL4TK`   (Pilot nutzt persönlichen
-  //                                       ATC-Callsign in SimBrief —
-  //                                       Bid hat keinen callsign)
-  //   * Bid + Callsign `4TK` + OFP `EWL4TK` (beides explizit)
-  //   * Bid + Callsign `4TK` + OFP `EWL4368` (OFP nimmt Flugnummer
-  //                                           statt Callsign)
-  //
-  // Nur wenn KEINE dieser Permutationen matched UND der OFP nicht mal
-  // mit der Bid-Airline-ICAO anfängt, gilt's als Mismatch.
-  const ofpFnum = plan?.ofp_flight_number?.toUpperCase().replace(/\s/g, "") ?? "";
+  // v0.3.3+ — Flight-Number/Callsign-Mismatch fließt NICHT mehr in
+  // den Banner-Trigger. Begründung: ein abweichender ATC-Callsign bei
+  // richtiger Route + richtigem Aircraft ist fast immer ein legitimer
+  // persönlicher Callsign (Pilot konfiguriert seinen Callsign in
+  // SimBrief, nicht im phpVMS-Bid). Aircraft / Origin / Destination
+  // sind die einzigen Signale stark genug für einen "altes OFP"-Befund.
+  // Die Bid-Identität (`fullBidCallsign`) wird unten im Banner-Body
+  // weiter angezeigt, deswegen behalten wir bidAirlineIcao/bidFnum/
+  // bidCallsign.
   const bidAirlineIcao = flight.airline?.icao?.toUpperCase().trim() ?? "";
   const bidFnum = flight.flight_number.toUpperCase().replace(/\s/g, "");
   const bidCallsign = flight.callsign?.toUpperCase().replace(/\s/g, "") ?? "";
-
-  /** Strip the bid's airline-ICAO from the start of `s` if present. */
-  const stripAirline = (s: string): string =>
-    bidAirlineIcao && s.startsWith(bidAirlineIcao)
-      ? s.slice(bidAirlineIcao.length)
-      : s;
-
-  /** Build {bare, with-prefix} variants from a base part. */
-  const variantsOf = (base: string): string[] => {
-    if (!base) return [];
-    const bare = stripAirline(base);
-    const out = [bare];
-    if (bidAirlineIcao) out.push(`${bidAirlineIcao}${bare}`);
-    return out;
-  };
-
-  // All valid bid-side representations the OFP could match against.
-  const bidVariants = new Set<string>([
-    ...variantsOf(bidFnum),
-    ...variantsOf(bidCallsign),
-  ]);
-
-  // OFP-side variants — handle both "EWL4368" and "4368" coming from
-  // SimBrief depending on user settings.
-  const ofpVariants = new Set<string>(variantsOf(ofpFnum));
-
-  let fnumMatchesAny = false;
-  for (const v of ofpVariants) {
-    if (bidVariants.has(v)) {
-      fnumMatchesAny = true;
-      break;
-    }
-  }
-
-  // v0.3.3 — Flight-Number/Callsign alleine triggert KEINEN Banner mehr.
-  // Begründung: ein abweichender ATC-Callsign bei richtiger Route +
-  // richtigem Aircraft ist fast immer ein legitimer persönlicher
-  // Callsign (Pilot konfiguriert seinen Callsign in SimBrief, nicht im
-  // phpVMS-Bid). Wir berechnen `fnumMismatch` weiter für die Banner-
-  // Anzeige (falls Origin/Destination/Aircraft sowieso ein Banner
-  // triggern, wird die Callsign-Diff dort als zusätzlicher Hinweis
-  // angezeigt). Aber Aircraft/Origin/Destination sind die einzigen
-  // Signale stark genug für einen "altes OFP"-Befund.
-  const fnumMismatch =
-    !!ofpFnum
-    && !!bidFnum
-    && !fnumMatchesAny;
 
   // v0.3.0: Voller ATC-Callsign für die Banner-Anzeige. Wenn der Pilot
   // im phpVMS-Bid einen Callsign-Suffix hinterlegt hat (z.B. "4TK"),

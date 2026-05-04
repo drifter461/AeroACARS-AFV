@@ -4,7 +4,16 @@ Alle nennenswerten Änderungen an AeroACARS. Format: lose an [Keep a Changelog](
 
 ---
 
-## [v0.3.3] — 2026-05-04
+## [v0.3.4] — 2026-05-04
+
+Hot-Patch: v0.3.3 hatte einen TypeScript-Build-Fehler im CI (`'fnumMismatch' is declared but its value is never read`) — die Build-Jobs für Windows + macOS schlugen fehl, der `publish`-Step wurde geskipped, also kamen keine Installer am Release an. Inhaltlich = v0.3.3, nur sauber gebaut.
+
+### Behoben
+- **TS6133-Fehler in `BidsList.tsx`** — Cross-Product-Match-Logik entfernt nachdem v0.3.3 sie aus `ofpMismatch` rausgenommen hatte; die Variablen waren danach unused. Strict-Mode tot.
+
+---
+
+## [v0.3.3] — 2026-05-04 *(broken release — keine Build-Artefakte)*
 
 Patch nach v0.3.2 — drei kleine UX-Fixes rund um die OFP-Mismatch-Detection.
 
