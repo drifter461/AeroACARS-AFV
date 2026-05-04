@@ -188,6 +188,26 @@ pub struct SimSnapshot {
     pub engine_anti_ice: Option<bool>,
     /// Wing / structural deice (Airbus "WING ANTI ICE").
     pub wing_anti_ice: Option<bool>,
+    /// Wing-illumination switch (Boeing). Some Airbus profiles also
+    /// expose it. None when the source platform doesn't report it
+    /// — generic SimVars / X-Plane base catalog don't, but PMDG
+    /// (MSFS) and Zibo/LevelUp 737 (X-Plane) do.
+    pub light_wing: Option<bool>,
+    /// Wheel-well light switch — Boeing 737-only feature in practice.
+    /// None on most aircraft.
+    pub light_wheel_well: Option<bool>,
+    /// Transponder mode label as shown on the cockpit panel:
+    /// "OFF"/"STBY"/"XPNDR"/"TEST"/"ALT"/"TA"/"TA-RA". Empty/None
+    /// when the source platform doesn't expose the mode separately
+    /// from the squawk code. Filled by both the PMDG SDK (MSFS) and
+    /// the X-Plane standard `transponder_mode` DataRef.
+    pub xpdr_mode_label: Option<String>,
+    /// Boeing "TAKEOFF CONFIG" annunciator — fires on the ground
+    /// when the aircraft is mis-configured for takeoff (flaps/trim/
+    /// parking-brake/spoilers wrong). 737 NG3 + Zibo/LevelUp 737
+    /// expose this via SDK / `laminar/B738/annunciator/takeoff_config`.
+    /// None on aircraft that don't have an EICAS takeoff-config check.
+    pub takeoff_config_warning: Option<bool>,
 
     // ---- ATC / Gate info (from MSFS ATC system) ----
     /// Stand identifier from `ATC PARKING NAME` (e.g. "GATE_HEAVY").
@@ -466,6 +486,10 @@ impl Default for SimSnapshot {
             pitot_heat: None,
             engine_anti_ice: None,
             wing_anti_ice: None,
+            light_wing: None,
+            light_wheel_well: None,
+            xpdr_mode_label: None,
+            takeoff_config_warning: None,
             seatbelts_sign: None,
             no_smoking_sign: None,
             fcu_selected_altitude_ft: None,

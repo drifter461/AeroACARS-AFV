@@ -1310,9 +1310,8 @@ function LandingDetail({
         </section>
       )}
 
-      {/* Fuel + weights — render whenever ANY fuel/weight value is
-          present, not just when there's a SimBrief plan. The previous
-          guard hid the whole section for flights without an OFP. */}
+      {/* Fuel + Weight — Soll/Ist-Vergleich (v0.3.0).
+          Render whenever ANY fuel/weight value is present. */}
       {(record.planned_burn_kg != null ||
         record.actual_trip_burn_kg != null ||
         record.block_fuel_kg != null ||
@@ -1331,52 +1330,120 @@ function LandingDetail({
               actual={record.actual_trip_burn_kg}
             />
           )}
-          <dl className="landing-keyvals landing-keyvals--inline">
-            {record.block_fuel_kg != null && (
-              <div>
-                <dt>{t("landing.block_fuel")}</dt>
-                <dd>{fmtNumber(record.block_fuel_kg, 0, "kg")}</dd>
-              </div>
-            )}
-            {record.takeoff_fuel_kg != null && (
-              <div>
-                <dt>{t("landing.takeoff_fuel")}</dt>
-                <dd>{fmtNumber(record.takeoff_fuel_kg, 0, "kg")}</dd>
-              </div>
-            )}
-            {record.landing_fuel_kg != null && (
-              <div>
-                <dt>{t("landing.landing_fuel")}</dt>
-                <dd>{fmtNumber(record.landing_fuel_kg, 0, "kg")}</dd>
-              </div>
-            )}
-            {record.takeoff_weight_kg != null && (
-              <div>
-                <dt>{t("landing.tow")}</dt>
-                <dd>{fmtNumber(record.takeoff_weight_kg, 0, "kg")}</dd>
-              </div>
-            )}
-            {record.landing_weight_kg != null && (
-              <div>
-                <dt>{t("landing.ldw")}</dt>
-                <dd>{fmtNumber(record.landing_weight_kg, 0, "kg")}</dd>
-              </div>
-            )}
-            {record.planned_tow_kg != null && (
-              <div>
-                <dt>{t("landing.plan_tow")}</dt>
-                <dd>{fmtNumber(record.planned_tow_kg, 0, "kg")}</dd>
-              </div>
-            )}
-            {record.planned_ldw_kg != null && (
-              <div>
-                <dt>{t("landing.plan_ldw")}</dt>
-                <dd>{fmtNumber(record.planned_ldw_kg, 0, "kg")}</dd>
-              </div>
-            )}
-          </dl>
+          <ComparisonTable
+            title={t("landing.fuel_table")}
+            rows={[
+              {
+                label: t("landing.block_fuel"),
+                ist: record.block_fuel_kg,
+                soll: record.planned_block_fuel_kg,
+              },
+              {
+                label: t("landing.takeoff_fuel"),
+                ist: record.takeoff_fuel_kg,
+                soll: null, // SimBrief OFP hat nur Block + Burn, kein TO-Fuel separat
+              },
+              {
+                label: t("landing.landing_fuel"),
+                ist: record.landing_fuel_kg,
+                soll: record.planned_block_fuel_kg != null && record.planned_burn_kg != null
+                  ? record.planned_block_fuel_kg - record.planned_burn_kg
+                  : null,
+              },
+              {
+                label: t("landing.trip_burn"),
+                ist: record.actual_trip_burn_kg,
+                soll: record.planned_burn_kg,
+              },
+            ]}
+          />
+          <ComparisonTable
+            title={t("landing.weight_table")}
+            rows={[
+              {
+                label: t("landing.tow"),
+                ist: record.takeoff_weight_kg,
+                soll: record.planned_tow_kg,
+              },
+              {
+                label: t("landing.ldw"),
+                ist: record.landing_weight_kg,
+                soll: record.planned_ldw_kg,
+              },
+              {
+                label: t("landing.zfw"),
+                ist: record.takeoff_weight_kg != null && record.takeoff_fuel_kg != null
+                  ? record.takeoff_weight_kg - record.takeoff_fuel_kg
+                  : null,
+                soll: record.planned_zfw_kg,
+              },
+            ]}
+          />
         </section>
       )}
+    </div>
+  );
+}
+
+// ---- Soll/Ist-Vergleichstabelle (v0.3.0) ---------------------------------
+//
+// Drei Spalten: IST | SOLL | Δ. Zeilen werden nur gerendert wenn IST oder
+// SOLL vorhanden ist — leere Zeilen kommen NICHT in die Tabelle. Δ wird mit
+// Farbcode versehen: grün <1%, gelb 1-3%, rot >3% Abweichung. Bei Weight
+// gilt "drüber Plan = warnung", bei Fuel gilt "stark unter Plan = warnung
+// (zu wenig getankt)".
+
+interface ComparisonRow {
+  label: string;
+  ist: number | null;
+  soll: number | null;
+}
+
+function ComparisonTable({ title, rows }: { title: string; rows: ComparisonRow[] }) {
+  // Filter Zeilen die weder IST noch SOLL haben.
+  const visible = rows.filter((r) => r.ist != null || r.soll != null);
+  if (visible.length === 0) return null;
+  return (
+    <div className="landing-comparison">
+      <div className="landing-comparison__title">{title}</div>
+      <table className="landing-comparison__table">
+        <thead>
+          <tr>
+            <th />
+            <th>IST</th>
+            <th>SOLL</th>
+            <th>Δ</th>
+          </tr>
+        </thead>
+        <tbody>
+          {visible.map((r) => {
+            const delta = r.ist != null && r.soll != null ? r.ist - r.soll : null;
+            const deltaPct =
+              delta != null && r.soll != null && r.soll !== 0
+                ? Math.abs(delta / r.soll) * 100
+                : null;
+            // Farbcode: <1% grün, 1-3% gelb, >3% rot
+            let deltaClass = "";
+            if (deltaPct != null) {
+              if (deltaPct < 1) deltaClass = "landing-comparison__delta--ok";
+              else if (deltaPct < 3) deltaClass = "landing-comparison__delta--warn";
+              else deltaClass = "landing-comparison__delta--alert";
+            }
+            return (
+              <tr key={r.label}>
+                <td>{r.label}</td>
+                <td>{r.ist != null ? fmtNumber(r.ist, 0, "kg") : "—"}</td>
+                <td>{r.soll != null ? fmtNumber(r.soll, 0, "kg") : "—"}</td>
+                <td className={deltaClass}>
+                  {delta != null
+                    ? `${delta >= 0 ? "+" : ""}${delta.toFixed(0)} kg`
+                    : "—"}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
   );
 }

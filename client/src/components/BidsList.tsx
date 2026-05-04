@@ -97,6 +97,36 @@ function formatLevel(level: number | null): string | null {
   return `FL${level.toString().padStart(3, "0")}`;
 }
 
+/// phpVMS-Flight-Type-Code → kurzes UI-Label.
+/// Codes laut phpVMS-Core: J=Sched.Pax, F=Sched.Cargo, C=Charter,
+/// X=Reposition, I=Special, T=Training, M=Military, R=Repositioning.
+function flightTypeLabel(type: string): string {
+  switch (type.toUpperCase()) {
+    case "J": return "PAX";
+    case "F": return "CARGO";
+    case "C": return "CHARTER";
+    case "X":
+    case "R": return "REPO";
+    case "T": return "TRAINING";
+    case "M": return "MIL";
+    case "I": return "SPECIAL";
+    default: return type.toUpperCase();
+  }
+}
+
+/// CSS-Class-Suffix abhängig vom Flight-Type — steuert die Badge-Farbe.
+/// Pax = blau, Cargo = orange, Charter = lila, Repo = grau.
+function flightTypeKind(type: string): string {
+  switch (type.toUpperCase()) {
+    case "J": return "pax";
+    case "F": return "cargo";
+    case "C": return "charter";
+    case "X":
+    case "R": return "repo";
+    default: return "other";
+  }
+}
+
 function buildCallsigns(flight: Flight): string {
   const icao = flight.airline?.icao?.trim();
   const iata = flight.airline?.iata?.trim();
@@ -494,6 +524,14 @@ export function BidsList({
                         </span>
                         {level && (
                           <span title={t("bids.cruise_level")}>✈ {level}</span>
+                        )}
+                        {f.flight_type && (
+                          <span
+                            className={`bid-card__type-badge bid-card__type-badge--${flightTypeKind(f.flight_type)}`}
+                            title={t("bids.flight_type")}
+                          >
+                            {flightTypeLabel(f.flight_type)}
+                          </span>
                         )}
                       </div>
                     </div>

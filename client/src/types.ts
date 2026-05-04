@@ -314,6 +314,25 @@ export interface ActiveFlightInfo {
    *  fires this. Independent of T&G — a missed approach without
    *  ground contact only bumps this counter. */
   go_around_count: number;
+  // ---- v0.3.0 — SimBrief OFP Plan-Werte für Soll/Ist-Vergleich ----
+  /** Plan-Block-Fuel aus dem SimBrief OFP (kg). null wenn der Pilot
+   *  keine SimBrief-Verbindung im phpVMS-Profil hat. */
+  planned_block_fuel_kg: number | null;
+  /** Plan-Trip-Burn aus dem SimBrief OFP (kg). */
+  planned_burn_kg: number | null;
+  /** Plan-Reserve-Fuel aus dem SimBrief OFP (kg). */
+  planned_reserve_kg: number | null;
+  /** Plan-ZFW (kg). */
+  planned_zfw_kg: number | null;
+  /** Plan-TOW (kg). */
+  planned_tow_kg: number | null;
+  /** Plan-LDW (kg). */
+  planned_ldw_kg: number | null;
+  /** Plan-Route aus dem OFP (ICAO-codiert). Wird im Briefing-Tab
+   *  als monospace-string angezeigt. */
+  planned_route: string | null;
+  /** Geplanter Alternate-Flughafen (ICAO). */
+  planned_alternate: string | null;
 }
 
 /** Mirrors the Rust-side `ReleaseNotes` struct. Returned by the

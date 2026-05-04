@@ -1654,6 +1654,26 @@ pub struct ActiveFlightInfo {
     /// approach). Independent of T&G — a missed-approach without
     /// ground contact only bumps this counter, not the T&G one.
     go_around_count: u32,
+    // ---- v0.3.0 — SimBrief OFP Plan-Werte für Soll/Ist-Vergleich ----
+    /// Plan-Block-Fuel aus dem SimBrief OFP (kg). None wenn der Pilot
+    /// keine SimBrief-Verbindung im phpVMS-Profil hat oder das OFP
+    /// nicht abgerufen werden konnte.
+    planned_block_fuel_kg: Option<f32>,
+    /// Plan-Trip-Burn aus dem SimBrief OFP (kg).
+    planned_burn_kg: Option<f32>,
+    /// Plan-Reserve-Fuel (kg).
+    planned_reserve_kg: Option<f32>,
+    /// Plan-ZFW (kg).
+    planned_zfw_kg: Option<f32>,
+    /// Plan-TOW (kg).
+    planned_tow_kg: Option<f32>,
+    /// Plan-LDW (kg).
+    planned_ldw_kg: Option<f32>,
+    /// Plan-Route aus dem OFP, ICAO-codiert. Wird im Briefing-Tab
+    /// als monospace-string angezeigt.
+    planned_route: Option<String>,
+    /// Geplanter Alternate-Flughafen (ICAO).
+    planned_alternate: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2998,6 +3018,18 @@ fn flight_info(flight: &ActiveFlight) -> ActiveFlightInfo {
             .filter(|e| matches!(e.kind, TouchdownKind::TouchAndGo))
             .count() as u32,
         go_around_count: stats.go_around_count,
+        // ---- v0.3.0 — SimBrief Plan-Werte für Soll/Ist-Vergleich ----
+        // Werden vom flight_start gefüllt (über fetch_simbrief_ofp).
+        // None bleiben sie wenn der Pilot keine SimBrief-Verbindung
+        // im phpVMS-Profil hat.
+        planned_block_fuel_kg: stats.planned_block_fuel_kg,
+        planned_burn_kg: stats.planned_burn_kg,
+        planned_reserve_kg: stats.planned_reserve_kg,
+        planned_zfw_kg: stats.planned_zfw_kg,
+        planned_tow_kg: stats.planned_tow_kg,
+        planned_ldw_kg: stats.planned_ldw_kg,
+        planned_route: stats.planned_route.clone(),
+        planned_alternate: stats.planned_alternate.clone(),
     }
 }
 
@@ -6415,6 +6447,15 @@ fn build_heartbeat_body(
     } else {
         None
     };
+    // v0.3.0: send block_fuel on every heartbeat so phpVMS' live page
+    // can compute "Verbleibender Treibstoff = block_fuel − fuel_used"
+    // correctly. Without this the missing column defaults to 0 and the
+    // remaining-fuel display reads as "−<fuel_used>" (bug reported by
+    // pilot on 2026-05-04: "−17008 kg" mid-cruise). Same kg→lb round-
+    // trip as fuel_used so the dashboard shows clean integer values.
+    let block_fuel = stats
+        .block_fuel_kg
+        .map(|b| (b as f64).round() * KG_TO_LB);
     UpdateBody {
         state: None,
         source: None,
@@ -6422,6 +6463,7 @@ fn build_heartbeat_body(
         flight_time: flight_time_min,
         distance,
         fuel_used,
+        block_fuel,
         level,
         source_name: Some(format!("AeroACARS/{}", env!("CARGO_PKG_VERSION"))),
         notes: None,
@@ -7448,27 +7490,29 @@ fn detect_telemetry_changes(app: &AppHandle, flight: &ActiveFlight, snap: &SimSn
         }
     }
 
-    // ---- XPDR mode (PMDG only — v0.2.4 Premium-First).
-    // PMDG cockpit exposes the actual transponder MODE selector
-    // (STBY / ALT-OFF / XPNDR / TA / TA-RA) which the standard
+    // ---- XPDR mode (v0.2.4 PMDG + v0.3.0 X-Plane).
+    // Cockpit exposes the actual transponder MODE selector
+    // (STBY / ALT-OFF / XPNDR / TA / TA-RA) which the standard MSFS
     // SimVar `TRANSPONDER STATE` only exposes as a binary on/off.
-    // Logged as a separate entry so the squawk-code log keeps its
-    // original semantics.
-    if let Some(pmdg) = snap.pmdg.as_ref() {
-        if !pmdg.xpdr_mode_label.is_empty()
-            && stats.last_logged_pmdg_xpdr_mode.as_deref() != Some(pmdg.xpdr_mode_label.as_str())
+    // Now sourced from `snap.xpdr_mode_label` which the MSFS adapter
+    // fills from PMDG and the X-Plane adapter fills from the standard
+    // `transponder_mode` DataRef. Logged as a separate entry so the
+    // squawk-code log keeps its original semantics.
+    if let Some(mode) = snap.xpdr_mode_label.as_ref() {
+        if !mode.is_empty()
+            && stats.last_logged_pmdg_xpdr_mode.as_deref() != Some(mode.as_str())
         {
-            // Skip first tick on a "boring" STBY value to avoid noise
+            // Skip first tick on a "boring" STBY/OFF value to avoid noise
             // when the pilot loads cold-and-dark.
-            if !first_tick || pmdg.xpdr_mode_label != "STBY" {
+            if !first_tick || (mode != "STBY" && mode != "OFF") {
                 log_activity_handle(
                     app,
                     ActivityLevel::Info,
-                    format!("XPDR mode → {}", pmdg.xpdr_mode_label),
+                    format!("XPDR mode → {}", mode),
                     None,
                 );
             }
-            stats.last_logged_pmdg_xpdr_mode = Some(pmdg.xpdr_mode_label.clone());
+            stats.last_logged_pmdg_xpdr_mode = Some(mode.clone());
         }
     }
 
@@ -7523,17 +7567,16 @@ fn detect_telemetry_changes(app: &AppHandle, flight: &ActiveFlight, snap: &SimSn
         }
     }
 
-    // Premium-First (v0.2.4): wing + wheel-well are NG3/777-only via
-    // PMDG. We only set them in the LightsState when the underlying
-    // Option is Some — that way generic SimVar aircraft don't generate
-    // false "Wing lights OFF" log entries (because the field defaults
-    // to None there).
-    let pmdg_has_wing = snap.pmdg.as_ref().and_then(|p| p.light_wing).is_some();
-    let pmdg_has_wheel_well = snap
-        .pmdg
-        .as_ref()
-        .and_then(|p| p.light_wheel_well)
-        .is_some();
+    // Premium-First (v0.2.4 + v0.3.0): wing + wheel-well are
+    // NG3/777-only via PMDG (MSFS) or laminar/B738-only via the
+    // X-Plane 737 family (Zibo / LevelUp / default-738). Both
+    // simulators now write into the top-level SimSnapshot fields,
+    // so we read directly from snap.light_wing / snap.light_wheel_well.
+    // Field is `Some(...)` when the source platform actually reports
+    // the switch (kept None on aircraft that don't have it — generic
+    // Airbus, Cessna, etc.).
+    let has_wing = snap.light_wing.is_some();
+    let has_wheel_well = snap.light_wheel_well.is_some();
     let lights = LightsState {
         landing: snap.light_landing.unwrap_or(false),
         beacon: snap.light_beacon.unwrap_or(false),
@@ -7544,12 +7587,8 @@ fn detect_telemetry_changes(app: &AppHandle, flight: &ActiveFlight, snap: &SimSn
         taxi: snap.light_taxi.unwrap_or(false),
         nav: snap.light_nav.unwrap_or(false),
         logo: snap.light_logo.unwrap_or(false),
-        wing: snap.pmdg.as_ref().and_then(|p| p.light_wing).unwrap_or(false),
-        wheel_well: snap
-            .pmdg
-            .as_ref()
-            .and_then(|p| p.light_wheel_well)
-            .unwrap_or(false),
+        wing: snap.light_wing.unwrap_or(false),
+        wheel_well: snap.light_wheel_well.unwrap_or(false),
     };
     if stats.last_logged_lights != Some(lights) {
         if let Some(prev) = stats.last_logged_lights {
@@ -7567,13 +7606,13 @@ fn detect_telemetry_changes(app: &AppHandle, flight: &ActiveFlight, snap: &SimSn
             if !strobe_three_state_active {
                 changes.push(("Strobe", prev.strobe, lights.strobe));
             }
-            // Wing + wheel-well only fire when PMDG is the source of
-            // truth this tick — prevents bogus "Wing OFF" entries
-            // when the pilot swaps from PMDG to a generic aircraft.
-            if pmdg_has_wing {
+            // Wing + wheel-well only fire when the source platform
+            // actually reports the switch (PMDG / laminar/B738) —
+            // prevents bogus "Wing OFF" entries on generic aircraft.
+            if has_wing {
                 changes.push(("Wing", prev.wing, lights.wing));
             }
-            if pmdg_has_wheel_well {
+            if has_wheel_well {
                 changes.push(("Wheel-well", prev.wheel_well, lights.wheel_well));
             }
             for (name, old, new) in changes {
@@ -8143,20 +8182,10 @@ fn detect_telemetry_changes(app: &AppHandle, flight: &ActiveFlight, snap: &SimSn
             stats.last_logged_pmdg_ap_engaged = Some(p.ap_engaged);
         }
 
-        // Takeoff config warning — only on rising edge (warning
-        // turning ON). Falling edge (pilot fixed it) doesn't warrant
-        // a log line.
-        if stats.last_logged_pmdg_to_warning != Some(p.takeoff_config_warning) {
-            if p.takeoff_config_warning {
-                log_activity_handle(
-                    app,
-                    ActivityLevel::Warn,
-                    "TAKEOFF CONFIG warning".to_string(),
-                    Some("Cockpit zeigt rote Warnung — TO-Setup unvollständig".to_string()),
-                );
-            }
-            stats.last_logged_pmdg_to_warning = Some(p.takeoff_config_warning);
-        }
+        // Takeoff config warning was here pre-v0.3.0 — moved out to a
+        // simulator-agnostic block (after the PMDG `if let Some(p)`)
+        // because both PMDG (MSFS) and X-Plane Zibo/LevelUp 737 fill
+        // the universal `snap.takeoff_config_warning` field.
 
         // ---- v0.2.2 wider integration ----
 
@@ -8246,6 +8275,26 @@ fn detect_telemetry_changes(app: &AppHandle, flight: &ActiveFlight, snap: &SimSn
                 }
                 stats.last_logged_pmdg_chocks = Some(chocks);
             }
+        }
+    }
+
+    // ---- Takeoff config warning (universal — PMDG + X-Plane 737)
+    // Only on rising edge (warning turning ON). Falling edge
+    // (pilot fixed it) doesn't warrant a log line. Source field
+    // is filled by both adapters: MSFS via the PMDG snapshot()
+    // merge, X-Plane via the `laminar/B738/annunciator/takeoff_config`
+    // DataRef. None on aircraft that don't have an EICAS check.
+    if let Some(to_warn) = snap.takeoff_config_warning {
+        if stats.last_logged_pmdg_to_warning != Some(to_warn) {
+            if to_warn {
+                log_activity_handle(
+                    app,
+                    ActivityLevel::Warn,
+                    "TAKEOFF CONFIG warning".to_string(),
+                    Some("Cockpit zeigt rote Warnung — TO-Setup unvollständig".to_string()),
+                );
+            }
+            stats.last_logged_pmdg_to_warning = Some(to_warn);
         }
     }
 }

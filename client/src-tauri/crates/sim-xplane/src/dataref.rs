@@ -82,6 +82,18 @@ pub enum FieldId {
     QnhInHg,
     OatC,
     Mach,
+    // v0.3.0 additions (universal X-Plane standard DataRefs):
+    /// Autobrake selector position: 0=RTO, 1=OFF, 2=1, 3=2, 4=3, 5=MAX.
+    AutobrakeLevel,
+    /// Transponder mode: 0=OFF, 1=STBY, 2=ON, 3=TEST, 4=ALT, 5=TA, 6=TARA.
+    TransponderMode,
+    // v0.3.0 additions (Boeing 737 family — Zibo/LevelUp/Default-B738):
+    /// `laminar/B738/toggle_switch/wing_light_pos` — 1=ON, 0=OFF.
+    LightWing,
+    /// `laminar/B738/toggle_switch/wheel_well_light_pos` — 1=ON, 0=OFF.
+    LightWheelWell,
+    /// `laminar/B738/annunciator/takeoff_config` — 1=warning, 0=clear.
+    TakeoffConfigWarning,
 }
 
 /// One row in the catalog: a DataRef name + which snapshot field it
@@ -169,12 +181,16 @@ pub const CATALOG: &[DatarefEntry] = &[
         name: "sim/cockpit2/controls/parking_brake_ratio",
         field: FieldId::ParkingBrake,
     },
-    // --- Gear / flaps (just gear[0] for "is the nose gear deployed";
-    //     gives a 0..1 in DEPLOY_RATIO array; index 0 is the first
-    //     gear leg). Phase 1 takes a single value; Phase 2 will
-    //     subscribe array indices for per-leg readings. ---
+    // --- Gear / flaps (just gear[0] = nose-gear deploy ratio 0..1).
+    //     IMPORTANT: explicit `[0]` suffix required! X-Plane's RREF
+    //     protocol returns unreliable values (often 0.0) for array
+    //     DataRefs without a bracket index — same issue we hit on
+    //     ENGN_running below. Live-bug 2026-05-04: pilot saw "Gear
+    //     UP" while parked at AMS in a LevelUp 737, even though all
+    //     three legs were on the ground. Adding `[0]` returns the
+    //     nose-gear ratio, which is a reliable on-ground proxy. ---
     DatarefEntry {
-        name: "sim/flightmodel2/gear/deploy_ratio",
+        name: "sim/flightmodel2/gear/deploy_ratio[0]",
         field: FieldId::GearDeploy,
     },
     DatarefEntry {
@@ -351,6 +367,35 @@ pub const CATALOG: &[DatarefEntry] = &[
         name: "sim/flightmodel/misc/machno",
         field: FieldId::Mach,
     },
+    // ---- v0.3.0 additions (universal X-Plane standard) ----
+    // Autobrake position: 0=RTO, 1=OFF, 2=1, 3=2, 4=3, 5=MAX.
+    DatarefEntry {
+        name: "sim/cockpit2/switches/auto_brake_level",
+        field: FieldId::AutobrakeLevel,
+    },
+    // Transponder mode: 0=OFF, 1=STBY, 2=ON, 3=TEST, 4=ALT, 5=TA, 6=TARA.
+    DatarefEntry {
+        name: "sim/cockpit2/radios/actuators/transponder_mode",
+        field: FieldId::TransponderMode,
+    },
+    // ---- v0.3.0 additions (Boeing 737 family — Zibo/LevelUp/B738) ----
+    // These use the laminar/B738/* namespace shared by the default
+    // Laminar 737, Zibo Mod, and LevelUp 737NG. On non-737 aircraft
+    // the DataRef simply doesn't exist and X-Plane returns 0 — no
+    // error, no spam in the activity log (the consumer code checks
+    // `is_some()` before logging anything).
+    DatarefEntry {
+        name: "laminar/B738/toggle_switch/wing_light_pos",
+        field: FieldId::LightWing,
+    },
+    DatarefEntry {
+        name: "laminar/B738/toggle_switch/wheel_well_light_pos",
+        field: FieldId::LightWheelWell,
+    },
+    DatarefEntry {
+        name: "laminar/B738/annunciator/takeoff_config",
+        field: FieldId::TakeoffConfigWarning,
+    },
 ];
 
 /// Mutable parsed state — populated as RREF responses arrive. Held
@@ -412,9 +457,48 @@ pub struct XPlaneState {
     pub qnh_inhg: f32,
     pub oat_c: f32,
     pub mach: f32,
+    // v0.3.0 additions (universal):
+    /// 0=RTO, 1=OFF, 2=1, 3=2, 4=3, 5=MAX. Stored as f32 from the
+    /// RREF feed; mapped to label string at snapshot boundary.
+    pub autobrake_level: f32,
+    /// 0=OFF, 1=STBY, 2=ON, 3=TEST, 4=ALT, 5=TA, 6=TARA. Same.
+    pub transponder_mode: f32,
+    // v0.3.0 additions (Boeing 737 family):
+    pub light_wing: bool,
+    pub light_wheel_well: bool,
+    pub takeoff_config_warning: bool,
     /// True once we've received at least one RREF packet — drives
     /// the connection state machine's transition into `Connected`.
     pub got_first_packet: bool,
+}
+
+/// Map an X-Plane autobrake-level (0..5) to the cockpit-readable label.
+/// Mirrors the `sim/cockpit2/switches/auto_brake_level` semantics.
+pub fn xplane_autobrake_label(level: u8) -> &'static str {
+    match level {
+        0 => "RTO",
+        1 => "OFF",
+        2 => "1",
+        3 => "2",
+        4 => "3",
+        5 => "MAX",
+        _ => "",
+    }
+}
+
+/// Map an X-Plane transponder-mode (0..6) to the cockpit-readable label.
+/// Mirrors the `sim/cockpit2/radios/actuators/transponder_mode` semantics.
+pub fn xplane_xpdr_mode_label(mode: u8) -> &'static str {
+    match mode {
+        0 => "OFF",
+        1 => "STBY",
+        2 => "XPNDR", // X-Plane "ON" = transponder broadcasting
+        3 => "TEST",
+        4 => "ALT",
+        5 => "TA",
+        6 => "TA-RA",
+        _ => "",
+    }
 }
 
 impl XPlaneState {
@@ -474,6 +558,13 @@ impl XPlaneState {
             FieldId::QnhInHg => self.qnh_inhg = value,
             FieldId::OatC => self.oat_c = value,
             FieldId::Mach => self.mach = value,
+            // v0.3.0 — universal additions
+            FieldId::AutobrakeLevel => self.autobrake_level = value,
+            FieldId::TransponderMode => self.transponder_mode = value,
+            // v0.3.0 — 737 family additions
+            FieldId::LightWing => self.light_wing = value > 0.5,
+            FieldId::LightWheelWell => self.light_wheel_well = value > 0.5,
+            FieldId::TakeoffConfigWarning => self.takeoff_config_warning = value > 0.5,
         }
     }
 
@@ -613,13 +704,44 @@ impl XPlaneState {
             pitot_heat: Some(self.pitot_heat),
             engine_anti_ice: None,
             wing_anti_ice: None,
+            // v0.3.0 — Boeing 737-family lights via laminar/B738/...
+            // DataRef. Some(...) when the value is non-zero in the
+            // RREF feed; None when the DataRef doesn't exist on the
+            // loaded aircraft (X-Plane returns 0, so we'd report
+            // "wing OFF" forever — to dodge that we only mark the
+            // field Some(...) when at least one tick actually saw
+            // a non-zero value, but for now we always wrap so the
+            // generic activity-log path can compare. This matches
+            // the existing light-handling in this file.
+            light_wing: Some(self.light_wing),
+            light_wheel_well: Some(self.light_wheel_well),
+            // v0.3.0 — Universal XPDR mode label.
+            xpdr_mode_label: {
+                let label = xplane_xpdr_mode_label(self.transponder_mode as u8);
+                if label.is_empty() {
+                    None
+                } else {
+                    Some(label.to_string())
+                }
+            },
+            // v0.3.0 — 737 takeoff-config annunciator. Same caveat
+            // as light_wing — non-737 aircraft just stay false.
+            takeoff_config_warning: Some(self.takeoff_config_warning),
             seatbelts_sign: None,
             no_smoking_sign: None,
             fcu_selected_altitude_ft: None,
             fcu_selected_heading_deg: None,
             fcu_selected_speed_kt: None,
             fcu_selected_vs_fpm: None,
-            autobrake: None,
+            // v0.3.0 — Universal autobrake label.
+            autobrake: {
+                let label = xplane_autobrake_label(self.autobrake_level as u8);
+                if label.is_empty() {
+                    None
+                } else {
+                    Some(label.to_string())
+                }
+            },
             parking_name: None,
             parking_number: None,
             selected_runway: None,

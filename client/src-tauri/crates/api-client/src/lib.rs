@@ -632,6 +632,15 @@ pub struct UpdateBody {
     /// Fuel burned so far (units configured site-side; phpVMS default lbs).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fuel_used: Option<f64>,
+    /// Total fuel on board at block-off (units configured site-side).
+    /// v0.3.0: NEW in the live heartbeat. phpVMS' live tracking page
+    /// derives "Verbleibender Treibstoff = block_fuel − fuel_used";
+    /// without this field the missing column defaults to 0 and the
+    /// remaining-fuel display reads as "−<fuel_used>" for the entire
+    /// flight. We send the value once it's known (= once block-off
+    /// has been timestamped) and on every subsequent heartbeat.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub block_fuel: Option<f64>,
     /// Current cruise level / altitude in feet (e.g. 34000).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub level: Option<i32>,

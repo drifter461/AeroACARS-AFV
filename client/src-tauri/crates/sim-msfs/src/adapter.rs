@@ -576,6 +576,20 @@ impl MsfsAdapter {
             if !pmdg.autobrake_label.is_empty() {
                 snap.autobrake = Some(pmdg.autobrake_label.clone());
             }
+            // v0.3.0: surface PMDG light_wing / light_wheel_well /
+            // xpdr_mode_label / takeoff_config_warning via the
+            // top-level SimSnapshot fields (the same fields X-Plane
+            // also fills). Lets the generic activity-log code share
+            // a single path across simulators.
+            if let Some(v) = pmdg.light_wing       { snap.light_wing       = Some(v); }
+            if let Some(v) = pmdg.light_wheel_well { snap.light_wheel_well = Some(v); }
+            if !pmdg.xpdr_mode_label.is_empty() {
+                snap.xpdr_mode_label = Some(pmdg.xpdr_mode_label.clone());
+            }
+            // PMDG NG3 has a real takeoff-config bit; 777 leaves it
+            // false (no equivalent annunciator). Surface either way
+            // so the X-Plane / MSFS activity-log path can fire on it.
+            snap.takeoff_config_warning = Some(pmdg.takeoff_config_warning);
         }
 
         Some(snap)

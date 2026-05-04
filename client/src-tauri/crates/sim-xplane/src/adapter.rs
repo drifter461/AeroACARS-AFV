@@ -291,18 +291,47 @@ fn run_listener(shared: Arc<AdapterShared>) {
 
     let xplane_addr = format!("127.0.0.1:{XPLANE_LISTEN_PORT}");
 
-    // Subscribe every DataRef in the catalog. Index = position.
-    for (i, entry) in CATALOG.iter().enumerate() {
-        let req = encode_request(SUBSCRIPTION_HZ as i32, i as i32, entry.name);
-        if let Err(e) = socket.send_to(&req, &xplane_addr) {
-            tracing::warn!(error = %e, dataref = entry.name, "RREF subscribe send failed");
-            // Don't bail — others might still arrive.
+    // ---- Hard-armoured re-subscribe (v0.3.0) ----
+    // Send the full RREF subscription set. Called both at startup AND
+    // periodically from the worker loop whenever we're not Connected,
+    // so we recover from:
+    //   * AeroACARS started before X-Plane (initial subscribe lands on
+    //     a closed port, no-one to receive it)
+    //   * Pilot quits X-Plane and starts a fresh instance — the new
+    //     X-Plane has no record of our subscription
+    //   * X-Plane crashed and was restarted by the pilot
+    //   * Pilot loads a different aircraft (RREF state is preserved
+    //     usually but on some hot-reload paths gets lost)
+    // The subscribe is idempotent on X-Plane's side — duplicate
+    // RREF requests at the same index just refresh the rate.
+    let send_all_subscriptions = |sock: &UdpSocket| {
+        for (i, entry) in CATALOG.iter().enumerate() {
+            let req = encode_request(SUBSCRIPTION_HZ as i32, i as i32, entry.name);
+            if let Err(e) = sock.send_to(&req, &xplane_addr) {
+                tracing::trace!(
+                    error = %e,
+                    dataref = entry.name,
+                    "RREF subscribe send failed (will retry on next tick)"
+                );
+            }
         }
-    }
+    };
+
+    // Initial subscribe — most of the time X-Plane is already running
+    // and this is the only call needed.
+    send_all_subscriptions(&socket);
 
     // Listen.
     let mut buf = vec![0u8; 8192];
     let mut last_packet_at: Option<Instant> = None;
+    let mut last_resubscribe_at = Instant::now();
+    /// How often to re-send the full subscription set while we're
+    /// not yet Connected. 5 seconds matches `STALE_TIMEOUT` so the
+    /// recovery feels coherent. Faster would spam X-Plane on cold-
+    /// start; slower would feel laggy after the pilot restarts the
+    /// sim.
+    const RESUBSCRIBE_INTERVAL: Duration = Duration::from_secs(5);
+
     while !shared.stop.load(Ordering::SeqCst) {
         match socket.recv_from(&mut buf) {
             Ok((n, _peer)) => {
@@ -332,7 +361,8 @@ fn run_listener(shared: Arc<AdapterShared>) {
                 }
             }
             Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {
-                // No data this tick — check stale timeout below, then loop.
+                // No data this tick — check stale timeout + resubscribe-
+                // due timer below, then loop.
             }
             Err(e) => {
                 tracing::warn!(error = %e, "X-Plane UDP recv error");
@@ -371,6 +401,23 @@ fn run_listener(shared: Arc<AdapterShared>) {
                 // Reset so we don't fire the warning every tick.
                 last_packet_at = None;
             }
+        }
+
+        // ---- Hard-armoured re-subscribe poll (v0.3.0) ----
+        // Whenever we're not Connected, periodically resend the full
+        // subscription set. This covers the "AeroACARS started before
+        // X-Plane" case (where last_packet_at is still None and the
+        // stale-timeout block above never fires) AND the "X-Plane was
+        // restarted" case (where the new X-Plane instance has no
+        // record of our subscription). Pilot does not need to touch
+        // any UI button — connection just comes back.
+        let state_now = *shared.state.lock().unwrap();
+        if state_now != ConnectionState::Connected
+            && last_resubscribe_at.elapsed() >= RESUBSCRIBE_INTERVAL
+        {
+            tracing::debug!("X-Plane: not connected — re-sending RREF subscriptions");
+            send_all_subscriptions(&socket);
+            last_resubscribe_at = Instant::now();
         }
     }
 

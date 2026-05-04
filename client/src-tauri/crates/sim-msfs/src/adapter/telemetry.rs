@@ -1159,6 +1159,13 @@ fn telemetry_to_snapshot(t: Telemetry, simulator: Simulator) -> SimSnapshot {
         pitot_heat: Some(pitot_heat),
         engine_anti_ice: Some(engine_anti_ice),
         wing_anti_ice: Some(wing_anti_ice),
+        // v0.3.0: filled by the PMDG snapshot()-merge layer when a
+        // PMDG aircraft is loaded. Standard MSFS SimVars don't expose
+        // these as separate fields, so they stay None for non-PMDG.
+        light_wing: None,
+        light_wheel_well: None,
+        xpdr_mode_label: None,
+        takeoff_config_warning: None,
         seatbelts_sign,
         no_smoking_sign,
         fcu_selected_altitude_ft: fcu_alt,
