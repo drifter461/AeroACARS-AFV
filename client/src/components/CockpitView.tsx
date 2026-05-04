@@ -4,7 +4,10 @@ import { invoke } from "@tauri-apps/api/core";
 import type { ActiveFlightInfo, LoginResult, SimSnapshot } from "../types";
 import { ResumeFlightBanner } from "./ResumeFlightBanner";
 import { ActiveFlightPanel } from "./ActiveFlightPanel";
-import { LoadsheetMonitor } from "./LoadsheetMonitor";
+// v0.3.0: LoadsheetMonitor wird jetzt direkt im ActiveFlightPanel
+// gerendert (zwischen InfoStrip und WeatherBriefing), damit das
+// Loadsheet visuell zum aktiven Flug gehört statt als getrennte
+// Section unter dem WeatherBriefing zu hängen.
 import { DivertBanner } from "./DivertBanner";
 
 interface Props {
@@ -125,12 +128,8 @@ export function CockpitView({
         />
       )}
 
-      {/* Live-Loadsheet (v0.3.0) — sichtbar während Boarding/Preflight,
-          verschwindet automatisch ab TaxiOut/Pushback. Komponente
-          rendert null wenn weder Plan- noch Live-Werte verfügbar. */}
-      {!activeFlight.was_just_resumed && (
-        <LoadsheetMonitor info={activeFlight} />
-      )}
+      {/* Live-Loadsheet wird seit v0.3.0 direkt im ActiveFlightPanel
+          gerendert — siehe Import-Kommentar oben. */}
     </>
   );
 }

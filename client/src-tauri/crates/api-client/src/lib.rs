@@ -402,6 +402,24 @@ pub struct SimBriefOfp {
     /// Maximum Landing Weight. Bei Overshoot droht Fuel-Dumping
     /// oder Overweight-Landing-Inspektion.
     pub max_ldw_kg: f32,
+    // ---- OFP-Identitätsfelder (v0.3.0) ----
+    // Damit der Pilot bei Mismatch sieht WORAUF der SimBrief-OFP
+    // tatsächlich basiert (Flight-Number, Origin, Destination, wann
+    // erstellt). Hilft die "Plan ist von gestern"-Verwirrung
+    // aufzulösen — SimBrief liefert immer den letzten OFP des
+    // Pilot-Accounts, ohne dass das mit der aktuellen Buchung
+    // verknüpft ist.
+    /// Flight-Number aus dem OFP (z.B. "DLH123" oder "RYR100").
+    /// Empty wenn das XML keine atc.callsign / general.flight_number
+    /// hatte.
+    pub ofp_flight_number: String,
+    /// Origin-ICAO aus dem OFP (z.B. "LOWS"). Empty wenn nicht im XML.
+    pub ofp_origin_icao: String,
+    /// Destination-ICAO aus dem OFP (z.B. "EDDB"). Empty wenn nicht.
+    pub ofp_destination_icao: String,
+    /// Wann der OFP erstellt wurde (Unix-Timestamp als String aus
+    /// dem XML, oder ISO-Datum). Empty wenn nicht im XML.
+    pub ofp_generated_at: String,
 }
 
 /// Single navlog fix from a SimBrief OFP. `kind` carries the SimBrief
@@ -1258,7 +1276,14 @@ fn parse_simbrief_ofp(xml: &str) -> Option<SimBriefOfp> {
         return None;
     }
     let plan_ramp = parse_f("plan_ramp").map(to_kg).unwrap_or(0.0);
-    let est_burn = parse_f("est_burn").map(to_kg).unwrap_or(0.0);
+    // Trip-Burn: SimBrief liefert das als `<enroute_burn>` unter
+    // `<fuel>` — der reine Verbrauch von Takeoff bis Touchdown.
+    // Fallback auf `<est_burn>` falls ein älteres SimBrief-Schema
+    // den Tag anders genannt hat (sicherheitshalber).
+    let est_burn = parse_f("enroute_burn")
+        .or_else(|| parse_f("est_burn"))
+        .map(to_kg)
+        .unwrap_or(0.0);
     let reserve = parse_f("reserve").map(to_kg).unwrap_or(0.0);
     // v0.3.0: MAX-Werte aus dem Aircraft-Performance-Block des OFP.
     // SimBrief liefert die in `<max_zfw>` / `<max_tow>` / `<max_ldw>`
@@ -1267,6 +1292,32 @@ fn parse_simbrief_ofp(xml: &str) -> Option<SimBriefOfp> {
     let max_zfw = parse_f("max_zfw").map(to_kg).unwrap_or(0.0);
     let max_tow = parse_f("max_tow").map(to_kg).unwrap_or(0.0);
     let max_ldw = parse_f("max_ldw").map(to_kg).unwrap_or(0.0);
+    // v0.3.0: OFP-Identitätsfelder. SimBrief liefert always den
+    // letzten OFP des Pilot-Accounts — wenn der nicht zur aktuellen
+    // Buchung passt, wollen wir das im Frontend deutlich anzeigen.
+    // Flight-Number meist als `<atc><callsign>`, Origin/Destination
+    // direkt als nested `<origin><icao_code>` und `<destination>...`.
+    let extract_str = |tag: &str| -> String {
+        extract_tag(xml, tag)
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
+    };
+    let ofp_flight_number = extract_tag(xml, "atc")
+        .and_then(|inner| extract_tag(inner, "callsign"))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| extract_str("flight_number"));
+    let ofp_origin_icao = extract_tag(xml, "origin")
+        .and_then(|inner| extract_tag(inner, "icao_code"))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let ofp_destination_icao = extract_tag(xml, "destination")
+        .and_then(|inner| extract_tag(inner, "icao_code"))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let ofp_generated_at = extract_tag(xml, "params")
+        .and_then(|inner| extract_tag(inner, "time_generated"))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| extract_str("time_generated"));
     let route = extract_tag(xml, "route")
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
@@ -1296,6 +1347,10 @@ fn parse_simbrief_ofp(xml: &str) -> Option<SimBriefOfp> {
         max_zfw_kg: max_zfw,
         max_tow_kg: max_tow,
         max_ldw_kg: max_ldw,
+        ofp_flight_number,
+        ofp_origin_icao,
+        ofp_destination_icao,
+        ofp_generated_at,
     })
 }
 

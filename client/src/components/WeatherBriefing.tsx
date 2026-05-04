@@ -38,6 +38,82 @@ function fmtVisibilityKm(meters: number | null): string {
   return km >= 10 ? "≥ 10 km" : `${km.toFixed(1)} km`;
 }
 
+/**
+ * Sichtweite aus dem METAR-Rohtext fischen, wenn der Backend-Parser
+ * sie nicht geliefert hat (`visibility_m === null`). Real-life-Fälle
+ * 2026-05: "9999" = ≥ 10 km, "CAVOK" = visibility ≥ 10 km + no clouds
+ * unter 5000 ft, "10SM" = 10 statute miles, "1500" = 1500 m. Wir
+ * parsen nur die häufigsten Tokens.
+ */
+function fmtVisibilityFromRaw(raw: string | null): string {
+  if (!raw) return "—";
+  if (/\bCAVOK\b/.test(raw)) return "CAVOK";
+  // 4-stelliges m-Format wie "9999" oder "1500" — nach dem WIND-Token.
+  const mMatch = raw.match(/\b(\d{4})\b/);
+  if (mMatch) {
+    const m = Number.parseInt(mMatch[1]!, 10);
+    if (m === 9999) return "≥ 10 km";
+    return `${(m / 1000).toFixed(1)} km`;
+  }
+  // US-Format "10SM"
+  const sm = raw.match(/\b(\d+)SM\b/);
+  if (sm) return `${sm[1]} SM`;
+  return "—";
+}
+
+/**
+ * Wetter-Phänomene aus METAR-WX-Codes ableiten (RA = Regen, SN = Schnee,
+ * TS = Gewitter, FG = Nebel, etc.) plus Bewölkungs-Indikator.
+ * Liefert ein kompaktes Icon + kurze Beschreibung — z.B. "🌦 -RA",
+ * "⛈ TSRA", "☁ OVC".
+ *
+ * Real-WX-Codes:
+ *   - Intensität: `-` leicht, kein Prefix mässig, `+` stark
+ *   - Beschreibungen: SH=Schauer, TS=Gewitter, FZ=gefrierend, BL=blowing
+ *   - Niederschlag: RA=Regen, SN=Schnee, GR=Hagel, GS=Graupel, DZ=Niesel
+ *   - Sicht: FG=Nebel, BR=Dunst, HZ=Diesig
+ *
+ * Wenn kein WX-Code: höchste Bewölkungsschicht als Indikator.
+ */
+function extractWeatherPhenomena(raw: string | null): {
+  icon: string;
+  label: string;
+} | null {
+  if (!raw) return null;
+  // Pattern: optional ± Intensität, optionale Descriptor, dann WX-Code
+  const wxRegex =
+    /\b([+-]?)(VC|RE)?(MI|PR|BC|DR|BL|SH|TS|FZ)?(DZ|RA|SN|SG|IC|PL|GR|GS|UP|FG|BR|HZ|FU|VA|DU|SA|PY|SQ|PO|FC|SS|DS)\b/;
+  const match = raw.match(wxRegex);
+  if (match) {
+    const intensity = match[1] || "";
+    const descriptor = match[3] || "";
+    const phenomenon = match[4] || "";
+    const code = `${intensity}${descriptor}${phenomenon}`;
+
+    // Icon-Mapping nach Phänomen + Descriptor
+    let icon = "🌫"; // default für FG/BR/HZ
+    if (descriptor === "TS") icon = "⛈";
+    else if (descriptor === "SH") icon = phenomenon === "SN" ? "🌨" : "🌦";
+    else if (phenomenon === "RA" || phenomenon === "DZ") icon = "🌧";
+    else if (phenomenon === "SN" || phenomenon === "SG") icon = "❄";
+    else if (phenomenon === "GR" || phenomenon === "GS" || phenomenon === "PL")
+      icon = "🌨";
+    else if (phenomenon === "FG") icon = "🌫";
+    else if (phenomenon === "BR" || phenomenon === "HZ") icon = "🌁";
+    else if (phenomenon === "TS") icon = "⛈";
+    return { icon, label: code };
+  }
+  // Kein WX-Code → Bewölkung als Indikator
+  if (/\bSKC\b|\bCLR\b|\bNCD\b|\bNSC\b/.test(raw)) {
+    return { icon: "☀", label: "klar" };
+  }
+  if (/\bOVC\d/.test(raw)) return { icon: "☁", label: "OVC" };
+  if (/\bBKN\d/.test(raw)) return { icon: "🌥", label: "BKN" };
+  if (/\bSCT\d/.test(raw)) return { icon: "⛅", label: "SCT" };
+  if (/\bFEW\d/.test(raw)) return { icon: "🌤", label: "FEW" };
+  return null;
+}
+
 function fmtWind(
   direction: number | null,
   speed: number | null,
@@ -49,7 +125,16 @@ function fmtWind(
   return `${dir} / ${speed.toFixed(0)}${gustPart} kt`;
 }
 
-function MetarCard({
+/**
+ * Kompakte Inline-Zeile pro Airport (v0.3.0):
+ *   ABFLUG  EDDW  300°/5 kt  9999  18°/11°  1013 hPa  [▸ METAR]
+ *
+ * Die wichtigsten Werte (Wind / Sicht / Temp+Dew / QNH) inline,
+ * der vollständige METAR-Text aufklappbar. Spart ~80 % Höhe gegenüber
+ * der alten 2-Card-mit-Sub-Grid-Variante (die WIND/SICHT/TEMP/QNH
+ * sowohl als Sub-Grid als auch implizit im METAR-Text hatte).
+ */
+function MetarRow({
   label,
   state,
 }: {
@@ -57,52 +142,78 @@ function MetarCard({
   state: MetarFetchState;
 }) {
   const { t } = useTranslation();
+  const [showRaw, setShowRaw] = useState(false);
+
   if (state.kind === "loading") {
     return (
-      <div className="weather-card weather-card--loading">
-        <h3 className="weather-card__label">{label}</h3>
-        <p className="weather-card__hint">{t("weather.loading")}</p>
+      <div className="weather-row weather-row--loading">
+        <span className="weather-row__label">{label}</span>
+        <span className="weather-row__hint">{t("weather.loading")}</span>
       </div>
     );
   }
   if (state.kind === "error") {
     return (
-      <div className="weather-card weather-card--error">
-        <h3 className="weather-card__label">{label}</h3>
-        <p className="weather-card__hint">{state.error ?? t("weather.error")}</p>
+      <div className="weather-row weather-row--error">
+        <span className="weather-row__label">{label}</span>
+        <span className="weather-row__hint">
+          {state.error ?? t("weather.error")}
+        </span>
       </div>
     );
   }
   const m = state.data!;
+  // Sicht: Backend liefert manchmal null (Parser ignoriert "9999" oder
+  // CAVOK). Fallback aus dem Raw-METAR parsen damit der Pilot wenigstens
+  // die wichtigsten Sichtwerte ("≥ 10 km" / "CAVOK") sieht.
+  const visibilityLabel =
+    m.visibility_m != null
+      ? fmtVisibilityKm(m.visibility_m)
+      : fmtVisibilityFromRaw(m.raw);
+  // Wetter-Phänomene: aus METAR-Rawtext extrahieren + Icon-Mapping.
+  // Beispiele: 🌦 -SHRA (leichter Regenschauer), ⛈ TSRA (Gewitterregen),
+  // 🌫 FG (Nebel), ☁ OVC (bedeckt). Wenn nichts erkannt → kein Element.
+  const wx = extractWeatherPhenomena(m.raw);
   return (
-    <div className="weather-card">
-      <header className="weather-card__header">
-        <h3 className="weather-card__label">{label}</h3>
-        <span className="weather-card__icao">{m.icao}</span>
-      </header>
-      <p className="weather-card__raw">{m.raw || "—"}</p>
-      <dl className="weather-card__stats">
-        <div>
-          <dt>{t("weather.wind")}</dt>
-          <dd>{fmtWind(m.wind_direction_deg, m.wind_speed_kt, m.gust_kt)}</dd>
-        </div>
-        <div>
-          <dt>{t("weather.visibility")}</dt>
-          <dd>{fmtVisibilityKm(m.visibility_m)}</dd>
-        </div>
-        <div>
-          <dt>{t("weather.temp_dew")}</dt>
-          <dd>
-            {m.temperature_c != null ? `${m.temperature_c.toFixed(0)}°` : "—"}
-            {" / "}
-            {m.dewpoint_c != null ? `${m.dewpoint_c.toFixed(0)}°` : "—"}
-          </dd>
-        </div>
-        <div>
-          <dt>{t("weather.qnh")}</dt>
-          <dd>{m.qnh_hpa != null ? `${m.qnh_hpa.toFixed(0)} hPa` : "—"}</dd>
-        </div>
-      </dl>
+    <div className="weather-row">
+      <span className="weather-row__label">{label}</span>
+      <span className="weather-row__icao">{m.icao}</span>
+      <span className="weather-row__cell" title="Wind">
+        {fmtWind(m.wind_direction_deg, m.wind_speed_kt, m.gust_kt)}
+      </span>
+      <span className="weather-row__sep" aria-hidden="true">·</span>
+      <span className="weather-row__cell" title="Sicht / Visibility">
+        👁 {visibilityLabel}
+      </span>
+      <span className="weather-row__sep" aria-hidden="true">·</span>
+      <span className="weather-row__cell" title="Temperatur / Taupunkt">
+        {m.temperature_c != null ? `${m.temperature_c.toFixed(0)}°` : "—"}
+        {" / "}
+        {m.dewpoint_c != null ? `${m.dewpoint_c.toFixed(0)}°` : "—"}
+      </span>
+      <span className="weather-row__sep" aria-hidden="true">·</span>
+      <span className="weather-row__cell" title="QNH / Druck">
+        {m.qnh_hpa != null ? `${m.qnh_hpa.toFixed(0)} hPa` : "—"}
+      </span>
+      {wx && (
+        <span
+          className="weather-row__wx"
+          title={`Wetterphänomen: ${wx.label}`}
+        >
+          {wx.icon} {wx.label}
+        </span>
+      )}
+      <button
+        type="button"
+        className="weather-row__toggle"
+        onClick={() => setShowRaw((v) => !v)}
+        aria-expanded={showRaw}
+      >
+        {showRaw ? "▾" : "▸"} METAR
+      </button>
+      {showRaw && m.raw && (
+        <pre className="weather-row__raw">{m.raw}</pre>
+      )}
     </div>
   );
 }
@@ -167,9 +278,9 @@ export function WeatherBriefing({ dptIcao, arrIcao }: Props) {
           {refreshing ? "…" : "⟳"} <span>{t("weather.refresh")}</span>
         </button>
       </header>
-      <div className="weather-briefing__cards">
-        <MetarCard label={t("weather.departure")} state={dpt} />
-        <MetarCard label={t("weather.arrival")} state={arr} />
+      <div className="weather-briefing__rows">
+        <MetarRow label={t("weather.departure")} state={dpt} />
+        <MetarRow label={t("weather.arrival")} state={arr} />
       </div>
     </section>
   );

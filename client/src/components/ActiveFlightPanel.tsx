@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import type { ActiveFlightInfo, SimSnapshot } from "../types";
 import { InfoStrip } from "./InfoStrip";
 import { LiveTapes } from "./LiveTapes";
+import { LoadsheetMonitor } from "./LoadsheetMonitor";
 import { ManualFileDialog } from "./ManualFileDialog";
 import { RouteMap } from "./RouteMap";
 import { WeatherBriefing } from "./WeatherBriefing";
@@ -197,14 +198,20 @@ export function ActiveFlightPanel({ info, simSnapshot, onEnded }: Props) {
         </div>
       </header>
 
-      <RouteMap
-        dptIcao={info.dpt_airport}
-        arrIcao={info.arr_airport}
-        currentLat={simSnapshot?.lat ?? null}
-        currentLon={simSnapshot?.lon ?? null}
-        dptGate={info.dep_gate}
-        arrGate={info.arr_gate}
-      />
+      {/* v0.3.0: RouteMap (Progress-Bar EDDW [✈] EGSS 0%) erst ab
+          Pushback einblenden. Vor Pushback ist 0 % Strecke logisch
+          unsinnig und verschwendet vertikalen Platz. Tachos bleiben
+          dagegen drin (User-Wunsch — nur 10 % kleiner). */}
+      {info.phase !== "preflight" && info.phase !== "boarding" && (
+        <RouteMap
+          dptIcao={info.dpt_airport}
+          arrIcao={info.arr_airport}
+          currentLat={simSnapshot?.lat ?? null}
+          currentLon={simSnapshot?.lon ?? null}
+          dptGate={info.dep_gate}
+          arrGate={info.arr_gate}
+        />
+      )}
 
       <LiveTapes snapshot={simSnapshot ?? null} />
 
@@ -216,6 +223,11 @@ export function ActiveFlightPanel({ info, simSnapshot, onEnded }: Props) {
           Math.floor((Date.now() - new Date(info.started_at).getTime()) / 60000),
         )}
       />
+
+      {/* v0.3.0: Loadsheet direkt unter dem InfoStrip — gehört zum
+          aktiven Flug, deshalb im selben Container. Verschwindet von
+          alleine ab TaxiOut/Pushback (siehe LoadsheetMonitor). */}
+      <LoadsheetMonitor info={info} />
 
       <WeatherBriefing dptIcao={info.dpt_airport} arrIcao={info.arr_airport} />
 

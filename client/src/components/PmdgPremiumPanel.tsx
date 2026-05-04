@@ -1,7 +1,11 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTranslation } from "react-i18next";
-import type { PmdgStatus } from "../types";
+import type {
+  PmdgStatus,
+  SimConnectionState,
+  SimSnapshot,
+} from "../types";
 
 /**
  * Settings → Debug: PMDG SDK status card.
@@ -13,16 +17,28 @@ import type { PmdgStatus } from "../types";
  *  2. **Active** (variant detected, data flowing) — green badge,
  *     shows variant + last-packet age. This is the happy path.
  *  3. **SDK disabled** (variant detected, subscribed, no packets
- *     for >5s) — amber warning with the exact instructions to
- *     enable the SDK in the pilot's `737NG3_Options.ini` /
- *     `777X_Options.ini`.
+ *     for >5s, AND the sim is fully connected — see `simState` prop)
+ *     — amber warning with the exact instructions to enable the SDK.
+ *
+ * v0.3.0: Die Warnung wird NUR angezeigt wenn `simState === "connected"`
+ * — sonst sieht der Pilot beim App-Start (Sim noch im Loading) eine
+ * irreführende "SDK nicht aktiviert"-Warnung obwohl einfach noch keine
+ * Daten fließen können.
  *
  * Polls `pmdg_status` every 2s — cheap, the Tauri command just
  * reads a mutex on the adapter side.
  *
  * Phase H.4 / v0.2.0 — Boeing Premium Telemetry.
  */
-export function PmdgPremiumPanel() {
+interface Props {
+  simState: SimConnectionState;
+  /** Latest sim snapshot — used to detect "aircraft fully loaded"
+   *  state. PMDG NG3 takes 20-60s to initialize after MSFS shows the
+   *  cockpit; firing the SDK warning earlier than that is misleading. */
+  simSnapshot: SimSnapshot | null;
+}
+
+export function PmdgPremiumPanel({ simState, simSnapshot }: Props) {
   const { t } = useTranslation();
   const [status, setStatus] = useState<PmdgStatus | null>(null);
 
@@ -54,7 +70,32 @@ export function PmdgPremiumPanel() {
         ? "PMDG 777X"
         : null;
 
-  const stateClass = status.looks_like_sdk_disabled
+  // v0.3.0: SDK-Warnung erst wenn ALLE Vorbedingungen erfüllt sind:
+  //   1. Sim ist tatsächlich Connected (nicht nur Connecting)
+  //   2. Aircraft ist im MSFS fertig geladen (Sim liefert sinnvolle
+  //      Snapshot-Daten — fuel + aircraft_title gesetzt). PMDG NG3
+  //      braucht beim Cold-Start 20-60s bis das ClientData fließt;
+  //      vorher würde die Warnung fälschlich fired werden.
+  //   3. Backend's looks_like_sdk_disabled (variant + subscribed +
+  //      !ever_received + stale > 5s)
+  //   4. ZUSÄTZLICH eine UI-seitige Geduld von 20s nach Aircraft-Load
+  //      damit ein langsam initialisierendes PMDG nicht False-Positiv
+  //      gibt.
+  const simConnected = simState === "connected";
+  // "Aircraft fully loaded" Heuristik: MSFS-Snapshot hat ein Aircraft-
+  // Title UND Fuel/Weight-Werte (= Aircraft-Modell ist initialisiert,
+  // nicht nur Welt-Loading-Screen).
+  const aircraftLoaded =
+    !!simSnapshot &&
+    !!simSnapshot.aircraft_title &&
+    simSnapshot.fuel_total_kg > 0;
+  const staleSecs = status.stale_secs ?? Number.MAX_SAFE_INTEGER;
+  const showSdkWarning =
+    status.looks_like_sdk_disabled &&
+    simConnected &&
+    aircraftLoaded &&
+    staleSecs >= 20;
+  const stateClass = showSdkWarning
     ? "pmdg-panel--warn"
     : status.ever_received
       ? "pmdg-panel--active"
@@ -95,7 +136,7 @@ export function PmdgPremiumPanel() {
       )}
 
       {/* PMDG loaded but SDK probably not enabled */}
-      {variantLabel && status.looks_like_sdk_disabled && (
+      {variantLabel && showSdkWarning && (
         <div className="pmdg-panel__warning">
           <p className="pmdg-panel__warning-title">
             ⚠️ {t("pmdg_panel.sdk_disabled_title")}
@@ -124,7 +165,7 @@ EnableDataBroadcast=1`}
       )}
 
       {/* Active — data flowing */}
-      {variantLabel && status.ever_received && !status.looks_like_sdk_disabled && (
+      {variantLabel && status.ever_received && !showSdkWarning && (
         <div className="pmdg-panel__active">
           <div className="pmdg-panel__metrics">
             <div className="pmdg-panel__metric">
@@ -148,12 +189,44 @@ EnableDataBroadcast=1`}
         </div>
       )}
 
-      {/* Subscribed but no data yet (recent — give it a few seconds) */}
-      {variantLabel && !status.ever_received && !status.looks_like_sdk_disabled && (
+      {/* Der frühere "waiting"-Hint (subscribed but no data) wurde
+          v0.3.0 in drei spezifischere Hints aufgesplittet: waiting_for_sim,
+          waiting_for_aircraft, waiting_init — siehe unten. */}
+
+      {/* v0.3.0: Sim noch nicht verbunden — keine SDK-Bewertung möglich.
+          Statt der irreführenden "SDK nicht aktiviert"-Warnung zeigen
+          wir hier einen klaren "warte auf Sim"-Hint. */}
+      {variantLabel && !simConnected && (
         <p className="pmdg-panel__hint">
-          {t("pmdg_panel.waiting")}
+          {t("pmdg_panel.waiting_for_sim")}
         </p>
       )}
+
+      {/* v0.3.0: Sim verbunden, aber Aircraft noch nicht voll geladen
+          (MSFS Welt-/Aircraft-Loading-Screen). PMDG braucht 20-60s
+          bis es ClientData liefert — solange zeigen wir keinen
+          False-Positive sondern einen "Aircraft lädt"-Hint. */}
+      {variantLabel && simConnected && !aircraftLoaded && (
+        <p className="pmdg-panel__hint">
+          {t("pmdg_panel.waiting_for_aircraft")}
+        </p>
+      )}
+
+      {/* Aircraft geladen, subscribed, aber noch keine Daten —
+          und Geduld noch nicht aufgebraucht (< 20s seit Subscribe).
+          Eigene Zeile, sonst wäre's "kein Hint sichtbar" während der
+          Init-Phase. */}
+      {variantLabel
+        && simConnected
+        && aircraftLoaded
+        && !status.ever_received
+        && !showSdkWarning && (
+          <p className="pmdg-panel__hint">
+            {t("pmdg_panel.waiting_init", {
+              secs: Math.max(0, 20 - staleSecs),
+            })}
+          </p>
+        )}
     </section>
   );
 }

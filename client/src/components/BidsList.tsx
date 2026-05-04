@@ -4,6 +4,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useTranslation } from "react-i18next";
 import type {
   ActiveFlightInfo,
+  AircraftInfo,
   AirportInfo,
   Bid,
   Flight,
@@ -556,8 +557,17 @@ export function BidsList({
                     </div>
                   </button>
 
-                  {/* Always-visible action row so the user can see how to start
-                      a flight without first clicking to expand the card. */}
+                  {/* v0.3.0: Bid-Details (Aircraft + SimBrief-Plan + Route)
+                      ZUERST — die wichtigen Plan-Werte vor den Action-
+                      Buttons, damit der Pilot den Plan sieht bevor er auf
+                      "Flug starten" klickt. Bei GSG kann der Pilot eh nur
+                      einen Flug buchen, also immer sichtbar. */}
+                  <BidDetails flight={f} />
+                  {isSelected && null}
+
+                  {/* Action-Zeile am Ende — Flug starten / OFP / Flugseite.
+                      Bewusst NACH den Plan-Werten, damit der Pilot zuerst
+                      den OFP-Plan im Blick hat und dann entscheidet. */}
                   <div className="bid-card__actions">
                     <button
                       type="button"
@@ -608,10 +618,6 @@ export function BidsList({
                       {startError.message}
                     </p>
                   )}
-
-                  {isSelected && (
-                    <BidDetails flight={f} />
-                  )}
                 </article>
               </li>
             );
@@ -638,6 +644,11 @@ function BidDetails({ flight }: { flight: Flight }) {
   const [plan, setPlan] = useState<SimBriefOfp | null>(null);
   const [planError, setPlanError] = useState<string | null>(null);
   const [planLoading, setPlanLoading] = useState(false);
+  // v0.3.0: Aircraft-Reg — wenn die simbrief.aircraft_id vorhanden ist,
+  // holen wir die konkrete Registrierung (z.B. "EI-ENI") über einen
+  // separaten phpVMS-API-Call. Subfleet alleine sagt nur die Type-Klasse,
+  // nicht das konkrete Flugzeug.
+  const [aircraft, setAircraft] = useState<AircraftInfo | null>(null);
 
   // OFP-Vorschau bei Bid-Selection holen. Nur einmal pro Render-Lifetime.
   useEffect(() => {
@@ -658,6 +669,16 @@ function BidDetails({ flight }: { flight: Flight }) {
       .finally(() => setPlanLoading(false));
   }, [flight.simbrief?.id, t]);
 
+  // Aircraft-Reg holen wenn verfügbar. Fail silent (Pilot sieht halt nur
+  // Subfleet-Name ohne Reg, kein Spam).
+  useEffect(() => {
+    const acId = flight.simbrief?.aircraft_id;
+    if (!acId) return;
+    invoke<AircraftInfo>("phpvms_get_aircraft", { aircraftId: acId })
+      .then(setAircraft)
+      .catch(() => setAircraft(null));
+  }, [flight.simbrief?.aircraft_id]);
+
   // Pax + Cargo aus den Fares zusammenrechnen.
   const fares = flight.simbrief?.subfleet?.fares ?? [];
   const paxCount = fares
@@ -670,50 +691,217 @@ function BidDetails({ flight }: { flight: Flight }) {
   const aircraftType = flight.simbrief?.subfleet?.type_;
   const aircraftName = flight.simbrief?.subfleet?.name;
 
+  // v0.3.0: SimBrief-OFP-Mismatch-Detection (mehrere Signale).
+  // Hintergrund: SimBrief liefert IMMER den letzten OFP des Pilot-
+  // Accounts, egal ob der zur aktuellen phpVMS-Buchung passt. Wenn
+  // der Pilot vergessen hat einen frischen OFP zu erstellen, sieht
+  // er hier evtl. den Plan vom Vortag (falsche Airline/Aircraft/
+  // Route). Wir prüfen mehrere Signale:
+  //
+  //   1. **Aircraft-Type:** OFP-Subfleet-ICAO vs. Bid-Aircraft-ICAO
+  //      (z.B. OFP "A320" vs. Bid "B738")
+  //   2. **Origin-Airport:** OFP-Origin vs. Bid-Departure (z.B. OFP
+  //      "EDDF" vs. Bid "LOWS")
+  //   3. **Destination-Airport:** dasselbe für Arrival
+  //   4. **Flight-Number:** OFP-Callsign vs. Bid-Flightnumber (mit
+  //      Airline-ICAO-Präfix; "RYR100" vs. "DLH123")
+  //
+  // Mindestens EIN klares Mismatch-Signal → Banner. Mehrere Signale
+  // → eindeutig falscher OFP.
+  const ofpAcIcao = aircraftType?.toUpperCase().trim();
+  const bidAcIcao = aircraft?.icao?.toUpperCase().trim();
+  const acTypeMismatch =
+    !!ofpAcIcao && !!bidAcIcao && ofpAcIcao !== bidAcIcao;
+
+  const ofpOrigin = plan?.ofp_origin_icao?.toUpperCase().trim() ?? "";
+  const ofpDest = plan?.ofp_destination_icao?.toUpperCase().trim() ?? "";
+  const bidDpt = flight.dpt_airport_id.toUpperCase().trim();
+  const bidArr = flight.arr_airport_id.toUpperCase().trim();
+  const originMismatch = !!ofpOrigin && ofpOrigin !== bidDpt;
+  const destMismatch = !!ofpDest && ofpDest !== bidArr;
+
+  // Flight-Number: Bid hat MEHRERE mögliche Formate die als Match
+  // gelten sollen, weil viele Piloten einen individuellen ATC-
+  // Callsign nutzen statt der reinen Flight-Number:
+  //   1. Direkt: Bid-Flight-Number (z.B. "FR100" oder "100")
+  //   2. ICAO-Format: Airline-ICAO + Flight-Number (z.B. "RYR100")
+  //   3. ATC-Callsign direkt (z.B. wenn Bid bereits "RYR4TK" speichert)
+  //   4. ATC-Callsign **mit Airline-Prefix**: phpVMS speichert oft
+  //      nur den Suffix ("4TK"), Airline-ICAO kommt separat — Match
+  //      gegen "RYR" + "4TK" = "RYR4TK". Real-life-Pattern.
+  // Mismatch nur wenn der OFP-Callsign zu KEINEM dieser Formate passt.
+  const ofpFnum = plan?.ofp_flight_number?.toUpperCase().replace(/\s/g, "") ?? "";
+  const bidAirlineIcao = flight.airline?.icao?.toUpperCase().trim() ?? "";
+  const bidFnum = flight.flight_number.toUpperCase().replace(/\s/g, "");
+  const bidCallsign = flight.callsign?.toUpperCase().replace(/\s/g, "") ?? "";
+  const fnumMatchesIcao =
+    !!bidAirlineIcao &&
+    ofpFnum === `${bidAirlineIcao}${bidFnum.replace(/^[A-Z]+/, "")}`;
+  const fnumMatchesDirect = ofpFnum === bidFnum;
+  const fnumMatchesCallsignDirect = !!bidCallsign && ofpFnum === bidCallsign;
+  const fnumMatchesCallsignWithPrefix =
+    !!bidCallsign &&
+    !!bidAirlineIcao &&
+    ofpFnum === `${bidAirlineIcao}${bidCallsign}`;
+  const fnumMismatch =
+    !!ofpFnum
+    && !!bidFnum
+    && !fnumMatchesIcao
+    && !fnumMatchesDirect
+    && !fnumMatchesCallsignDirect
+    && !fnumMatchesCallsignWithPrefix;
+
+  // v0.3.0: Voller ATC-Callsign für die Banner-Anzeige. Wenn der Pilot
+  // im phpVMS-Bid einen Callsign-Suffix hinterlegt hat (z.B. "4TK"),
+  // ergänzen wir den Airline-Prefix damit's lesbar ist ("RYR4TK").
+  // Sonst nehmen wir was direkt im Bid steht.
+  const fullBidCallsign = bidCallsign
+    ? bidCallsign.startsWith(bidAirlineIcao)
+      ? bidCallsign
+      : `${bidAirlineIcao}${bidCallsign}`
+    : "";
+
+  // Mindestens ein Signal → Banner. Bei mehreren Signalen wird das
+  // Banner ausführlicher (mehr Details).
+  const ofpMismatch =
+    acTypeMismatch || originMismatch || destMismatch || fnumMismatch;
+
+  // Wenn weder Aircraft-Info noch SimBrief-Plan noch Route da ist,
+  // rendern wir die Sektion gar nicht (würde sonst leer aussehen).
+  const hasAircraft = !!(aircraftType || aircraftName);
+  const hasLoad = paxCount > 0 || cargoKg > 0;
+  const hasSimBriefId = !!flight.simbrief?.id;
+  const hasRoute = !!flight.route;
+  if (!hasAircraft && !hasLoad && !hasSimBriefId && !hasRoute) return null;
+
   return (
     <div className="bid-card__details">
-      {/* Aircraft-Info (wenn SimBrief-Subfleet bekannt) */}
-      {(aircraftType || aircraftName) && (
-        <div className="bid-card__aircraft">
-          <span className="bid-card__detail-label">{t("bids.aircraft")}:</span>{" "}
-          {aircraftType && <code>{aircraftType}</code>}
-          {aircraftName && <span> · {aircraftName}</span>}
+      {/* v0.3.0: Bei OFP-Mismatch sind ALLE OFP-Werte unzuverlässig
+          (Aircraft/Subfleet, Pax/Cargo aus den Fares, Plan-Block-
+          Fuel/TOW etc.). Wir blenden sie aus, um keine falschen
+          Werte zu zeigen — nur das Banner + die phpVMS-eigene Route
+          bleiben sichtbar. Pilot kennt seine Buchung, AeroACARS hat
+          nichts Verlässliches zu zeigen bis ein neuer OFP da ist. */}
+      {/* Header: Aircraft-Info + Load-Chips in einer Zeile */}
+      {!ofpMismatch && (hasAircraft || hasLoad) && (
+        <div className="bid-card__aircraft-row">
+          {hasAircraft && (
+            <div className="bid-card__aircraft">
+              <span className="bid-card__detail-label">
+                {t("bids.aircraft")}
+              </span>
+              {aircraftType && <code>{aircraftType}</code>}
+              {aircraftName && (
+                <span className="bid-card__aircraft-name">{aircraftName}</span>
+              )}
+              {/* v0.3.0: Konkrete Registrierung wenn verfügbar — z.B.
+                  "RYR-B738-WL · Boeing 737-800 · EI-ENI" */}
+              {aircraft?.registration && (
+                <span className="bid-card__aircraft-reg">
+                  {aircraft.registration}
+                </span>
+              )}
+            </div>
+          )}
+          {hasLoad && (
+            <div className="bid-card__load">
+              {paxCount > 0 && (
+                <span className="bid-card__load-chip bid-card__load-chip--pax">
+                  👥 {paxCount} PAX
+                </span>
+              )}
+              {cargoKg > 0 && (
+                <span className="bid-card__load-chip bid-card__load-chip--cargo">
+                  📦 {(cargoKg / 1000).toFixed(1)} t Cargo
+                </span>
+              )}
+            </div>
+          )}
         </div>
       )}
-      {/* Load-Chips: Pax + Cargo */}
-      {(paxCount > 0 || cargoKg > 0) && (
-        <div className="bid-card__load">
-          {paxCount > 0 && (
-            <span className="bid-card__load-chip bid-card__load-chip--pax">
-              {paxCount} PAX
+
+      {/* v0.3.0: OFP-Mismatch-Warnung. SimBrief liefert immer den
+          letzten OFP des Pilot-Accounts — wenn der zur aktuellen
+          Buchung passt, alles gut. Wenn nicht (Aircraft / Route /
+          Flightnumber abweichen), zeigen wir einen klaren Vergleich
+          und die Anleitung zum Reparieren. */}
+      {ofpMismatch && plan && (
+        <div className="bid-card__ofp-mismatch">
+          <span className="bid-card__ofp-mismatch-icon">⚠</span>
+          <div className="bid-card__ofp-mismatch-text">
+            <strong>{t("bids.ofp_mismatch_title")}</strong>
+            <div className="bid-card__ofp-compare">
+              <div>
+                <span className="bid-card__ofp-compare-label">
+                  {t("bids.ofp_mismatch_bid")}
+                </span>
+                <code>
+                  {/* Bevorzugt ATC-Callsign mit Airline-Prefix
+                      (z.B. "RYR4TK"). phpVMS speichert oft nur den
+                      Suffix, deshalb ergänzen wir den Prefix in
+                      `fullBidCallsign`. Sonst Airline-ICAO + Flight-
+                      Number als Standardformat. */}
+                  {fullBidCallsign
+                    || `${bidAirlineIcao ? `${bidAirlineIcao} ` : ""}${bidFnum}`}
+                  {" · "}
+                  {bidDpt} → {bidArr}
+                  {bidAcIcao && ` · ${bidAcIcao}`}
+                </code>
+              </div>
+              <div>
+                <span className="bid-card__ofp-compare-label">
+                  {t("bids.ofp_mismatch_ofp")}
+                </span>
+                <code>
+                  {plan.ofp_flight_number || "—"}
+                  {plan.ofp_origin_icao && plan.ofp_destination_icao &&
+                    ` · ${plan.ofp_origin_icao} → ${plan.ofp_destination_icao}`}
+                  {ofpAcIcao && ` · ${ofpAcIcao}`}
+                </code>
+              </div>
+            </div>
+            <span className="bid-card__ofp-mismatch-hint">
+              {t("bids.ofp_mismatch_hint")}
             </span>
-          )}
-          {cargoKg > 0 && (
-            <span className="bid-card__load-chip bid-card__load-chip--cargo">
-              {(cargoKg / 1000).toFixed(1)} t cargo
-            </span>
-          )}
+          </div>
         </div>
       )}
-      {/* SimBrief Plan-Vorschau: Block / Burn / Reserve / TOW / LDW / ZFW + Alternate */}
-      {flight.simbrief?.id && (
+
+      {/* SimBrief-Plan: Card-Grid mit großen Werten — bei Mismatch
+          NICHT zeigen (siehe oben Kommentar). */}
+      {!ofpMismatch && hasSimBriefId && (
         <div className="bid-card__simbrief">
-          <div className="bid-card__detail-label">
-            {t("bids.simbrief_plan")}
-            {planLoading && " …"}
+          <div className="bid-card__simbrief-header">
+            <span>📋 {t("bids.simbrief_plan")}</span>
+            {planLoading && <span className="bid-card__simbrief-loading">…</span>}
           </div>
           {plan && (
-            <div className="bid-card__simbrief-grid">
-              <PlanRow label="Block" kg={plan.planned_block_fuel_kg} />
-              <PlanRow label="Trip" kg={plan.planned_burn_kg} />
-              <PlanRow label="Reserve" kg={plan.planned_reserve_kg} />
-              <PlanRow label="TOW" kg={plan.planned_tow_kg} />
-              <PlanRow label="LDW" kg={plan.planned_ldw_kg} />
-              <PlanRow label="ZFW" kg={plan.planned_zfw_kg} />
+            <div className="bid-card__simbrief-cards">
+              {/* Reihenfolge nach EFB-Konvention:
+                  Fuel-Block: Block → Trip → Reserve
+                  Weight-Block (mathematisch ZFW + Block - Taxi = TOW,
+                  TOW - Trip = LDW): ZFW → TOW → LDW
+                  Alt am Ende */}
+              <PlanCard
+                label="Block"
+                kg={plan.planned_block_fuel_kg}
+                accent="primary"
+              />
+              <PlanCard
+                label="Trip"
+                kg={plan.planned_burn_kg}
+                accent="primary"
+              />
+              <PlanCard label="Reserve" kg={plan.planned_reserve_kg} />
+              <PlanCard label="ZFW" kg={plan.planned_zfw_kg} accent="weight" />
+              <PlanCard label="TOW" kg={plan.planned_tow_kg} accent="weight" />
+              <PlanCard label="LDW" kg={plan.planned_ldw_kg} accent="weight" />
               {plan.alternate && (
-                <div className="bid-card__simbrief-row">
-                  <span className="bid-card__simbrief-label">Alt</span>
-                  <code>{plan.alternate}</code>
+                <div className="bid-card__plan-card bid-card__plan-card--alt">
+                  <span className="bid-card__plan-card-label">Alt</span>
+                  <span className="bid-card__plan-card-value">
+                    {plan.alternate}
+                  </span>
                 </div>
               )}
             </div>
@@ -723,10 +911,11 @@ function BidDetails({ flight }: { flight: Flight }) {
           )}
         </div>
       )}
+
       {/* Route-String aus phpVMS-Bid */}
-      {flight.route && (
+      {hasRoute && (
         <div className="bid-card__route-text">
-          <span className="bid-card__route-label">{t("bids.route")}:</span>{" "}
+          <span className="bid-card__route-label">{t("bids.route")}</span>{" "}
           <code>{flight.route}</code>
         </div>
       )}
@@ -734,13 +923,28 @@ function BidDetails({ flight }: { flight: Flight }) {
   );
 }
 
-function PlanRow({ label, kg }: { label: string; kg: number }) {
+interface PlanCardProps {
+  label: string;
+  kg: number;
+  /** Visual emphasis. `primary` = Block/Trip (wichtigste), `weight` = TOW/LDW/
+   *  ZFW, default = sonst (Reserve). Treibt nur Farbe, kein Layout. */
+  accent?: "primary" | "weight";
+}
+
+function PlanCard({ label, kg, accent }: PlanCardProps) {
   if (kg <= 0) return null;
+  const accentClass =
+    accent === "primary"
+      ? "bid-card__plan-card--primary"
+      : accent === "weight"
+        ? "bid-card__plan-card--weight"
+        : "";
   return (
-    <div className="bid-card__simbrief-row">
-      <span className="bid-card__simbrief-label">{label}</span>
-      <span className="bid-card__simbrief-value">
-        {Math.round(kg).toLocaleString("de-DE")} kg
+    <div className={`bid-card__plan-card ${accentClass}`}>
+      <span className="bid-card__plan-card-label">{label}</span>
+      <span className="bid-card__plan-card-value">
+        {Math.round(kg).toLocaleString("de-DE")}
+        <span className="bid-card__plan-card-unit"> kg</span>
       </span>
     </div>
   );

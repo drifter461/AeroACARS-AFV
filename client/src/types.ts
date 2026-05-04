@@ -89,6 +89,16 @@ export interface SimBriefFare {
   type: number | null;
 }
 
+/** Aircraft details from phpVMS — fetched via `phpvms_get_aircraft` Tauri
+ *  command so the Bid-Card can show the actual reserved tail number
+ *  (e.g. "EI-ENI") instead of just the subfleet name. */
+export interface AircraftInfo {
+  id: number;
+  registration: string | null;
+  icao: string | null;
+  name: string | null;
+}
+
 /** SimBrief OFP plan values — fetched via `fetch_simbrief_preview` Tauri
  *  command before the flight starts so the Bid-Card / Briefing tab can
  *  show "your OFP says: Block 13.1t, Burn 9.2t, TOW 73.6t" before the
@@ -102,6 +112,15 @@ export interface SimBriefOfp {
   planned_ldw_kg: number;
   route: string | null;
   alternate: string | null;
+  // v0.3.0 OFP-Identität für Mismatch-Detection.
+  /** Flight-Number aus dem OFP (z.B. "DLH123" oder "RYR100"). */
+  ofp_flight_number: string;
+  /** Origin-Airport ICAO aus dem OFP (z.B. "LOWS"). */
+  ofp_origin_icao: string;
+  /** Destination-Airport ICAO aus dem OFP (z.B. "EDDB"). */
+  ofp_destination_icao: string;
+  /** Wann der OFP erstellt wurde (Unix-Timestamp als String). */
+  ofp_generated_at: string;
 }
 
 export interface Flight {

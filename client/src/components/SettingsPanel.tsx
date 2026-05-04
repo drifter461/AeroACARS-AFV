@@ -234,7 +234,10 @@ export function SettingsPanel({
           <div className="settings__debug-panel">
             <SimDebugPanel status={simStatus} />
             <PhpvmsHeartbeatDebug activeFlight={activeFlight} />
-            <PmdgPremiumPanel />
+            <PmdgPremiumPanel
+              simState={simStatus?.state ?? "disconnected"}
+              simSnapshot={simStatus?.snapshot ?? null}
+            />
           </div>
         )}
       </div>

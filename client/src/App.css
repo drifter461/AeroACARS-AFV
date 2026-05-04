@@ -11,6 +11,24 @@
   --danger: #ff453a;
   --offline: #8e8e93;
 
+  /* v0.3.0: Akzent-Farb-Tokens für Bid-Card Chips + Plan-Cards.
+     Light-Theme-Werte hier — gesättigter & dunkler damit sie auf
+     weißem Surface lesbar sind. Werden im Dark-Theme überschrieben. */
+  --chip-pax-bg: rgba(37, 99, 235, 0.1);
+  --chip-pax-text: #1d4ed8;
+  --chip-cargo-bg: rgba(234, 88, 12, 0.1);
+  --chip-cargo-text: #c2410c;
+  --chip-reg-bg: rgba(202, 138, 4, 0.1);
+  --chip-reg-border: rgba(202, 138, 4, 0.45);
+  --chip-reg-text: #a16207;
+  --plan-primary-text: #1d4ed8;
+  --plan-primary-border: rgba(37, 99, 235, 0.35);
+  --plan-primary-bg: rgba(37, 99, 235, 0.06);
+  --plan-alt-text: #6d28d9;
+  --plan-alt-border: rgba(124, 58, 237, 0.35);
+  --plan-alt-bg: rgba(124, 58, 237, 0.06);
+  --plan-card-border: rgba(148, 163, 184, 0.45);
+
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui,
     "Helvetica Neue", Arial, sans-serif;
   font-size: 14px;
@@ -27,6 +45,24 @@
   --accent: #0a84ff;
   --border: #3a3a3c;
   --offline: #636366;
+
+  /* Dark-Theme: hellere/blassere Akzent-Tokens — auf dunkler Surface
+     wirken zu satte Farben hart. */
+  --chip-pax-bg: rgba(96, 165, 250, 0.15);
+  --chip-pax-text: #93c5fd;
+  --chip-cargo-bg: rgba(251, 146, 60, 0.15);
+  --chip-cargo-text: #fdba74;
+  --chip-reg-bg: rgba(251, 191, 36, 0.12);
+  --chip-reg-border: rgba(251, 191, 36, 0.35);
+  --chip-reg-text: #fbbf24;
+  --plan-primary-text: #93c5fd;
+  --plan-primary-border: rgba(96, 165, 250, 0.4);
+  --plan-primary-bg: rgba(96, 165, 250, 0.08);
+  --plan-alt-text: #c4b5fd;
+  --plan-alt-border: rgba(168, 85, 247, 0.4);
+  --plan-alt-bg: rgba(168, 85, 247, 0.08);
+  --plan-card-border: rgba(148, 163, 184, 0.3);
+
   color-scheme: dark;
 }
 
@@ -424,11 +460,14 @@ button:disabled {
 
 /* ===== Live tapes (Cockpit) — IAS, GS, altitude, V/S, heading ===== */
 
+/* v0.3.0: ~10 % kompakter — gleiche Optik, weniger vertikaler Platz.
+   Padding 10/14 → 8/12, Wert-Schrift 22 → 20 px, Unit/Prefix/Sub
+   anteilig. Spart auf einem 5-Tachos-Strip ~10 px Höhe pro Tacho. */
 .live-tapes {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
   gap: 8px;
-  padding: 12px 0 4px;
+  padding: 10px 0 4px;
 }
 
 .live-tapes--idle .live-tape {
@@ -439,7 +478,7 @@ button:disabled {
   background: var(--surface-2);
   border: 1px solid var(--border);
   border-radius: 10px;
-  padding: 10px 14px;
+  padding: 8px 12px;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -448,7 +487,7 @@ button:disabled {
 }
 
 .live-tape__label {
-  font-size: 10px;
+  font-size: 9px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.07em;
@@ -456,7 +495,7 @@ button:disabled {
 }
 
 .live-tape__value {
-  font-size: 22px;
+  font-size: 20px;
   font-weight: 700;
   font-family: "SF Mono", "Cascadia Code", "Source Code Pro", Menlo, Consolas,
     monospace;
@@ -468,12 +507,12 @@ button:disabled {
 }
 
 .live-tape__prefix {
-  font-size: 16px;
+  font-size: 14px;
   margin-right: 2px;
 }
 
 .live-tape__unit {
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 500;
   color: var(--text-muted);
   margin-left: 2px;
@@ -482,7 +521,7 @@ button:disabled {
 }
 
 .live-tape__sub {
-  font-size: 10px;
+  font-size: 9px;
   color: var(--text-muted);
   font-family: "SF Mono", "Cascadia Code", "Source Code Pro", Menlo, Consolas,
     monospace;
@@ -2622,6 +2661,106 @@ input:disabled {
   gap: 10px;
 }
 
+/* v0.3.0: Kompaktes 1-Zeilen-Format pro Airport. ABFLUG/ANKUNFT label
+   + ICAO + Wind/Sicht/Temp/QNH inline + aufklappbarer METAR-Text.
+   Spart ~80 % Höhe gegenüber den alten weather-cards mit Sub-Grid. */
+.weather-briefing__rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.weather-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 14px;
+  padding: 6px 0;
+  font-variant-numeric: tabular-nums;
+  border-bottom: 1px dashed color-mix(in srgb, var(--border) 70%, transparent);
+}
+.weather-row:last-child {
+  border-bottom: none;
+}
+.weather-row__label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  min-width: 64px;
+}
+.weather-row__icao {
+  font-family: "SF Mono", "Cascadia Code", "Source Code Pro", Menlo, Consolas,
+    monospace;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: 0.02em;
+}
+.weather-row__cell {
+  font-family: "SF Mono", "Cascadia Code", "Source Code Pro", Menlo, Consolas,
+    monospace;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+}
+/* v0.3.0: dezenter Mittel-Punkt-Trenner zwischen Wind / Sicht / Temp /
+   QNH — verhindert dass alle Werte als zusammenhängender String wirken
+   und die Sicht-Spalte unter dem 👁-Icon untergeht. */
+.weather-row__sep {
+  color: var(--text-muted);
+  font-size: 12px;
+  opacity: 0.5;
+  user-select: none;
+}
+.weather-row__hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+/* Wetter-Phänomen-Indikator (v0.3.0): Icon + kurzer Code (z.B. "🌦 -SHRA").
+   Kompakt, wichtig genug für eigene Pille — bleibt aber visuell ruhig. */
+.weather-row__wx {
+  font-family: "SF Mono", "Cascadia Code", "Source Code Pro", Menlo, Consolas,
+    monospace;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+  padding: 1px 6px;
+  background: var(--surface-2);
+  border-radius: 4px;
+  letter-spacing: 0.02em;
+}
+.weather-row__toggle {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  margin-left: auto;
+  line-height: 1.4;
+}
+.weather-row__toggle:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.weather-row__raw {
+  width: 100%;
+  margin: 4px 0 0 0;
+  padding: 6px 8px;
+  background: var(--surface-2);
+  border-radius: 4px;
+  font-family: "SF Mono", "Cascadia Code", "Source Code Pro", Menlo, Consolas,
+    monospace;
+  font-size: 11px;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
 .weather-card {
   background: color-mix(in srgb, var(--surface-2) 60%, transparent);
   border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
@@ -3684,8 +3823,11 @@ input:disabled {
   box-shadow: 0 4px 16px color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
+/* v0.3.0: Beim Hover wird das ✈ leicht akzent-getönt — gibt einen
+   sanften Hinweis dass die Card aktiv ist, ohne das Symbol gegen
+   die Linie zu verlieren. Default-Farbe bleibt aber hell-weiß. */
 .bid-card:hover .bid-card__plane {
-  transform: translateX(8px) rotate(-2deg);
+  color: color-mix(in srgb, var(--accent) 30%, var(--text));
 }
 
 .bid-card--selected {
@@ -3821,38 +3963,48 @@ input:disabled {
 
 .bid-card__path {
   position: relative;
-  height: 28px;
+  height: 36px;
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
-.bid-card__path::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 50%;
-  height: 0;
-  border-top: 2px dashed
-    color-mix(in srgb, var(--accent) 60%, var(--border));
-  transform: translateY(-50%);
-}
+/* v0.3.0: Gestrichelte Route-Linie entfernt — minimaler, cleaner.
+   Das animierte ✈-Symbol allein simuliert die Route durch seine
+   Bewegung zwischen den beiden Airport-Codes. Kein blau-auf-blau-
+   Konflikt mit dem Flugzeug-Symbol mehr. */
 
 .bid-card__plane {
   position: relative;
   z-index: 1;
-  background: var(--surface);
-  padding: 0 8px;
-  font-size: 20px;
-  color: var(--accent);
-  transition: transform 0.4s cubic-bezier(0.22, 1, 0.36, 1);
-  transform: rotate(0deg);
+  /* v0.3.0: Kein Background mehr — das ✈ steht direkt auf der
+     gestrichelten Route-Linie, wie auf Flightradar-Karten. Sauberer
+     als der frühere "Kasten in Surface-Farbe" oder der radial-gradient. */
+  padding: 0 6px;
+  /* v0.3.0: 50 % größer (war 20 px → jetzt 30 px) — ohne Route-
+     Linie braucht das ✈ mehr visuelles Gewicht damit's nicht im
+     leeren Raum verloren wirkt. */
+  font-size: 30px;
+  /* Bleibt hell — auch ohne Linie passt's farblich besser zum Rest. */
+  color: var(--text);
+  /* v0.3.0: Realistische Vorwärts-Animation — ✈ fliegt von links
+     in die Mitte, durch nach rechts und fadet am Ende aus, dann
+     startet's wieder von links. Kein "Rückwärts-Fliegen" mehr.
+     10 s Loop mit langem Weg (±120 px) damit das Flugzeug richtig
+     "fliegt" und nicht nur kurz wackelt — gemütliches Tempo. */
+  animation: plane-fly-across 10s ease-in-out infinite;
+  transition: color 0.25s ease;
 }
 
-.bid-card--selected .bid-card__path::before {
-  border-top-color: var(--accent);
+@keyframes plane-fly-across {
+  0%   { transform: translateX(-120px); opacity: 0; }
+  10%  { transform: translateX(-100px); opacity: 1; }
+  90%  { transform: translateX(100px);  opacity: 1; }
+  100% { transform: translateX(120px);  opacity: 0; }
 }
+
+/* v0.3.0: Linie wurde entfernt; der Selected-State nutzt jetzt
+   den Border-Highlight der Card selbst (siehe .bid-card--selected). */
 
 .bid-card__meta {
   display: flex;
@@ -3948,50 +4100,247 @@ input:disabled {
   display: flex;
   gap: 6px;
   flex-wrap: wrap;
+  align-items: center;
 }
 .bid-card__load-chip {
-  font-size: 11px;
+  /* v0.3.0: größere Chips (war 11px, jetzt 13px) damit sie nicht
+     "verloren" aussehen neben der Reg-Pill. Höhe passt zum 22px
+     Aircraft-Row-Standard. */
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 10px;
+  font-size: 13px;
   font-weight: 600;
-  padding: 2px 8px;
   border-radius: 4px;
+  line-height: 1;
 }
-.bid-card__load-chip--pax   { background: rgba(96, 165, 250, 0.15); color: #93c5fd; }
-.bid-card__load-chip--cargo { background: rgba(251, 146, 60, 0.15); color: #fdba74; }
+/* v0.3.0: theme-adaptive — siehe :root --chip-pax-* / --chip-cargo-* */
+.bid-card__load-chip--pax   { background: var(--chip-pax-bg);   color: var(--chip-pax-text); }
+.bid-card__load-chip--cargo { background: var(--chip-cargo-bg); color: var(--chip-cargo-text); }
 
+/* SimBrief-Plan-Anzeige (v0.3.0): groß, klar, immer sichtbar (kein
+   Aufklappen mehr nötig). Ersetzt das alte schwache Inline-Grid. */
 .bid-card__simbrief {
   background: var(--surface-2);
-  border-radius: 6px;
-  padding: 8px 10px;
-  margin-top: 4px;
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-top: 8px;
 }
-.bid-card__simbrief-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-  gap: 4px 12px;
-  margin-top: 6px;
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-}
-.bid-card__simbrief-row {
+.bid-card__simbrief-header {
   display: flex;
   justify-content: space-between;
-  gap: 8px;
-}
-.bid-card__simbrief-label {
+  align-items: baseline;
+  font-size: 13px;
+  font-weight: 600;
   color: var(--text-muted);
   text-transform: uppercase;
-  font-size: 10px;
+  letter-spacing: 0.05em;
+  margin-bottom: 10px;
+}
+.bid-card__simbrief-loading {
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--text-muted);
+  letter-spacing: 0;
+}
+.bid-card__simbrief-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 8px;
+}
+.bid-card__plan-card {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  background: var(--surface-1);
+  /* Default-Border (v0.3.0): theme-adaptive — im Light-Theme stärker
+     sichtbar (rgba 0.45), im Dark-Theme dezenter (0.3). Sonst sähen
+     RESERVE-Cards (ohne Akzent-Variante) im Light-Mode "nackt" aus. */
+  border: 1px solid var(--plan-card-border);
+  border-radius: 6px;
+  font-variant-numeric: tabular-nums;
+}
+.bid-card__plan-card-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
   letter-spacing: 0.04em;
 }
-.bid-card__simbrief-value {
+.bid-card__plan-card-value {
+  font-size: 18px;
+  font-weight: 700;
   color: var(--text);
+  line-height: 1.1;
+}
+.bid-card__plan-card-unit {
+  font-size: 13px;
   font-weight: 500;
+  color: var(--text-muted);
+  margin-left: 3px;
+}
+/* Akzent-Varianten (v0.3.0 theme-adaptive):
+   - primary (Block/Trip): blau-getönt — gesättigtes Dunkelblau im
+     Light-Theme, helles Sky-Blau im Dark-Theme
+   - weight (ZFW/TOW/LDW): nutzt Default-Border, kein Wert-Akzent
+   - alt (Alternate-Airport): violett, gleicher Dual-Mode-Pattern */
+.bid-card__plan-card--primary {
+  border-color: var(--plan-primary-border);
+  background: linear-gradient(180deg, var(--plan-primary-bg) 0%, var(--surface-1) 100%);
+}
+.bid-card__plan-card--primary .bid-card__plan-card-value {
+  color: var(--plan-primary-text);
+}
+.bid-card__plan-card--weight {
+  /* benutzt Default-Border (var(--plan-card-border)) — keine extra
+     Tönung, damit das Auge sich auf Block/Trip fokussiert. */
+}
+.bid-card__plan-card--alt {
+  border-color: var(--plan-alt-border);
+  background: linear-gradient(180deg, var(--plan-alt-bg) 0%, var(--surface-1) 100%);
+}
+.bid-card__plan-card--alt .bid-card__plan-card-value {
+  color: var(--plan-alt-text);
+  font-family: "SF Mono", "Cascadia Code", "Source Code Pro", Menlo, Consolas,
+    monospace;
+  font-size: 16px;
 }
 .bid-card__simbrief-error {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-muted);
   font-style: italic;
+  padding: 4px 0;
+}
+
+/* v0.3.0: OFP-Mismatch-Banner — Pilot hat in SimBrief einen anderen
+   Flug erstellt als gebucht. Warnung in Gelb (nicht Rot — nicht
+   blockierend, nur Hinweis dass der OFP nicht passt). */
+.bid-card__ofp-mismatch {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
   margin-top: 4px;
+  background: rgba(251, 191, 36, 0.1);
+  border: 1px solid rgba(251, 191, 36, 0.4);
+  border-radius: 6px;
+}
+.bid-card__ofp-mismatch-icon {
+  font-size: 18px;
+  line-height: 1;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.bid-card__ofp-mismatch-text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12px;
+  color: var(--text);
+}
+.bid-card__ofp-mismatch-text strong {
+  font-size: 13px;
+  color: #fbbf24;
+}
+.bid-card__ofp-mismatch-hint {
+  color: var(--text-muted);
+  font-style: italic;
+  margin-top: 2px;
+}
+/* Bid-vs-OFP-Vergleich (v0.3.0): zwei Zeilen, label + monospace code. */
+.bid-card__ofp-compare {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 4px 0;
+}
+.bid-card__ofp-compare > div {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+.bid-card__ofp-compare-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  min-width: 50px;
+}
+.bid-card__ofp-compare code {
+  font-family: "SF Mono", "Cascadia Code", "Source Code Pro", Menlo, Consolas,
+    monospace;
+  font-size: 12px;
+  color: var(--text);
+}
+:root[data-theme="dark"] .bid-card__ofp-mismatch-text strong {
+  color: #fde047;
+}
+:root:not([data-theme="dark"]) .bid-card__ofp-mismatch-text strong {
+  color: #a16207;
+}
+
+/* Aircraft + Load-Zeile darüber: kompakter Header, Reg als Pill rechts.
+   v0.3.0: align-items auf "center" damit Label, Subfleet-Code, Name
+   und Reg-Pill alle auf gleicher visueller Mitte sitzen (vorher waren
+   sie wegen unterschiedlicher line-height/font-size leicht versetzt). */
+.bid-card__aircraft-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 4px;
+  line-height: 1.4;
+}
+.bid-card__aircraft {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.4;
+}
+.bid-card__aircraft code {
+  /* Padding/Höhe so dass code-Pill auf der gleichen Baseline wie das
+     "FLUGZEUG"-Label sitzt — vorher zog die line-height vom <code>
+     den Block leicht nach oben. */
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 8px;
+  background: var(--surface-2);
+  border-radius: 4px;
+  font-family: "SF Mono", "Cascadia Code", "Source Code Pro", Menlo, Consolas,
+    monospace;
+  font-size: 12px;
+  line-height: 1;
+}
+.bid-card__aircraft-name {
+  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  line-height: 1;
+}
+.bid-card__aircraft-reg {
+  font-family: "SF Mono", "Cascadia Code", "Source Code Pro", Menlo, Consolas,
+    monospace;
+  font-size: 13px;
+  font-weight: 700;
+  /* v0.3.0: theme-adaptive Reg-Pill (--chip-reg-* in :root). Im Light-
+     Theme dunkles Bronze, im Dark-Theme helles Gold — beide auf dem
+     jeweiligen Surface gut lesbar. */
+  color: var(--chip-reg-text);
+  background: var(--chip-reg-bg);
+  border: 1px solid var(--chip-reg-border);
+  padding: 0 10px;
+  border-radius: 4px;
+  letter-spacing: 0.02em;
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  line-height: 1;
 }
 
 .phase {
@@ -4342,30 +4691,50 @@ input:disabled {
 .landing-comparison__delta--warn  { color: #fbbf24; }
 .landing-comparison__delta--alert { color: #f87171; font-weight: 600; }
 
-/* Live-Loadsheet im Cockpit-Tab (v0.3.0) — Tabelle mit IST/SOLL/Δ/MAX
-   für Block-Fuel, ZFW, TOW. Wird nur in Boarding/Preflight gerendert. */
-.loadsheet {
-  background: var(--surface-1);
+/* Live-Loadsheet im Cockpit-Tab (v0.3.0 — überarbeitet).
+   Komponente nutzt jetzt direkt die .info-strip-Klassen (gleiche
+   Optik wie der MASSE/FLUG/TRIP-Strip oben). Hier nur die wenigen
+   Loadsheet-spezifischen Add-ons: Toggle-Button, Δ-Inline-Suffix,
+   Hint-Inline-Zeile. */
+.loadsheet__header-row {
+  /* Toggle-Pfeil rechts statt eines Cell-Wertes — überschreibt das
+     Standard-info-strip__group Layout damit der Pfeil nicht in der
+     Cell-Spalte landet. */
+  align-items: center !important;
+}
+.loadsheet__toggle {
+  appearance: none;
+  background: transparent;
   border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 1rem;
-  margin-top: 1rem;
-}
-.loadsheet__header {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  margin-bottom: 0.5rem;
-}
-.loadsheet__title {
-  font-weight: 600;
-  font-size: 0.95rem;
-}
-.loadsheet__phase {
-  font-size: 0.75rem;
   color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  justify-self: start;
+  line-height: 1;
+}
+.loadsheet__toggle:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+/* Δ-Suffix neben dem IST-Wert — kompakt, kleinere Schrift, farbcodiert. */
+.loadsheet__delta-inline {
+  font-family: "SF Mono", "Cascadia Code", "Source Code Pro", Menlo, Consolas,
+    monospace;
+  font-feature-settings: "tnum" 1;
+  font-size: 11px;
+  font-weight: 500;
+  margin-left: -2px;
+}
+.loadsheet__delta--ok    { color: #4ade80; }
+.loadsheet__delta--warn  { color: #fbbf24; }
+.loadsheet__delta--alert { color: #f87171; font-weight: 600; }
+/* Hint-Zeile: dezenter Text, gleiche Höhe wie info-strip-Cells. */
+.loadsheet__hint-inline {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-style: italic;
 }
 .loadsheet__table {
   width: 100%;

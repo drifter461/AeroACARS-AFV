@@ -2835,6 +2835,10 @@ async fn fetch_simbrief_preview(
             planned_ldw_kg: ofp.planned_ldw_kg,
             route: ofp.route,
             alternate: ofp.alternate,
+            ofp_flight_number: ofp.ofp_flight_number,
+            ofp_origin_icao: ofp.ofp_origin_icao,
+            ofp_destination_icao: ofp.ofp_destination_icao,
+            ofp_generated_at: ofp.ofp_generated_at,
         })),
         Ok(None) => Ok(None), // OFP nicht abrufbar (Netz-Fehler / 404 / ...)
         Err(e) => Err(e.into()),
@@ -2854,6 +2858,39 @@ struct SimBriefOfpDto {
     planned_ldw_kg: f32,
     route: Option<String>,
     alternate: Option<String>,
+    // v0.3.0: OFP-Identität für Mismatch-Detection im Frontend.
+    ofp_flight_number: String,
+    ofp_origin_icao: String,
+    ofp_destination_icao: String,
+    ofp_generated_at: String,
+}
+
+/// Aircraft-Details für die Bid-Card (v0.3.0). Liefert die Registrierung
+/// + ICAO + Name eines Aircraft, sodass die Bid-Card "RYR-B738-WL · EI-ENI"
+/// anzeigen kann statt nur den Subfleet-Namen.
+#[tauri::command]
+async fn phpvms_get_aircraft(
+    state: tauri::State<'_, AppState>,
+    aircraft_id: i64,
+) -> Result<AircraftInfoDto, UiError> {
+    let client = current_client(&state)?;
+    let details = client.get_aircraft(aircraft_id).await?;
+    Ok(AircraftInfoDto {
+        id: details.id,
+        registration: details.registration,
+        icao: details.icao,
+        name: details.name,
+    })
+}
+
+/// Schmale Aircraft-Info für die Frontend-Anzeige. Nur die Felder die
+/// wir wirklich rendern — Status/Airport-ID lassen wir weg.
+#[derive(Debug, Clone, Serialize)]
+struct AircraftInfoDto {
+    id: i64,
+    registration: Option<String>,
+    icao: Option<String>,
+    name: Option<String>,
 }
 
 // ---- Active-flight persistence (for resume after crash/restart) ----
@@ -9934,6 +9971,7 @@ pub fn run() {
             phpvms_load_session,
             phpvms_get_bids,
             fetch_simbrief_preview,
+            phpvms_get_aircraft,
             phpvms_refresh_profile,
             divert_nearest_airports,
             fetch_release_notes,

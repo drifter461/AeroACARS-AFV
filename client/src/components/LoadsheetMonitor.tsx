@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { ActiveFlightInfo } from "../types";
 
@@ -6,34 +7,39 @@ interface Props {
 }
 
 /**
- * Live-Loadsheet (v0.3.0).
+ * Live-Loadsheet (v0.3.0 — überarbeitet).
  *
- * Wird im Cockpit-Tab während der Boarding-/Preflight-Phase angezeigt
- * und zeigt eine kompakte IST/SOLL/Δ-Tabelle für Block-Fuel, ZFW und
- * TOW. Updates live mit jedem Sim-Snapshot über den activeFlight-Poll.
+ * **Sichtbarkeit:** nur in Phase = `preflight` oder `boarding`.
+ * Sobald Pushback / TaxiOut beginnt → komplett weg, weil dann der
+ * Cruise/Approach-Pfad relevant ist und das Loadsheet "fertig" ist.
  *
- * Verschwindet ab Phase = TaxiOut/Pushback — ab dann zählt nur noch
- * der Cruise/Approach/Landing-Pfad, das Loadsheet ist "abgeschlossen".
+ * **Optik:** identisch zum InfoStrip darüber — gleiche `.info-strip`-
+ * Klasse, gleiche `Group`/`Cell`-Struktur, gleiche Schriftgrößen
+ * und Monospace-Werte. Pilot soll's als nahtlose Erweiterung der
+ * MASSE/FLUG/TRIP-Zeilen sehen, nicht als eigene Box mit anderem
+ * Stil.
  *
- * Werte:
- * - **Block-Fuel:** sim_fuel_kg vs. planned_block_fuel_kg
- * - **ZFW:** sim_zfw_kg vs. planned_zfw_kg
- * - **TOW:** sim_tow_kg vs. planned_tow_kg
+ * **Toggle:** kleiner Aufklapp-Pfeil rechts in der Group-Label-Zeile.
+ * Default offen während Boarding.
  *
- * Plus Overweight-Detection: wenn IST > MAX-Wert (planned_max_*_kg),
- * fires eine rote "OVERWEIGHT"-Warnung. Nicht blockierend, nur Info.
+ * **Δ-Anzeige:** kompakt inline (z.B. `TOW 64.544 kg (+227)`) statt
+ * einer eigenen Spalte. Farbcode wie sonst: <5% grün, 5-10% gelb,
+ * >10% rot. Bei Overweight (IST > MAX): rote Δ + ⚠.
  */
 export function LoadsheetMonitor({ info }: Props) {
   const { t } = useTranslation();
+  // Hook-Reihenfolge: alle Hooks vor early returns, sonst stolpert
+  // React beim Re-Render wenn die Phase wechselt und der Component
+  // mal mit/ohne useState aufgerufen wird.
+  const [expanded, setExpanded] = useState(true);
 
-  // Sichtbar nur in den Boarding-Phasen — sobald TaxiOut beginnt, ist
-  // das Loadsheet "abgeschlossen" und wir blenden's aus.
+  // Sichtbar nur in den Boarding-Phasen — sobald TaxiOut beginnt,
+  // ist das Loadsheet "abgeschlossen" und wir blenden's komplett aus.
   const visible =
     info.phase === "preflight" || info.phase === "boarding";
   if (!visible) return null;
 
-  // Wenn weder ein Plan noch Live-Werte da sind, ist die Komponente
-  // wertlos — gar nicht rendern.
+  // Wenn weder Plan noch Live-Werte da sind, nichts rendern.
   const hasAnyPlan =
     info.planned_block_fuel_kg != null ||
     info.planned_zfw_kg != null ||
@@ -44,28 +50,7 @@ export function LoadsheetMonitor({ info }: Props) {
     info.sim_tow_kg != null;
   if (!hasAnyPlan && !hasAnyLive) return null;
 
-  const rows: LoadsheetRow[] = [
-    {
-      label: t("cockpit.loadsheet.block"),
-      ist: info.sim_fuel_kg,
-      soll: info.planned_block_fuel_kg,
-      max: null, // kein MAX-Block-Fuel-Konzept (das wäre Tank-Kapazität)
-    },
-    {
-      label: "ZFW",
-      ist: info.sim_zfw_kg,
-      soll: info.planned_zfw_kg,
-      max: info.planned_max_zfw_kg,
-    },
-    {
-      label: "TOW",
-      ist: info.sim_tow_kg,
-      soll: info.planned_tow_kg,
-      max: info.planned_max_tow_kg,
-    },
-  ];
-
-  // Status-Hint unten — was läuft gerade?
+  // Status-Hint
   const fuelDelta =
     info.sim_fuel_kg != null && info.planned_block_fuel_kg != null
       ? info.sim_fuel_kg - info.planned_block_fuel_kg
@@ -77,110 +62,134 @@ export function LoadsheetMonitor({ info }: Props) {
   const hint = computeHint(fuelDelta, zfwDelta, t);
 
   return (
-    <section className="loadsheet">
-      <div className="loadsheet__header">
-        <span className="loadsheet__title">📋 {t("cockpit.loadsheet.title")}</span>
-        <span className="loadsheet__phase">
-          {info.phase === "preflight"
-            ? t("cockpit.loadsheet.preflight")
-            : t("cockpit.loadsheet.boarding")}
-        </span>
+    <section className="info-strip">
+      {/* Header-Zeile mit Toggle-Button rechts */}
+      <div className="info-strip__group loadsheet__header-row">
+        <h4 className="info-strip__group-label">
+          {t("cockpit.loadsheet.label")}
+        </h4>
+        <button
+          type="button"
+          className="loadsheet__toggle"
+          onClick={() => setExpanded((v) => !v)}
+          aria-expanded={expanded}
+          title={
+            expanded
+              ? t("cockpit.loadsheet.collapse")
+              : t("cockpit.loadsheet.expand")
+          }
+        >
+          {expanded ? "▾" : "▸"}
+        </button>
       </div>
-      <table className="loadsheet__table">
-        <thead>
-          <tr>
-            <th />
-            <th>{t("cockpit.loadsheet.ist")}</th>
-            <th>{t("cockpit.loadsheet.soll")}</th>
-            <th>Δ</th>
-            <th>MAX</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r) => (
-            <LoadsheetRow key={r.label} row={r} />
-          ))}
-        </tbody>
-      </table>
-      {hint && <div className="loadsheet__hint">{hint}</div>}
+
+      {/* Werte-Zeile — gleicher Stil wie MASSE-Strip oben */}
+      {expanded && (
+        <>
+          <div className="info-strip__group">
+            <h4 className="info-strip__group-label">
+              {t("cockpit.loadsheet.ist_label")}
+            </h4>
+            <div className="info-strip__cells">
+              <Cell
+                label={t("cockpit.loadsheet.block")}
+                ist={info.sim_fuel_kg}
+                soll={info.planned_block_fuel_kg}
+                max={null}
+              />
+              <Cell
+                label="ZFW"
+                ist={info.sim_zfw_kg}
+                soll={info.planned_zfw_kg}
+                max={info.planned_max_zfw_kg}
+              />
+              <Cell
+                label="TOW"
+                ist={info.sim_tow_kg}
+                soll={info.planned_tow_kg}
+                max={info.planned_max_tow_kg}
+              />
+            </div>
+          </div>
+          {hint && (
+            <div className="info-strip__group">
+              <h4 className="info-strip__group-label">&nbsp;</h4>
+              <div className="loadsheet__hint-inline">{hint}</div>
+            </div>
+          )}
+        </>
+      )}
     </section>
   );
 }
 
-interface LoadsheetRow {
+/**
+ * Eine Loadsheet-Cell im InfoStrip-Stil. Format: `LABEL 6.334 kg (+0)`
+ * mit Δ inline und farbcodiert. Bei MAX-Wert + Overweight: ⚠-Indikator.
+ */
+function Cell({
+  label,
+  ist,
+  soll,
+  max,
+}: {
   label: string;
   ist: number | null;
   soll: number | null;
   max: number | null;
-}
+}) {
+  // Wenn weder IST noch SOLL da sind, Cell überspringen.
+  if (ist == null && soll == null) return null;
 
-function LoadsheetRow({ row }: { row: LoadsheetRow }) {
-  const delta =
-    row.ist != null && row.soll != null ? row.ist - row.soll : null;
+  const delta = ist != null && soll != null ? ist - soll : null;
   const deltaPct =
-    delta != null && row.soll != null && row.soll !== 0
-      ? Math.abs(delta / row.soll) * 100
+    delta != null && soll != null && soll !== 0
+      ? Math.abs(delta / soll) * 100
       : null;
 
-  // Δ-Farbcode (gleich wie Landung-Tab): <5% grün, 5-10% gelb, >10% rot
-  let deltaClass = "";
+  // Δ-Farbcode: <5% grün, 5-10% gelb, >10% rot. Wird auf den
+  // Delta-Suffix angewendet, nicht auf den Hauptwert.
+  let deltaClass = "loadsheet__delta--ok";
   if (deltaPct != null) {
-    if (deltaPct < 5) deltaClass = "loadsheet__delta--ok";
-    else if (deltaPct < 10) deltaClass = "loadsheet__delta--warn";
-    else deltaClass = "loadsheet__delta--alert";
+    if (deltaPct >= 10) deltaClass = "loadsheet__delta--alert";
+    else if (deltaPct >= 5) deltaClass = "loadsheet__delta--warn";
   }
 
-  // Overweight-Detection: wenn IST > MAX, fires "OVERWEIGHT"-Stil.
-  const overweight = row.ist != null && row.max != null && row.ist > row.max;
+  // Overweight: IST > MAX → ⚠ + alert-color
+  const overweight = ist != null && max != null && ist > max;
+  if (overweight) deltaClass = "loadsheet__delta--alert";
+
+  const istLabel =
+    ist != null ? `${Math.round(ist).toLocaleString("de-DE")} kg` : "—";
 
   return (
-    <tr className={overweight ? "loadsheet__row--overweight" : ""}>
-      <td>{row.label}</td>
-      <td>{row.ist != null ? `${Math.round(row.ist).toLocaleString("de-DE")} kg` : "—"}</td>
-      <td>{row.soll != null ? `${Math.round(row.soll).toLocaleString("de-DE")} kg` : "—"}</td>
-      <td className={deltaClass}>
-        {delta != null
-          ? `${delta >= 0 ? "+" : ""}${Math.round(delta).toLocaleString("de-DE")} kg`
-          : "—"}
-      </td>
-      <td>
-        {row.max != null
-          ? overweight
-            ? `⚠ ${Math.round(row.max).toLocaleString("de-DE")} kg`
-            : `${Math.round(row.max).toLocaleString("de-DE")} kg`
-          : "—"}
-      </td>
-    </tr>
+    <div className="info-strip__cell">
+      <span className="info-strip__cell-label">{label}</span>
+      <span className="info-strip__cell-value">{istLabel}</span>
+      {delta != null && (
+        <span className={`loadsheet__delta-inline ${deltaClass}`}>
+          {overweight ? "⚠ " : ""}
+          {delta >= 0 ? "+" : ""}
+          {Math.round(delta).toLocaleString("de-DE")}
+        </span>
+      )}
+    </div>
   );
 }
 
-/**
- * Status-Hint unten unter der Tabelle. Versucht den aktuellen
- * Boarding-Sub-State zu erkennen:
- * - Tank-Vorgang läuft (Block-Fuel steigt, weit unter Plan)
- * - Boarding läuft (ZFW steigt, unter Plan)
- * - Bereit für Pushback (alle Werte nahe Plan)
- *
- * Bewusst sehr lockere Toleranzen — soll dem Piloten ein Gefühl geben,
- * keine harte Logik. Wenn keine Plan-Werte da sind, kein Hint.
- */
 function computeHint(
   fuelDelta: number | null,
   zfwDelta: number | null,
-  // Looser type so we don't fight i18next's overload soup. The runtime
-  // shape is fine — we only ever pass simple string-keyed records.
   t: (k: string, opts?: Record<string, unknown>) => string,
 ): string | null {
   if (fuelDelta == null && zfwDelta == null) return null;
 
-  // "Fast bereit" = Block + ZFW jeweils innerhalb 200 kg vom Plan.
   const fuelOk = fuelDelta == null || Math.abs(fuelDelta) < 200;
   const zfwOk = zfwDelta == null || Math.abs(zfwDelta) < 200;
   if (fuelOk && zfwOk) {
     return t("cockpit.loadsheet.hint_ready");
   }
 
-  // Negativ + groß = Tankvorgang oder Boarding läuft noch.
   if (fuelDelta != null && fuelDelta < -300) {
     return t("cockpit.loadsheet.hint_fueling", {
       missing: Math.abs(Math.round(fuelDelta)).toLocaleString("de-DE"),
@@ -191,8 +200,6 @@ function computeHint(
       missing: Math.abs(Math.round(zfwDelta)).toLocaleString("de-DE"),
     });
   }
-
-  // Positiv + groß = überladen / mehr Sprit als Plan.
   if (fuelDelta != null && fuelDelta > 500) {
     return t("cockpit.loadsheet.hint_overfueled", {
       extra: Math.round(fuelDelta).toLocaleString("de-DE"),
