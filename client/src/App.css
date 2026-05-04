@@ -4287,6 +4287,14 @@ input:disabled {
   font-style: italic;
   margin-top: 2px;
 }
+/* v0.3.3: Info-Variante (blau statt gelb) für „kein OFP da"-Hinweis. */
+.bid-card__ofp-mismatch--info {
+  background: rgba(59, 130, 246, 0.08);
+  border-color: rgba(59, 130, 246, 0.35);
+}
+.bid-card__ofp-mismatch--info .bid-card__ofp-mismatch-text strong {
+  color: #60a5fa;
+}
 /* Bid-vs-OFP-Vergleich (v0.3.0): zwei Zeilen, label + monospace code. */
 .bid-card__ofp-compare {
   display: flex;

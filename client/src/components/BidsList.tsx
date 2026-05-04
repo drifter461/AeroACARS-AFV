@@ -725,36 +725,76 @@ function BidDetails({ flight }: { flight: Flight }) {
   const originMismatch = !!ofpOrigin && ofpOrigin !== bidDpt;
   const destMismatch = !!ofpDest && ofpDest !== bidArr;
 
-  // Flight-Number: Bid hat MEHRERE mögliche Formate die als Match
-  // gelten sollen, weil viele Piloten einen individuellen ATC-
-  // Callsign nutzen statt der reinen Flight-Number:
-  //   1. Direkt: Bid-Flight-Number (z.B. "FR100" oder "100")
-  //   2. ICAO-Format: Airline-ICAO + Flight-Number (z.B. "RYR100")
-  //   3. ATC-Callsign direkt (z.B. wenn Bid bereits "RYR4TK" speichert)
-  //   4. ATC-Callsign **mit Airline-Prefix**: phpVMS speichert oft
-  //      nur den Suffix ("4TK"), Airline-ICAO kommt separat — Match
-  //      gegen "RYR" + "4TK" = "RYR4TK". Real-life-Pattern.
-  // Mismatch nur wenn der OFP-Callsign zu KEINEM dieser Formate passt.
+  // Flight-Number-Match (v0.3.3 — bidirektional). Der Bid kann eine
+  // Flight-Number ODER einen ATC-Callsign tragen (oder beides), der OFP
+  // genauso. Damit der Banner nur bei echten Mismatches feuert (z.B.
+  // Pilot hat OFP für FR100 generiert, fliegt aber FR200), bauen wir
+  // **alle** sinnvollen Repräsentationen beider Seiten auf — mit und
+  // ohne Airline-Prefix — und matchen Cross-Product.
+  //
+  // Beispiele die jetzt alle als Match durchgehen:
+  //   * Bid `EWL 4368`  + OFP `EWL4368`  (klassisch)
+  //   * Bid `EWL 4368`  + OFP `4368`     (ohne Airline-Prefix)
+  //   * Bid `EWL 4368`  + OFP `EWL4TK`   (Pilot nutzt persönlichen
+  //                                       ATC-Callsign in SimBrief —
+  //                                       Bid hat keinen callsign)
+  //   * Bid + Callsign `4TK` + OFP `EWL4TK` (beides explizit)
+  //   * Bid + Callsign `4TK` + OFP `EWL4368` (OFP nimmt Flugnummer
+  //                                           statt Callsign)
+  //
+  // Nur wenn KEINE dieser Permutationen matched UND der OFP nicht mal
+  // mit der Bid-Airline-ICAO anfängt, gilt's als Mismatch.
   const ofpFnum = plan?.ofp_flight_number?.toUpperCase().replace(/\s/g, "") ?? "";
   const bidAirlineIcao = flight.airline?.icao?.toUpperCase().trim() ?? "";
   const bidFnum = flight.flight_number.toUpperCase().replace(/\s/g, "");
   const bidCallsign = flight.callsign?.toUpperCase().replace(/\s/g, "") ?? "";
-  const fnumMatchesIcao =
-    !!bidAirlineIcao &&
-    ofpFnum === `${bidAirlineIcao}${bidFnum.replace(/^[A-Z]+/, "")}`;
-  const fnumMatchesDirect = ofpFnum === bidFnum;
-  const fnumMatchesCallsignDirect = !!bidCallsign && ofpFnum === bidCallsign;
-  const fnumMatchesCallsignWithPrefix =
-    !!bidCallsign &&
-    !!bidAirlineIcao &&
-    ofpFnum === `${bidAirlineIcao}${bidCallsign}`;
+
+  /** Strip the bid's airline-ICAO from the start of `s` if present. */
+  const stripAirline = (s: string): string =>
+    bidAirlineIcao && s.startsWith(bidAirlineIcao)
+      ? s.slice(bidAirlineIcao.length)
+      : s;
+
+  /** Build {bare, with-prefix} variants from a base part. */
+  const variantsOf = (base: string): string[] => {
+    if (!base) return [];
+    const bare = stripAirline(base);
+    const out = [bare];
+    if (bidAirlineIcao) out.push(`${bidAirlineIcao}${bare}`);
+    return out;
+  };
+
+  // All valid bid-side representations the OFP could match against.
+  const bidVariants = new Set<string>([
+    ...variantsOf(bidFnum),
+    ...variantsOf(bidCallsign),
+  ]);
+
+  // OFP-side variants — handle both "EWL4368" and "4368" coming from
+  // SimBrief depending on user settings.
+  const ofpVariants = new Set<string>(variantsOf(ofpFnum));
+
+  let fnumMatchesAny = false;
+  for (const v of ofpVariants) {
+    if (bidVariants.has(v)) {
+      fnumMatchesAny = true;
+      break;
+    }
+  }
+
+  // v0.3.3 — Flight-Number/Callsign alleine triggert KEINEN Banner mehr.
+  // Begründung: ein abweichender ATC-Callsign bei richtiger Route +
+  // richtigem Aircraft ist fast immer ein legitimer persönlicher
+  // Callsign (Pilot konfiguriert seinen Callsign in SimBrief, nicht im
+  // phpVMS-Bid). Wir berechnen `fnumMismatch` weiter für die Banner-
+  // Anzeige (falls Origin/Destination/Aircraft sowieso ein Banner
+  // triggern, wird die Callsign-Diff dort als zusätzlicher Hinweis
+  // angezeigt). Aber Aircraft/Origin/Destination sind die einzigen
+  // Signale stark genug für einen "altes OFP"-Befund.
   const fnumMismatch =
     !!ofpFnum
     && !!bidFnum
-    && !fnumMatchesIcao
-    && !fnumMatchesDirect
-    && !fnumMatchesCallsignDirect
-    && !fnumMatchesCallsignWithPrefix;
+    && !fnumMatchesAny;
 
   // v0.3.0: Voller ATC-Callsign für die Banner-Anzeige. Wenn der Pilot
   // im phpVMS-Bid einen Callsign-Suffix hinterlegt hat (z.B. "4TK"),
@@ -766,10 +806,12 @@ function BidDetails({ flight }: { flight: Flight }) {
       : `${bidAirlineIcao}${bidCallsign}`
     : "";
 
-  // Mindestens ein Signal → Banner. Bei mehreren Signalen wird das
-  // Banner ausführlicher (mehr Details).
-  const ofpMismatch =
-    acTypeMismatch || originMismatch || destMismatch || fnumMismatch;
+  // Mindestens ein "starkes" Signal → Banner. Aircraft / Origin /
+  // Destination sind hart — wenn die abweichen, ist der OFP nachweisbar
+  // für einen anderen Flug. Flight-Number alleine ist zu schwach
+  // (siehe `fnumMismatch`-Comment oben). Sie fließt nur in den
+  // ausführlichen Banner-Body wenn er sowieso schon offen ist.
+  const ofpMismatch = acTypeMismatch || originMismatch || destMismatch;
 
   // Wenn weder Aircraft-Info noch SimBrief-Plan noch Route da ist,
   // rendern wir die Sektion gar nicht (würde sonst leer aussehen).
@@ -822,6 +864,21 @@ function BidDetails({ flight }: { flight: Flight }) {
               )}
             </div>
           )}
+        </div>
+      )}
+
+      {/* v0.3.3: Wenn der Bid noch GAR KEINEN SimBrief-OFP gebunden hat,
+          klarer Hinweis statt einfach nichts zu rendern. Vorher rätselte
+          der Pilot warum die Plan-Cards leer sind. */}
+      {!hasSimBriefId && (
+        <div className="bid-card__ofp-mismatch bid-card__ofp-mismatch--info">
+          <span className="bid-card__ofp-mismatch-icon">ℹ️</span>
+          <div className="bid-card__ofp-mismatch-text">
+            <strong>{t("bids.no_ofp_title")}</strong>
+            <span className="bid-card__ofp-mismatch-hint">
+              {t("bids.no_ofp_hint")}
+            </span>
+          </div>
         </div>
       )}
 
