@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTranslation } from "react-i18next";
+import { useConfirm } from "./ConfirmDialog";
 
 interface ActivityEntry {
   timestamp: string;
@@ -20,6 +21,7 @@ function fmtTime(iso: string): string {
 
 export function ActivityLogPanel() {
   const { t } = useTranslation();
+  const { confirm, dialog: confirmDialog } = useConfirm();
   const [entries, setEntries] = useState<ActivityEntry[]>([]);
 
   // Pull the log every 2 seconds. The buffer is capped server-side at
@@ -43,7 +45,13 @@ export function ActivityLogPanel() {
   }, []);
 
   async function handleClear() {
-    if (!confirm(t("activity_log.confirm_clear"))) return;
+    if (
+      !(await confirm({
+        message: t("activity_log.confirm_clear"),
+        destructive: true,
+      }))
+    )
+      return;
     try {
       await invoke("activity_log_clear");
       setEntries([]);
@@ -54,6 +62,7 @@ export function ActivityLogPanel() {
 
   return (
     <section className="activity-log">
+      {confirmDialog}
       <header className="activity-log__header">
         <h2 className="activity-log__title">{t("activity_log.title")}</h2>
         <span className="activity-log__count">

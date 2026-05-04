@@ -1274,6 +1274,12 @@ button:disabled {
   font-size: 12px;
 }
 
+.storage-card__done {
+  margin: 0;
+  color: var(--success, #2c8a3a);
+  font-size: 12px;
+}
+
 /* ===== Tab badge (active-flight indicator) ===== */
 
 .tab__badge {
@@ -5355,3 +5361,134 @@ input:disabled {
   white-space: nowrap;
 }
 
+
+/* ======================================================================
+ * Confirm-Dialog (in-app, replaces window.confirm() — see
+ * components/ConfirmDialog.tsx for the why).
+ * ====================================================================== */
+
+.confirm-dialog__overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  /* Fade-in when mounted. */
+  animation: confirm-dialog-fade 120ms ease-out;
+}
+
+@keyframes confirm-dialog-fade {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.confirm-dialog {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.4rem 1.5rem 1.2rem;
+  max-width: 460px;
+  width: 100%;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  animation: confirm-dialog-pop 160ms cubic-bezier(0.18, 0.89, 0.32, 1.28);
+}
+
+@keyframes confirm-dialog-pop {
+  from { transform: scale(0.92); opacity: 0; }
+  to   { transform: scale(1);    opacity: 1; }
+}
+
+.confirm-dialog__title {
+  margin: 0 0 0.7rem;
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.confirm-dialog__message {
+  margin: 0 0 1.4rem;
+  font-size: 0.92rem;
+  line-height: 1.45;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+}
+
+.confirm-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.6rem;
+}
+
+.confirm-dialog__btn {
+  border: 1px solid var(--border);
+  background: var(--surface-2, var(--surface));
+  color: var(--text);
+  padding: 0.5rem 1.1rem;
+  border-radius: 7px;
+  font-size: 0.88rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 100ms, border-color 100ms;
+}
+
+.confirm-dialog__btn:hover {
+  border-color: var(--accent);
+}
+
+.confirm-dialog__btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.confirm-dialog__btn--primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.confirm-dialog__btn--primary:hover {
+  filter: brightness(1.1);
+}
+
+.confirm-dialog__btn--destructive {
+  background: #c8392f;
+  border-color: #c8392f;
+}
+
+.confirm-dialog__btn--destructive:hover {
+  background: #d6463c;
+  border-color: #d6463c;
+  filter: none;
+}
+
+/* v0.3.2: OFP-Refresh button + success message in active-flight header */
+
+.active-flight__refresh-ofp {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 0.4rem 0.85rem;
+  border-radius: 7px;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: border-color 100ms, background 100ms;
+}
+
+.active-flight__refresh-ofp:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.active-flight__refresh-ofp:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.active-flight__refresh-msg {
+  margin-top: 0.5rem;
+  font-size: 0.85rem;
+  color: var(--success, #2c8a3a);
+}

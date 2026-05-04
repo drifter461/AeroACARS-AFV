@@ -625,6 +625,10 @@
     "forgetting": "Forgetting…",
     "forget_hint": "Drop local flight state without contacting phpVMS — useful if the PIREP is already gone server-side.",
     "confirm_forget": "Drop local flight state? phpVMS will NOT be contacted. Only use this if 'Discard flight' fails.",
+    "refresh_ofp": "Refresh OFP",
+    "refresh_ofp_busy": "Refreshing…",
+    "refresh_ofp_hint": "Pull a fresh SimBrief OFP for the running flight — useful if you regenerated the OFP on simbrief.com after starting the flight.",
+    "refresh_ofp_done": "Plan values refreshed from SimBrief. The loadsheet now compares against the new plan.",
     "validation": {
       "title": "PIREP can't be filed yet",
       "intro": "The following required data is missing or implausible — filing now would store a broken flight on phpVMS:",
@@ -740,5 +744,10 @@
       "aircraft_mismatch": "Aircraft type mismatch — you're in the wrong aircraft for this bid. Load the correct type in the simulator or pick a different bid.",
       "phpvms_error": "phpVMS rejected the flight — see details."
     }
+  },
+  "confirm_dialog": {
+    "default_title": "Are you sure?",
+    "confirm": "Confirm",
+    "cancel": "Cancel"
   }
 }

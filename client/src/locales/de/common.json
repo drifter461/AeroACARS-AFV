@@ -625,6 +625,10 @@
     "forgetting": "Vergesse…",
     "forget_hint": "Lokalen Flug-Status verwerfen ohne phpVMS zu kontaktieren — z. B. wenn der PIREP serverseitig schon weg ist.",
     "confirm_forget": "Lokalen Flug-Status verwerfen? phpVMS wird NICHT kontaktiert. Nur nutzen, wenn ‚Flug verwerfen‘ fehlschlägt.",
+    "refresh_ofp": "OFP refreshen",
+    "refresh_ofp_busy": "Aktualisiere…",
+    "refresh_ofp_hint": "Den SimBrief-OFP für den laufenden Flug neu ziehen — nutzbar wenn du nach dem Flight-Start einen neuen OFP auf simbrief.com generiert hast.",
+    "refresh_ofp_done": "Plan-Werte aus SimBrief aktualisiert. Loadsheet vergleicht jetzt gegen den neuen Plan.",
     "validation": {
       "title": "PIREP kann so nicht eingereicht werden",
       "intro": "Folgende Pflichtdaten fehlen oder sind unplausibel — phpVMS würde einen unbrauchbaren Flug speichern:",
@@ -740,5 +744,10 @@
       "aircraft_mismatch": "Flugzeug-Typ passt nicht — Sie sitzen im falschen Flugzeug für diese Bid. Laden Sie den richtigen Typ im Simulator oder wählen Sie eine andere Bid.",
       "phpvms_error": "phpVMS hat den Flug abgelehnt — siehe Details."
     }
+  },
+  "confirm_dialog": {
+    "default_title": "Bist du sicher?",
+    "confirm": "Bestätigen",
+    "cancel": "Abbrechen"
   }
 }

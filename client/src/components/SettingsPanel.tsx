@@ -5,6 +5,7 @@ import type { ActiveFlightInfo, SimKind, SimStatus } from "../types";
 import type { Theme } from "../theme";
 import { SimDebugPanel } from "./SimDebugPanel";
 import { PmdgPremiumPanel } from "./PmdgPremiumPanel";
+import { useConfirm } from "./ConfirmDialog";
 
 const ALL_KINDS: SimKind[] = [
   "msfs2024",
@@ -378,9 +379,15 @@ function FlightLogsManager({
   onAutoDeleteChange: (next: boolean) => void;
 }) {
   const { t } = useTranslation();
+  const { confirm, dialog: confirmDialog } = useConfirm();
   const [stats, setStats] = useState<{ count: number; total_bytes: number } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Inline success-feedback shown right under the delete button.
+  // Replaces the v0.3.1 `window.alert()` which is silently dropped on
+  // macOS WKWebView (same bug class as `confirm()`). Cleared on next
+  // refresh, so the user sees it briefly and then it goes away.
+  const [doneMsg, setDoneMsg] = useState<string | null>(null);
 
   const refresh = async () => {
     try {
@@ -397,13 +404,17 @@ function FlightLogsManager({
   }, []);
 
   const handleDeleteAll = async () => {
-    const ok = window.confirm(t("settings.delete_all_logs_confirm"));
+    const ok = await confirm({
+      message: t("settings.delete_all_logs_confirm"),
+      destructive: true,
+    });
     if (!ok) return;
     setBusy(true);
+    setDoneMsg(null);
     try {
       const res = await invoke<{ deleted: number }>("flight_logs_delete_all");
       await refresh();
-      window.alert(
+      setDoneMsg(
         t("settings.delete_all_logs_done", {
           count: res.deleted,
           defaultValue:
@@ -437,6 +448,7 @@ function FlightLogsManager({
 
   return (
     <>
+      {confirmDialog}
       <label className="settings__checkbox">
         <input
           type="checkbox"
@@ -478,6 +490,7 @@ function FlightLogsManager({
           </button>
         </div>
         {error && <p className="storage-card__error">{error}</p>}
+        {doneMsg && <p className="storage-card__done">{doneMsg}</p>}
       </div>
     </>
   );

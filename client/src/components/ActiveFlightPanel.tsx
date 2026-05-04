@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTranslation } from "react-i18next";
 import type { ActiveFlightInfo, SimSnapshot } from "../types";
+import { useConfirm } from "./ConfirmDialog";
 import { InfoStrip } from "./InfoStrip";
 import { LiveTapes } from "./LiveTapes";
 import { LoadsheetMonitor } from "./LoadsheetMonitor";
@@ -26,8 +27,13 @@ function fmtDistance(nm: number, locale: string): string {
 
 export function ActiveFlightPanel({ info, simSnapshot, onEnded }: Props) {
   const { t, i18n } = useTranslation();
-  const [busy, setBusy] = useState<"end" | "cancel" | "forget" | null>(null);
+  const { confirm, dialog: confirmDialog } = useConfirm();
+  const [busy, setBusy] = useState<"end" | "cancel" | "forget" | "refresh" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // v0.3.2: short-lived inline message after a successful OFP refresh
+  // ("Plan-Werte aktualisiert"). Cleared on the next action so it
+  // doesn't linger forever.
+  const [refreshMsg, setRefreshMsg] = useState<string | null>(null);
   /**
    * When `flight_end` fails with `flight_validation_failed`, the backend
    * sends back a list of i18n-keyed missing-field codes. We surface the
@@ -97,12 +103,46 @@ export function ActiveFlightPanel({ info, simSnapshot, onEnded }: Props) {
 
   async function handleCancel() {
     if (busy) return;
-    if (!confirm(t("active_flight.confirm_cancel"))) return;
+    if (
+      !(await confirm({
+        message: t("active_flight.confirm_cancel"),
+        destructive: true,
+      }))
+    )
+      return;
     setBusy("cancel");
     setError(null);
     try {
       await invoke("flight_cancel");
       onEnded?.();
+    } catch (err: unknown) {
+      const msg =
+        typeof err === "object" && err !== null && "message" in err
+          ? String((err as { message: string }).message)
+          : String(err);
+      setError(msg);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  /**
+   * v0.3.2: Refresh the SimBrief OFP for the running flight without
+   * having to discard & restart. Real-pilot workflow: pilot regenerates
+   * the OFP on simbrief.com after AeroACARS already cached the previous
+   * one at flight-start (e.g. pax/cargo/reserve changed). Click → backend
+   * re-pulls the bid (which carries the latest OFP id), fetches the OFP,
+   * and overwrites planned_block / planned_tow / planned_zfw / etc. on
+   * the active flight. The Loadsheet then compares against the new plan.
+   */
+  async function handleRefreshOfp() {
+    if (busy) return;
+    setBusy("refresh");
+    setError(null);
+    setRefreshMsg(null);
+    try {
+      await invoke("flight_refresh_simbrief");
+      setRefreshMsg(t("active_flight.refresh_ofp_done"));
     } catch (err: unknown) {
       const msg =
         typeof err === "object" && err !== null && "message" in err
@@ -121,7 +161,13 @@ export function ActiveFlightPanel({ info, simSnapshot, onEnded }: Props) {
    */
   async function handleForget() {
     if (busy) return;
-    if (!confirm(t("active_flight.confirm_forget"))) return;
+    if (
+      !(await confirm({
+        message: t("active_flight.confirm_forget"),
+        destructive: true,
+      }))
+    )
+      return;
     setBusy("forget");
     setError(null);
     try {
@@ -140,6 +186,7 @@ export function ActiveFlightPanel({ info, simSnapshot, onEnded }: Props) {
 
   return (
     <section className="active-flight">
+      {confirmDialog}
       <header className="active-flight__header">
         <div className="active-flight__title-block">
           <span className="active-flight__label">
@@ -184,6 +231,24 @@ export function ActiveFlightPanel({ info, simSnapshot, onEnded }: Props) {
               ? t("active_flight.cancelling")
               : t("active_flight.cancel")}
           </button>
+          {/* OFP refresh — pre-takeoff only. After takeoff the plan
+              shouldn't change anyway, and we don't want pilots
+              accidentally clobbering the loadsheet baseline mid-flight. */}
+          {(info.phase === "preflight" ||
+            info.phase === "boarding" ||
+            info.phase === "taxi_out") && (
+            <button
+              type="button"
+              className="active-flight__refresh-ofp"
+              onClick={handleRefreshOfp}
+              disabled={busy !== null}
+              title={t("active_flight.refresh_ofp_hint")}
+            >
+              {busy === "refresh"
+                ? t("active_flight.refresh_ofp_busy")
+                : t("active_flight.refresh_ofp")}
+            </button>
+          )}
           <button
             type="button"
             className="active-flight__forget"
@@ -196,6 +261,11 @@ export function ActiveFlightPanel({ info, simSnapshot, onEnded }: Props) {
               : t("active_flight.forget")}
           </button>
         </div>
+        {refreshMsg && (
+          <div className="active-flight__refresh-msg" role="status">
+            ✓ {refreshMsg}
+          </div>
+        )}
       </header>
 
       {/* v0.3.0: RouteMap (Progress-Bar EDDW [✈] EGSS 0%) erst ab

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
+import { useConfirm } from "./ConfirmDialog";
 
 // ---- Types (mirror storage::LandingRecord on the Rust side) -------------
 
@@ -1622,6 +1623,7 @@ function HistoryStats({ records }: { records: LandingRecord[] }) {
 
 export function LandingPanel() {
   const { t } = useTranslation();
+  const { confirm, dialog: confirmDialog } = useConfirm();
   const [records, setRecords] = useState<LandingRecord[]>([]);
   const [preview, setPreview] = useState<LandingRecord | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -1652,7 +1654,13 @@ export function LandingPanel() {
   }, []);
 
   async function handleDelete(id: string) {
-    if (!window.confirm(t("landing.confirm_delete"))) return;
+    if (
+      !(await confirm({
+        message: t("landing.confirm_delete"),
+        destructive: true,
+      }))
+    )
+      return;
     try {
       await invoke("landing_delete", { pirepId: id });
       setSelectedId(null);
@@ -1668,6 +1676,7 @@ export function LandingPanel() {
     if (rec) {
       return (
         <section className="phase landing-panel">
+          {confirmDialog}
           <LandingDetail
             record={rec}
             allRecords={records}
@@ -1683,6 +1692,7 @@ export function LandingPanel() {
   // Preview-only state (active flight has touched down but record not yet filed)
   return (
     <section className="phase landing-panel">
+      {confirmDialog}
       {preview && (
         <div className="landing-preview-card">
           <h3>{t("landing.live_preview")}</h3>

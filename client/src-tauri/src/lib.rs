@@ -2827,6 +2827,119 @@ async fn phpvms_get_bids(
 
 /// SimBrief OFP-Preview (v0.3.0) — fetcht das letzte SimBrief XML
 /// für eine OFP-ID und liefert die wesentlichen Plan-Werte. Wird vom
+/// v0.3.2: Refresh den SimBrief-OFP für den GERADE LAUFENDEN Flug.
+/// Real-Pilot-Workflow: Pilot regeneriert auf simbrief.com einen neuen
+/// OFP nachdem AeroACARS schon den alten beim Flight-Start gefangen
+/// hat — z.B. weil sich Pax-Bestand, Cargo, oder Reserve-Strategie
+/// geändert haben. Vorher musste der Pilot „Discard flight" und neu
+/// starten; jetzt zieht der Cockpit-Refresh-Button den frischen OFP
+/// und überschreibt die `planned_*`-Felder im aktiven Flug.
+///
+/// Wir hängen am Bid (statt nur am gespeicherten ofp_id), weil der
+/// SimBrief-Sync auf phpVMS-Seite die Relation aktualisiert wenn
+/// der Pilot regeneriert — der Bid trägt dann die neue OFP-ID.
+/// Fallback: wenn der Bid keinen SimBrief-Link mehr hat, error.
+#[tauri::command]
+async fn flight_refresh_simbrief(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<SimBriefOfpDto, UiError> {
+    // Snapshot bid_id under the lock; release it before any await.
+    let bid_id = {
+        let guard = state.active_flight.lock().expect("active_flight lock");
+        guard
+            .as_ref()
+            .ok_or_else(|| UiError::new("no_active_flight", "no flight is active"))?
+            .bid_id
+    };
+    let client = current_client(&state)?;
+    // Pull the up-to-date bid list — the pilot's OFP regeneration would
+    // have updated the bid->simbrief relation server-side. We don't have
+    // a "GET single bid by id" endpoint, so we list all and filter.
+    let bids = client.get_bids().await.map_err(|e| {
+        UiError::new(
+            "bids_fetch_failed",
+            format!("could not refresh bid list: {e}"),
+        )
+    })?;
+    let bid = bids.into_iter().find(|b| b.id == bid_id).ok_or_else(|| {
+        UiError::new(
+            "bid_not_found",
+            "current bid is no longer in your bid list — cannot refresh OFP",
+        )
+    })?;
+    let sb_id = bid.flight.simbrief.as_ref().map(|s| s.id.clone()).ok_or_else(|| {
+        UiError::new(
+            "no_simbrief_link",
+            "bid has no SimBrief OFP linked — generate one on simbrief.com first",
+        )
+    })?;
+    let ofp = client.fetch_simbrief_ofp(&sb_id).await.map_err(|e| {
+        UiError::new("ofp_fetch_failed", format!("SimBrief OFP fetch failed: {e}"))
+    })?;
+    let ofp = ofp.ok_or_else(|| {
+        UiError::new(
+            "ofp_unusable",
+            "SimBrief returned no usable OFP — check your simbrief.com OFP",
+        )
+    })?;
+    // Mutate the active flight's planned_* fields. We re-acquire the
+    // lock here (post-await) and verify the flight is still the same
+    // bid — protects against the user discarding mid-fetch.
+    {
+        let guard = state.active_flight.lock().expect("active_flight lock");
+        let flight = guard.as_ref().ok_or_else(|| {
+            UiError::new(
+                "no_active_flight",
+                "flight was discarded during OFP refresh",
+            )
+        })?;
+        if flight.bid_id != bid_id {
+            return Err(UiError::new(
+                "flight_changed",
+                "active flight changed during OFP refresh — try again",
+            ));
+        }
+        let mut stats = flight.stats.lock().expect("flight stats lock");
+        stats.planned_block_fuel_kg = Some(ofp.planned_block_fuel_kg).filter(|&v| v > 0.0);
+        stats.planned_burn_kg = Some(ofp.planned_burn_kg).filter(|&v| v > 0.0);
+        stats.planned_reserve_kg = Some(ofp.planned_reserve_kg).filter(|&v| v > 0.0);
+        stats.planned_zfw_kg = Some(ofp.planned_zfw_kg).filter(|&v| v > 0.0);
+        stats.planned_tow_kg = Some(ofp.planned_tow_kg).filter(|&v| v > 0.0);
+        stats.planned_ldw_kg = Some(ofp.planned_ldw_kg).filter(|&v| v > 0.0);
+        stats.planned_route = ofp.route.clone();
+        stats.planned_alternate = ofp.alternate.clone();
+        stats.planned_max_zfw_kg = Some(ofp.max_zfw_kg).filter(|&v| v > 0.0);
+        stats.planned_max_tow_kg = Some(ofp.max_tow_kg).filter(|&v| v > 0.0);
+        stats.planned_max_ldw_kg = Some(ofp.max_ldw_kg).filter(|&v| v > 0.0);
+        drop(stats);
+        save_active_flight(&app, flight);
+    }
+    log_activity(
+        &state,
+        ActivityLevel::Info,
+        "OFP refreshed".to_string(),
+        Some(format!(
+            "Plan-Werte aktualisiert aus SimBrief — Block {:.0} kg, TOW {:.0} kg, LDW {:.0} kg",
+            ofp.planned_block_fuel_kg, ofp.planned_tow_kg, ofp.planned_ldw_kg
+        )),
+    );
+    Ok(SimBriefOfpDto {
+        planned_block_fuel_kg: ofp.planned_block_fuel_kg,
+        planned_burn_kg: ofp.planned_burn_kg,
+        planned_reserve_kg: ofp.planned_reserve_kg,
+        planned_zfw_kg: ofp.planned_zfw_kg,
+        planned_tow_kg: ofp.planned_tow_kg,
+        planned_ldw_kg: ofp.planned_ldw_kg,
+        route: ofp.route,
+        alternate: ofp.alternate,
+        ofp_flight_number: ofp.ofp_flight_number,
+        ofp_origin_icao: ofp.ofp_origin_icao,
+        ofp_destination_icao: ofp.ofp_destination_icao,
+        ofp_generated_at: ofp.ofp_generated_at,
+    })
+}
+
 /// Frontend in der ausgeklappten Bid-Card aufgerufen, damit der Pilot
 /// die Plan-Werte (Block-Fuel, Trip-Burn, TOW, LDW etc.) **vor**
 /// dem Flight-Start sieht.
@@ -10378,6 +10491,7 @@ pub fn run() {
             phpvms_load_session,
             phpvms_get_bids,
             fetch_simbrief_preview,
+            flight_refresh_simbrief,
             phpvms_get_aircraft,
             auto_start_skip_status,
             phpvms_refresh_profile,

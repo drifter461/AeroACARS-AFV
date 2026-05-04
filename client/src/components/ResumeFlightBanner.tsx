@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTranslation } from "react-i18next";
 import type { ActiveFlightInfo, ResumableFlight } from "../types";
+import { useConfirm } from "./ConfirmDialog";
 
 const COUNTDOWN_SECONDS = 30;
 
@@ -47,6 +48,7 @@ export function ResumeFlightBanner({
   onCancelled,
 }: Props) {
   const { t } = useTranslation();
+  const { confirm, dialog: confirmDialog } = useConfirm();
   const [mode, setMode] = useState<Mode>({ kind: "idle" });
   const consumedRef = useRef(false);
   /**
@@ -169,7 +171,13 @@ export function ResumeFlightBanner({
 
   async function doCancel() {
     if (mode.kind !== "auto_resumed" && mode.kind !== "discovered") return;
-    if (!confirm(t("resume.confirm_cancel"))) return;
+    if (
+      !(await confirm({
+        message: t("resume.confirm_cancel"),
+        destructive: true,
+      }))
+    )
+      return;
     setMode((prev) =>
       prev.kind === "auto_resumed" || prev.kind === "discovered"
         ? { ...prev, busy: true }
@@ -220,6 +228,7 @@ export function ResumeFlightBanner({
 
   return (
     <section className="resume-modal" role="status" aria-live="polite">
+        {confirmDialog}
         <div className="resume-modal__header">
           <span className="resume-modal__icon" aria-hidden="true">
             ✈
