@@ -160,7 +160,27 @@ pub const CATALOG: &[DatarefEntry] = &[
         field: FieldId::BankDeg,
     },
     DatarefEntry {
-        name: "sim/flightmodel/position/vh_ind_fpm",
+        // RAW vertical velocity (m/s, ohne VSI-Smoothing/Lag).
+        //
+        // Wir lasen früher `vh_ind_fpm` — das ist die Vertical-Speed-
+        // Indicator-Anzeige wie im echten Cockpit, mit absichtlichem
+        // Damping (mehrere Sekunden Lag). Real-life VSIs sind gefiltert
+        // damit sie nicht zappeln.
+        //
+        // Live-Bug X-Plane Pilot-Test 2026-05-05 (EWL6822 LEPA→EDDG):
+        // pilot landed mit ca. -350 fpm aber AeroACARS scorte
+        // "smooth, peak_vs_fpm: +5.7" — der VSI-Wert hatte zum Touch-
+        // down-Moment schon auf nahe 0 gemittelt, der echte Sinkflug
+        // war im 500ms-Buffer-Window nicht mehr erkennbar.
+        //
+        // `local_vy` ist die rohe Z-Achsen-Geschwindigkeit in m/s,
+        // realtime, ohne Smoothing. Wir konvertieren m/s → fpm im
+        // value-setter (× 196.85 für ft/min). Vorzeichen ist umgekehrt
+        // zur fpm-Konvention: `local_vy > 0` = aufsteigend (X-Planes
+        // OpenGL-Y-Achse zeigt nach oben), während fpm > 0 = climb.
+        // Die haben dasselbe Vorzeichen — `local_vy` braucht keine
+        // Vorzeichen-Umkehrung.
+        name: "sim/flightmodel/position/local_vy",
         field: FieldId::VerticalSpeedFpm,
     },
     // --- Speeds ---
@@ -539,7 +559,10 @@ impl XPlaneState {
             FieldId::HeadingDegMagnetic => self.heading_magnetic_deg = value,
             FieldId::PitchDeg => self.pitch_deg = value,
             FieldId::BankDeg => self.bank_deg = value,
-            FieldId::VerticalSpeedFpm => self.vertical_speed_fpm = value,
+            // local_vy ist in m/s (X-Plane native), konvertieren zu
+            // fpm: 1 m/s = 196.8504 ft/min. Vorzeichen passt direkt
+            // (positive Y = climb in beiden Konventionen).
+            FieldId::VerticalSpeedFpm => self.vertical_speed_fpm = value * 196.8504,
             FieldId::GroundspeedKt => self.groundspeed_ms = value, // m/s native
             FieldId::IndicatedAirspeedKt => self.indicated_airspeed_kt = value,
             FieldId::TrueAirspeedKt => self.true_airspeed_kt = value,
