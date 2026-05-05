@@ -4,6 +4,36 @@ Alle nennenswerten Änderungen an AeroACARS. Format: lose an [Keep a Changelog](
 
 ---
 
+## [v0.4.0] — 2026-05-05
+
+Erstes Minor-Release der 0.4er-Reihe. Hauptthema: **Discord-Integration**.
+
+### 🎉 Neu — Discord-Webhook
+
+Vier Lifecycle-Events werden jetzt automatisch in den GSG-Discord-Channel gepostet, im Stil etablierter VA-Bots:
+- ✈️ **Takeoff** (grün) — mit Block-Fuel + Plan-Δ + TOW
+- 🛬 **Landung** (orange) — mit Landing-Rate + Score + Distance
+- 📋 **PIREP filed** (violett) — kompletter Flugbericht
+- ⚠️ **Divert** (amber) — mit Geplant/Tatsächlich-Vergleich
+
+Layout angelehnt an den GSG-Bot-Stil:
+- Author-Bar oben mit phpVMS-Pilot-ID + Name (z.B. „GSG0001 - Thomas K")
+- Title als „Flight CHH3184/C.PF has landed"
+- 3-Spalten-Felder: Dep.Airport / Arr.Airport / Equipment
+- 2-Spalten-Felder: Flight Time / Distance
+- **Großes Airline-Logo unten** — kommt direkt aus phpVMS (`bid.flight.airline.logo`), keine externe Hosting-Abhängigkeit. Wenn die VA das Logo-Feld in phpVMS pflegt, erscheint es automatisch.
+
+Webhook-URL ist hardcoded für GSG (`#flights`-Channel). Posts laufen fire-and-forget (`tokio::spawn`) — Discord-Latenz blockt nie den Flugverlauf.
+
+### 🛠 Intern
+- Neues Modul `client/src-tauri/src/discord.rs` mit Embed-Builder + HTTP-Helper
+- `ActiveFlight`/`PersistedFlight` erweitert um `airline_logo_url: Option<String>` (aus Bid-Relation; persistiert für Resume)
+- `AppState.cached_pilot: Mutex<Option<(String, String)>>` — wird beim Login + Refresh aus dem phpVMS-Profile gefüllt, für die „GSG0001 - Pilot Name"-Zeile
+- Discord Rich Presence Service (Crate `discord-rich-presence v1`) eingebaut aber noch nicht gewired — kommt in v0.4.1
+- Tests: 76 grün
+
+---
+
 ## [v0.3.5] — 2026-05-05
 
 Drei X-Plane / phpVMS-Bugs nach Pilot-Test heute morgen.

@@ -5,6 +5,7 @@
 //! per-user config dir. The API key itself is stored via `secrets` (OS keyring),
 //! never on disk in plaintext.
 
+mod discord;
 mod runway;
 
 use std::collections::{HashMap, VecDeque};
@@ -451,6 +452,12 @@ struct AppState {
     /// the React side's `aeroacars.minimizeToTray` localStorage key
     /// and synced into here on every mount + change.
     minimize_to_tray_enabled: AtomicBool,
+    /// v0.4.0: Cached pilot identity (e.g. `("GSG0001", "Thomas K")`)
+    /// für Discord-Webhook-Posts. Wird beim Profile-Refresh gefüllt
+    /// (`get_profile()` returns it), bleibt für die Lebenszeit der
+    /// AeroACARS-Session. Wenn kein Profile geladen → `None`, der
+    /// Discord-Embed fällt auf "AeroACARS Pilot" zurück.
+    cached_pilot: Mutex<Option<(String, String)>>,
 }
 
 /// RAII guard for `AppState::flight_setup_in_progress`. Acquire it at the
@@ -506,6 +513,13 @@ struct ActiveFlight {
     /// `flight_number` to produce the full callsign on the dashboard
     /// ("DLH155" instead of just "155"). Empty string when unknown.
     airline_icao: String,
+    /// v0.4.0: phpVMS-hosted Airline-Logo-URL (von `bid.flight.airline.logo`,
+    /// z.B. `https://german-sky-group.eu/storage/uploads/airlines/4/.../logo.png`).
+    /// Discord-Webhook-Embeds nutzen das als großes Bild unten —
+    /// Pilot sieht in seinem Channel das Logo der gerade geflogenen
+    /// Airline ohne dass wir es im Repo selbst hosten müssen.
+    /// `None` wenn die VA das Logo-Feld nicht gepflegt hat.
+    airline_logo_url: Option<String>,
     /// Registration phpVMS assigned to this flight (e.g. "D-AIUV").
     /// Looked up via `get_aircraft(bid.flight.aircraft_id)` at start
     /// time. Compared against the live `ATC ID` SimVar in the activity
@@ -557,6 +571,11 @@ struct PersistedFlight {
     started_at: DateTime<Utc>,
     #[serde(default)]
     airline_icao: String,
+    /// v0.4.0: phpVMS-Airline-Logo-URL (für Discord-Webhook-Embeds).
+    /// `#[serde(default)]` damit Snapshots aus älteren Builds beim
+    /// Resume nicht crashen — fehlendes Feld wird zu `None`.
+    #[serde(default)]
+    airline_logo_url: Option<String>,
     #[serde(default)]
     planned_registration: String,
     flight_number: String,
@@ -2542,6 +2561,7 @@ async fn phpvms_login(
 
     let base_url = client.connection().base_url().to_string();
     *state.client.lock().expect("client mutex") = Some(client.clone());
+    cache_pilot(&state, &profile);
 
     // Auto-start the simulator adapter using the persisted selection.
     let saved_kind = read_sim_config(&app).kind;
@@ -2557,6 +2577,17 @@ async fn phpvms_login(
         Some(format!("Sim: {:?}", saved_kind)),
     );
     Ok(LoginResult { profile, base_url })
+}
+
+/// Cache pilot ident + name on AppState (für Discord-Webhook-Posts).
+/// Wird nach jedem get_profile()-Call aufgerufen — die phpVMS-API
+/// liefert beides als Teil von /api/user.
+fn cache_pilot(state: &tauri::State<'_, AppState>, profile: &api_client::Profile) {
+    let ident = profile.ident.clone().unwrap_or_default();
+    if !ident.is_empty() || !profile.name.is_empty() {
+        *state.cached_pilot.lock().expect("cached_pilot lock") =
+            Some((ident, profile.name.clone()));
+    }
 }
 
 /// Forget the current session. Removes the keyring entry and site config,
@@ -2600,6 +2631,7 @@ async fn phpvms_load_session(
         Ok(profile) => {
             let base_url = client.connection().base_url().to_string();
             *state.client.lock().expect("client mutex") = Some(client.clone());
+            cache_pilot(&state, &profile);
             // Auto-start the simulator adapter when we restore an existing session.
             let saved_kind = read_sim_config(&app).kind;
             apply_sim_kind(&state, saved_kind);
@@ -2719,7 +2751,10 @@ async fn phpvms_refresh_profile(
         Err(_) => return Ok(None),
     };
     match client.get_profile().await {
-        Ok(p) => Ok(Some(p)),
+        Ok(p) => {
+            cache_pilot(&state, &p);
+            Ok(Some(p))
+        }
         Err(e) => {
             tracing::warn!(error = %e, "profile refresh failed");
             Ok(None)
@@ -3183,6 +3218,7 @@ fn save_active_flight(app: &AppHandle, flight: &ActiveFlight) {
         bid_id: flight.bid_id,
         started_at: flight.started_at,
         airline_icao: flight.airline_icao.clone(),
+        airline_logo_url: flight.airline_logo_url.clone(),
         planned_registration: flight.planned_registration.clone(),
         flight_number: flight.flight_number.clone(),
         dpt_airport: flight.dpt_airport.clone(),
@@ -3527,6 +3563,10 @@ async fn flight_adopt(
         .and_then(|b| b.flight.airline.as_ref())
         .map(|a| a.icao.clone())
         .unwrap_or_default();
+    let airline_logo_url = matching_bid
+        .and_then(|b| b.flight.airline.as_ref())
+        .and_then(|a| a.logo.clone())
+        .filter(|s| !s.is_empty());
 
     // Look up planned registration so the activity log can compare it
     // against the live `ATC ID` SimVar — pilot sees instantly if the
@@ -3570,6 +3610,7 @@ async fn flight_adopt(
         // for our counters. The PIREP's actual times are intact server-side.
         started_at: Utc::now(),
         airline_icao,
+        airline_logo_url,
         planned_registration,
         aircraft_icao,
         aircraft_name,
@@ -3972,6 +4013,12 @@ async fn flight_start(
             .as_ref()
             .map(|a| a.icao.clone())
             .unwrap_or_default(),
+        airline_logo_url: bid
+            .flight
+            .airline
+            .as_ref()
+            .and_then(|a| a.logo.clone())
+            .filter(|s| !s.is_empty()),
         planned_registration,
         aircraft_icao,
         aircraft_name,
@@ -4830,6 +4877,42 @@ async fn flight_end(
                 outcome: FlightOutcome::Filed,
             },
         );
+        // v0.4.0: Discord-Webhook für Divert. Fire-and-forget — wir
+        // wollen Discord NIE im File-Pfad warten lassen.
+        {
+            let actual_arr = divert_to
+                .as_deref()
+                .unwrap_or(&flight.arr_airport)
+                .to_string();
+            let cached_pilot = state
+                .cached_pilot
+                .lock()
+                .expect("cached_pilot lock")
+                .clone();
+            let (pilot_ident, pilot_name) = match cached_pilot {
+                Some((id, name)) => (Some(id), Some(name)),
+                None => (None, None),
+            };
+            let stats_for_post = flight.stats.lock().expect("flight stats");
+            let ctx = discord::EventContext {
+                callsign: format_callsign(&flight.airline_icao, &flight.flight_number),
+                airline_icao: flight.airline_icao.clone(),
+                airline_logo_url: flight.airline_logo_url.clone(),
+                dpt_icao: flight.dpt_airport.clone(),
+                arr_icao: actual_arr,
+                planned_arr_icao: Some(flight.arr_airport.clone()),
+                aircraft_type: Some(flight.aircraft_icao.clone()).filter(|s| !s.is_empty()),
+                aircraft_reg: Some(flight.planned_registration.clone()).filter(|s| !s.is_empty()),
+                pilot_ident,
+                pilot_name,
+                distance_nm: body.distance,
+                flight_time_min: body.flight_time,
+                score: stats_for_post.landing_score.map(|s| s.numeric()),
+                ..Default::default()
+            };
+            drop(stats_for_post);
+            tokio::spawn(discord::post_event(discord::EventKind::Divert, ctx));
+        }
         consume_bid_best_effort(&client, flight.bid_id).await;
         // Drop the in-memory active flight: divert is finalized.
         let _ = state.active_flight.lock().expect("active_flight lock").take();
@@ -4885,6 +4968,38 @@ async fn flight_end(
                     outcome: FlightOutcome::Filed,
                 },
             );
+            // v0.4.0: Discord-Webhook für regulären File-Erfolg.
+            // Fire-and-forget. Divert hat einen eigenen Hook oben
+            // (anderes Embed mit DIVERT-Banner).
+            {
+                let cached_pilot = state
+                    .cached_pilot
+                    .lock()
+                    .expect("cached_pilot lock")
+                    .clone();
+                let (pilot_ident, pilot_name) = match cached_pilot {
+                    Some((id, name)) => (Some(id), Some(name)),
+                    None => (None, None),
+                };
+                let stats_for_post = flight.stats.lock().expect("flight stats");
+                let ctx = discord::EventContext {
+                    callsign: format_callsign(&flight.airline_icao, &flight.flight_number),
+                    airline_icao: flight.airline_icao.clone(),
+                    airline_logo_url: flight.airline_logo_url.clone(),
+                    dpt_icao: flight.dpt_airport.clone(),
+                    arr_icao: flight.arr_airport.clone(),
+                    aircraft_type: Some(flight.aircraft_icao.clone()).filter(|s| !s.is_empty()),
+                    aircraft_reg: Some(flight.planned_registration.clone()).filter(|s| !s.is_empty()),
+                    pilot_ident,
+                    pilot_name,
+                    distance_nm: body.distance,
+                    flight_time_min: body.flight_time,
+                    score: stats_for_post.landing_score.map(|s| s.numeric()),
+                    ..Default::default()
+                };
+                drop(stats_for_post);
+                tokio::spawn(discord::post_event(discord::EventKind::PirepFiled, ctx));
+            }
             consume_bid_best_effort(&client, flight.bid_id).await;
             Ok(())
         }
@@ -5443,12 +5558,71 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
 
             // Snapshot the current phase BEFORE stepping so we can pass
             // the from→to pair to the recorder when it changes.
-            let prev_phase = {
+            // Plus snapshot Takeoff/Landing-at flags so we can fire
+            // Discord-Webhook-Posts beim None→Some-Übergang nach
+            // step_flight (v0.4.0).
+            let (prev_phase, prev_takeoff_at, prev_landing_at) = {
                 let stats = flight.stats.lock().expect("flight stats");
-                stats.phase
+                (stats.phase, stats.takeoff_at, stats.landing_at)
             };
             // Update running stats AND step the flight-phase FSM.
             let phase_change = step_flight(&flight, &snap);
+            // v0.4.0: Discord-Webhook-Posts für Takeoff + Landing.
+            // Wir feuern fire-and-forget (tokio::spawn) damit der
+            // Streamer-Tick nie auf Discord wartet — ein langsamer
+            // Webhook würde sonst die Position-Post-Frequenz killen.
+            // Filter: Übergang None→Some am Stats-Feld, nicht Phase
+            // — verhindert Doppel-Posts wenn der FSM zwischen Phasen
+            // hin- und herflattert.
+            {
+                let cached_pilot = app
+                    .state::<AppState>()
+                    .cached_pilot
+                    .lock()
+                    .expect("cached_pilot lock")
+                    .clone();
+                let (pilot_ident, pilot_name) = match cached_pilot {
+                    Some((id, name)) => (Some(id), Some(name)),
+                    None => (None, None),
+                };
+                let stats = flight.stats.lock().expect("flight stats");
+                if prev_takeoff_at.is_none() && stats.takeoff_at.is_some() {
+                    let ctx = discord::EventContext {
+                        callsign: format_callsign(&flight.airline_icao, &flight.flight_number),
+                        airline_icao: flight.airline_icao.clone(),
+                        airline_logo_url: flight.airline_logo_url.clone(),
+                        dpt_icao: flight.dpt_airport.clone(),
+                        arr_icao: flight.arr_airport.clone(),
+                        aircraft_type: Some(flight.aircraft_icao.clone()).filter(|s| !s.is_empty()),
+                        aircraft_reg: Some(flight.planned_registration.clone()).filter(|s| !s.is_empty()),
+                        pilot_ident: pilot_ident.clone(),
+                        pilot_name: pilot_name.clone(),
+                        block_fuel_kg: stats.block_fuel_kg,
+                        planned_block_fuel_kg: stats.planned_block_fuel_kg,
+                        tow_kg: stats.takeoff_weight_kg.map(|w| w as f32),
+                        ..Default::default()
+                    };
+                    tokio::spawn(discord::post_event(discord::EventKind::Takeoff, ctx));
+                }
+                if prev_landing_at.is_none() && stats.landing_at.is_some() {
+                    let ctx = discord::EventContext {
+                        callsign: format_callsign(&flight.airline_icao, &flight.flight_number),
+                        airline_icao: flight.airline_icao.clone(),
+                        airline_logo_url: flight.airline_logo_url.clone(),
+                        dpt_icao: flight.dpt_airport.clone(),
+                        arr_icao: flight.arr_airport.clone(),
+                        aircraft_type: Some(flight.aircraft_icao.clone()).filter(|s| !s.is_empty()),
+                        aircraft_reg: Some(flight.planned_registration.clone()).filter(|s| !s.is_empty()),
+                        pilot_ident: pilot_ident.clone(),
+                        pilot_name: pilot_name.clone(),
+                        landing_rate_fpm: stats.landing_rate_fpm,
+                        score: stats.landing_score.map(|s| s.numeric()),
+                        distance_nm: Some(stats.distance_nm),
+                        ..Default::default()
+                    };
+                    tokio::spawn(discord::post_event(discord::EventKind::Landing, ctx));
+                }
+            }
             // Detect when the touchdown-analyzer window has just locked
             // in a final score so we can emit the activity-log entry
             // exactly once. `landing_score` flips from None to Some
@@ -9651,6 +9825,10 @@ async fn try_resume_flight(
         bid_id: persisted.bid_id,
         started_at: persisted.started_at,
         airline_icao,
+        // Resume-Pfad: Airline-Logo-URL aus der persisted Bid wieder
+        // herholen. Wenn die Persisted-Snapshot-Version das Feld nicht
+        // hatte (alter Build vor v0.4.0), bleibt None.
+        airline_logo_url: persisted.airline_logo_url.clone(),
         planned_registration,
         // v0.3.0: Aircraft-Type bei Resume aus dem persisted Flight ist
         // nicht direkt verfügbar — der frühere Stand hatte das nicht.

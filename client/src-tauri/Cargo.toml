@@ -14,7 +14,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.3.5"
+version = "0.4.0"
 edition = "2021"
 license = "MIT"
 authors = ["Thomas Kant <github@MANFahrer-GF>", "AeroACARS contributors"]
@@ -38,6 +38,12 @@ serde_with = "3"
 # HTTP client (rustls — no OpenSSL on Windows/macOS)
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip"] }
 url = "2"
+
+# Discord Rich Presence — IPC zu lokalem Discord-Client (Named Pipe
+# unter Windows, Unix-Socket auf macOS/Linux). v1.0 ist cross-platform,
+# gleiche API auf allen Targets. Schlägt graceful fehl wenn Discord
+# gerade nicht läuft — wir loggen warn und gehen weiter.
+discord-rich-presence = "1"
 
 # Persistence
 rusqlite = { version = "0.32", features = ["bundled"] }
@@ -114,6 +120,9 @@ chrono.workspace = true
 # api-client and metar crates already use reqwest via the workspace
 # dep; we just need it directly here for `fetch_release_notes`.
 reqwest.workspace = true
+
+# Discord Rich Presence — siehe workspace-Dependency.
+discord-rich-presence.workspace = true
 
 # Bundled CSV parser for the embedded ourairports runway table
 # (used by `src/runway.rs` to map a touchdown coord → runway).
