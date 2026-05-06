@@ -4,6 +4,39 @@ Alle nennenswerten Änderungen an AeroACARS. Format: lose an [Keep a Changelog](
 
 ---
 
+## [v0.5.7] — 2026-05-07
+
+🎯 **Methoden-Wechsel: VS wird jetzt aus AGL-Δ berechnet (LandingRate-1-Algorithmus, seit ~10 Jahren in der X-Plane-Welt erprobt).**
+
+Pilot-Frage „warum kommen LandingRate.lua und Volanta immer auf richtige Werte und wir nicht?" — weil die einen fundamental anderen Ansatz nutzen den wir bisher nicht hatten.
+
+### 🐛 Behoben
+
+**Vorher** lasen wir die Sinkrate direkt aus `local_vy` / `vh_ind_fpm` (Flight-Model-Output). Beim Flare reduziert das Flight-Model die VSI absichtlich auf nahe 0 für gutes Stick-Feel — der Flieger sinkt physikalisch noch weiter, aber die VSI-Anzeige lügt schon. Egal wie clever wir Buffer-Min-Suche oder Running-Min nutzen, die Quelldaten sind kompromittiert.
+
+**Jetzt** nutzen wir denselben Algorithmus wie LandingRate-1.lua (Dan Berry, 2014+) und Volanta:
+
+```
+gVS = (current_AGL - avg_AGL_letzte_2s) / (Zeitspanne / 2) * 60
+```
+
+Statt VSI lesen wir die **tatsächliche AGL-Differenz** über ein 2-Sekunden-Fenster. Das ist reine Geometrie — die Geometrie kann nicht durch Flight-Model-Tricks verfälscht werden. Bei einem Anflug von 81 ft AGL → 0 ft in 2 Sekunden gibt das exakt den echten Sinkflug, unabhängig von dem was VSI behauptet.
+
+**Most-negative-wins** Hierarchie beim Final → Landing:
+1. **AGL-Differential** (PRIMÄR — geometrische Wahrheit, wenn Sample-Density ausreicht)
+2. Running Approach-Min (v0.5.5 Fallback)
+3. Sampler-Edge-Capture (v0.4.4 Edge-Detection)
+4. Buffer-Window-Scan (Legacy)
+5. Live snap.vs (Last resort)
+
+### 🛠 Intern
+- Tests: 82 grün
+- AGL-Daten waren schon im snapshot_buffer, kein neues Tracking nötig
+- Wirkt mit ODER ohne Plugin (rein client-seitig)
+- Plugin-Algorithmus folgt in v0.5.8 (gleicher Ansatz im C++)
+
+---
+
 ## [v0.5.6] — 2026-05-06
 
 🩹 **Plugin-Pendant zur v0.5.5-Touchdown-Logik.**

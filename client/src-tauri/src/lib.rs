@@ -7048,6 +7048,81 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
                     Some(approach_min) if approach_min < touchdown_vs => approach_min,
                     _ => touchdown_vs,
                 };
+
+                // v0.5.7: AGL-derivative method (LandingRate-1 plugin
+                // for X-Plane has used this since ~2014, Volanta does
+                // the same). VSI / local_vy goes to ~0 during a hard
+                // flare because the flight model dampens vertical
+                // velocity for stick-feel — but the AIRCRAFT IS STILL
+                // PHYSICALLY DESCENDING. The geometry doesn't lie:
+                // measure ΔAGL / Δt over a 2 s window centered on
+                // touchdown and you get the actual descent rate of
+                // the airframe, not the smoothed flight-model output.
+                //
+                //   gVS = (current_agl - avg_agl_over_window) /
+                //         (window_seconds / 2) * 60
+                //
+                // Math: avg AGL is "where you were on average across
+                // the window". For a linear descent that's the
+                // midpoint. The rate from midpoint→now over (window/2)
+                // is the geometric descent rate. Multiply by 60 to
+                // get ft/min.
+                //
+                // This is the PRIMARY value if the buffer has enough
+                // pre-touchdown samples. It bypasses every flight-
+                // model artifact and matches what other proven X-Plane
+                // landing tools report.
+                const AGL_DERIVATIVE_WINDOW_SECS: i64 = 2;
+                let agl_window_start = actual_td_at
+                    - chrono::Duration::seconds(AGL_DERIVATIVE_WINDOW_SECS);
+                let recent_samples: Vec<&TelemetrySample> = stats
+                    .snapshot_buffer
+                    .iter()
+                    .filter(|s| s.at >= agl_window_start && s.at <= actual_td_at)
+                    .collect();
+                let derived_vs_fpm = if recent_samples.len() >= 3 {
+                    let avg_agl: f32 = recent_samples
+                        .iter()
+                        .map(|s| s.agl_ft)
+                        .sum::<f32>()
+                        / recent_samples.len() as f32;
+                    let agl_at_td = recent_samples
+                        .last()
+                        .map(|s| s.agl_ft)
+                        .unwrap_or(snap.altitude_agl_ft as f32);
+                    let timespan_sec = (actual_td_at
+                        - recent_samples.first().unwrap().at)
+                        .num_milliseconds() as f32
+                        / 1000.0;
+                    if timespan_sec > 0.5 {
+                        let agl_midpoint = agl_at_td - avg_agl;
+                        // (ft / sec) * 60 = ft/min
+                        Some((agl_midpoint / (timespan_sec / 2.0)) * 60.0)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                // Use AGL-derived value as PRIMARY when it's negative
+                // (the aircraft was actually descending). Most-negative
+                // wins against the running min — the AGL-derived
+                // value is geometric truth and beats any VSI-based
+                // capture. We never use it when positive (aircraft
+                // climbing through window — invalid for landing).
+                let touchdown_vs = match derived_vs_fpm {
+                    Some(d) if d < touchdown_vs && d < 0.0 => {
+                        tracing::info!(
+                            agl_derived_fpm = d,
+                            previous_capture_fpm = touchdown_vs,
+                            "AGL-derivative method overrode VSI-based capture (LandingRate-1 algo)"
+                        );
+                        d
+                    }
+                    _ => touchdown_vs,
+                };
+
                 stats.landing_rate_fpm = Some(touchdown_vs);
                 stats.landing_peak_vs_fpm = Some(touchdown_vs);
 
