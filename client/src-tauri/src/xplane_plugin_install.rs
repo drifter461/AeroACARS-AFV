@@ -96,13 +96,23 @@ fn detect_windows() -> Option<PathBuf> {
     // each launch. We don't pull in the `winreg` crate just for this
     // — `reg.exe query` runs in a sub-second and has no compile-time
     // cost.
+    //
+    // CREATE_NO_WINDOW (0x0800_0000) suppresses the console window
+    // that would otherwise flash up every time Settings is opened
+    // (v0.5.1 pilot regression: "unsichtbares Fenster" beim Settings-
+    // Tab-Klick — that was a real-but-empty cmd window briefly stealing
+    // focus). The flag is Windows-specific so the Cargo / std::os
+    // import is gated to this cfg block.
+    use std::os::windows::process::CommandExt;
     use std::process::Command;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     for key in [
         "HKCU\\Software\\Laminar Research\\X-Plane 12",
         "HKCU\\Software\\Laminar Research\\X-Plane 11",
     ] {
         let out = Command::new("reg")
             .args(["query", key, "/v", "Path"])
+            .creation_flags(CREATE_NO_WINDOW)
             .output()
             .ok()?;
         if !out.status.success() {

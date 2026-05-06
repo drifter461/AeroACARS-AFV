@@ -4,6 +4,19 @@ Alle nennenswerten Änderungen an AeroACARS. Format: lose an [Keep a Changelog](
 
 ---
 
+## [v0.5.2] — 2026-05-06
+
+🩹 **Hotfix: kein flackerndes Konsolen-Fenster mehr beim Settings-Tab-Klick.**
+
+Pilot-Feedback nach v0.5.1: „beim Klick auf den Tab Einstellungen öffnet sich ein unsichtbares Fenster". Das war eine echte (leere) `cmd.exe`-Konsole, die kurz aufflackerte und den Fokus stahl — verursacht durch den `reg.exe query` aus der X-Plane-Pfad-Auto-Erkennung.
+
+### 🐛 Behoben
+- **`CREATE_NO_WINDOW`-Flag** für den `reg.exe`-Subprocess. Windows zeigt jetzt keine Konsole mehr an, kein Fokus-Stehlen, kein Flackern.
+
+Patch nur Windows-relevant. Mac/Linux unverändert.
+
+---
+
 ## [v0.5.1] — 2026-05-06
 
 🩹 **Hotfix für v0.5.0-Regression — Settings-Tab hängt beim ersten Öffnen.**
