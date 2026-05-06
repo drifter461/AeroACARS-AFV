@@ -10,7 +10,7 @@ capture**.
 | Plugin name    | `AeroACARS Premium`                                     |
 | Signature      | `com.aeroacars.xplane.premium`                          |
 | Wire format    | Line-delimited JSON over UDP loopback                   |
-| Loopback port  | `127.0.0.1:49001`                                       |
+| Loopback port  | `127.0.0.1:52000` (outside X-Plane's 49000-49003 range) |
 | Min X-Plane    | 11.50 (XPLM303)                                         |
 | Platforms      | Windows x64 · macOS universal (x86_64+arm64) · Linux x64 |
 | License        | Same as the SDK (BSD) — free for commercial use         |
@@ -111,7 +111,7 @@ If the panel doesn't turn green:
 
 * Open `<X-Plane>/Log.txt` and grep for `[AeroACARS]` — every
   log line from the plugin is prefixed with that.
-* Check that no other AeroACARS instance is running (port 49001
+* Check that no other AeroACARS instance is running (port 52000
   is held by exactly one app at a time).
 
 ## Building from source

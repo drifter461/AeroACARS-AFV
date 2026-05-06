@@ -24,7 +24,7 @@ interface PluginInstallResult {
  *       c) One-click "Install plugin" → downloads matching zip
  *          from this version's GitHub release, extracts to
  *          `<root>/Resources/plugins/AeroACARS/`.
- *  3. **Bind error** (port 49001 held by something else) — red
+ *  3. **Bind error** (port 52000 held by something else) — red
  *     warning panel.
  *
  * Architectural twin of `PmdgPremiumPanel`. Polls
@@ -136,7 +136,7 @@ export function XPlanePremiumPanel({ simState }: Props) {
         )}
       </header>
 
-      {/* Bind error — port 49001 held by something else */}
+      {/* Bind error — port 52000 held by something else */}
       {hasError && (
         <div className="pmdg-panel__warning">
           <p className="pmdg-panel__warning-title">

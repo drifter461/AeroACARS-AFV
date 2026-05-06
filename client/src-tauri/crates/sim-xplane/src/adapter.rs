@@ -96,7 +96,7 @@ pub struct XPlaneAdapter {
     web_api_worker: Option<JoinHandle<()>>,
     /// Listener for the optional AeroACARS X-Plane Plugin (v0.5.0+).
     /// When the pilot has the plugin installed, this thread receives
-    /// JSON telemetry/touchdown packets on UDP 49001 and surfaces a
+    /// JSON telemetry/touchdown packets on UDP 52000 and surfaces a
     /// frame-perfect touchdown event. Inert if no plugin is present
     /// — bind succeeds, no packets ever arrive, RREF path handles
     /// everything as before.

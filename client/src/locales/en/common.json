@@ -398,7 +398,7 @@
     "inactive_hint_xp_not_running": "Will activate as soon as X-Plane runs with the AeroACARS plugin installed. Standard RREF capture works without it.",
     "packets_label": "Packets received",
     "bind_error_title": "Plugin listener failed to start",
-    "bind_error_explanation": "Port 49001 is held by another application — most likely a second AeroACARS instance is running. Close it and click \"Re-check sim\".",
+    "bind_error_explanation": "Port 52000 is held by another application — most likely a second AeroACARS instance is running. Close it and click \"Re-check sim\".",
     "install_path_label": "X-Plane root folder",
     "install_path_placeholder": "e.g. C:\\X-Plane 12  (or /Applications/X-Plane 12)",
     "detect_button": "Auto-detect",

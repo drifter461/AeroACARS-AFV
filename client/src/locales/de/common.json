@@ -398,7 +398,7 @@
     "inactive_hint_xp_not_running": "Wird aktiv sobald X-Plane mit installiertem AeroACARS-Plugin läuft. Standard-RREF-Erfassung läuft auch ohne Plugin.",
     "packets_label": "Empfangene Pakete",
     "bind_error_title": "Plugin-Listener konnte nicht starten",
-    "bind_error_explanation": "Port 49001 ist von einer anderen Anwendung belegt — wahrscheinlich läuft eine zweite AeroACARS-Instanz. Schließe diese und klicke „Sim erneut prüfen\".",
+    "bind_error_explanation": "Port 52000 ist von einer anderen Anwendung belegt — wahrscheinlich läuft eine zweite AeroACARS-Instanz. Schließe diese und klicke „Sim erneut prüfen\".",
     "install_path_label": "X-Plane-Hauptordner",
     "install_path_placeholder": "z. B. C:\\X-Plane 12  (oder /Applications/X-Plane 12)",
     "detect_button": "Auto-Erkennung",

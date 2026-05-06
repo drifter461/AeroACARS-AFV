@@ -1,8 +1,8 @@
 //! Premium plugin UDP listener.
 //!
-//! When the optional **AeroACARS X-Plane Plugin** (v0.5.0+) is installed
+//! When the optional **AeroACARS X-Plane Plugin** (v0.5.3+) is installed
 //! into the X-Plane plugins folder, it streams native flight-loop
-//! telemetry to `127.0.0.1:49001`. Two packet types:
+//! telemetry to `127.0.0.1:52000`. Two packet types:
 //!
 //!   * `"telemetry"` — every flight-loop tick (~20 Hz baseline / per-
 //!     frame near the ground). Same fields the RREF stream gives us
@@ -22,12 +22,21 @@
 //! mechanism — every X-Plane install speaks it. We can NEVER drop the
 //! RREF path because pilots without the plugin still need a working
 //! ACARS. So the plugin runs in parallel: same data, frame-perfect
-//! timing, on a different loopback port (49001) using a JSON wire
+//! timing, on a different loopback port (52000) using a JSON wire
 //! format the plugin owns.
+//!
+//! ## Why 52000 (not 49001)
+//!
+//! X-Plane uses ports 49000-49003 for its own built-in UDP I/O —
+//! 49000 receives, 49001 is X-Plane's outgoing-data source port.
+//! v0.5.0-v0.5.2 mistakenly bound 49001 too, which collided with
+//! X-Plane and caused the in-sim error "Fehler bei der Initialisierung
+//! des UDP-Netzwerkausgangs (Port 49001). Lokales Netzwerk wird
+//! deaktiviert." 52000 is well outside the conflict range.
 //!
 //! ## Failure modes
 //!
-//! - Plugin not installed → port 49001 stays silent, `is_active()`
+//! - Plugin not installed → port 52000 stays silent, `is_active()`
 //!   stays `false`, RREF path handles everything. Zero pilot impact.
 //! - Plugin sends malformed JSON → we log at `warn`, drop the packet,
 //!   keep listening. Cannot affect the rest of the adapter.
@@ -51,7 +60,13 @@ use serde::{Deserialize, Serialize};
 /// Loopback port the plugin sends to. Hardcoded by the plugin source —
 /// `xplane-plugin/src/plugin.cpp::AEROACARS_UDP_PORT`. Changing this
 /// requires a coordinated bump on both sides.
-pub const PREMIUM_UDP_PORT: u16 = 49001;
+///
+/// MUST be outside X-Plane's own 49000-49003 range. v0.5.0-v0.5.2
+/// used 49001, which collided with X-Plane's outgoing-data source
+/// port (in-sim error: "Fehler bei der Initialisierung des
+/// UDP-Netzwerkausgangs (Port 49001). Lokales Netzwerk wird
+/// deaktiviert."). 52000 is well clear of the conflict zone.
+pub const PREMIUM_UDP_PORT: u16 = 52000;
 
 /// How long a plugin packet keeps `is_active()` returning `true`.
 /// 3 s comfortably covers a paused-sim hiccup (the plugin stops
@@ -267,7 +282,7 @@ impl Drop for PremiumListener {
 // =============================================================================
 
 fn run_listener(shared: Arc<PremiumShared>) {
-    // Bind to loopback only — the plugin sends to 127.0.0.1:49001 and
+    // Bind to loopback only — the plugin sends to 127.0.0.1:52000 and
     // we want to refuse traffic from any other interface for security
     // (plugin packets contain telemetry that's no business of the LAN).
     let bind_addr = format!("127.0.0.1:{PREMIUM_UDP_PORT}");

@@ -7,7 +7,9 @@
 //
 // Purpose: read a curated set of DataRefs at flight-loop frequency and
 // forward them to the AeroACARS desktop client over a UDP loopback socket
-// (port 49001 by default). Plus a one-shot "touchdown" event packet at the
+// (port 52000 by default — outside X-Plane's 49000-49003 range so we
+// never clash with X-Plane's own UDP send/receive sockets). Plus a
+// one-shot "touchdown" event packet at the
 // physical moment of wheel-runway contact (fnrml_gear edge) — captured with
 // frame-perfect timing, no UDP-eviction race, no VSI-smoothing artifacts.
 //
@@ -81,7 +83,12 @@
 // port and listens for our packets. Mismatched port = silent no-op (sendto
 // gets ECONNREFUSED which we ignore), no crash.
 static constexpr const char* AEROACARS_UDP_HOST = "127.0.0.1";
-static constexpr uint16_t AEROACARS_UDP_PORT = 49001;
+// IMPORTANT: must be OUTSIDE X-Plane's own UDP port range (49000-
+// 49003) — X-Plane uses 49001 as its outgoing-data source port,
+// and binding the same port causes X-Plane's "Local network will
+// be disabled" error. v0.5.0-v0.5.2 made this mistake; v0.5.3
+// moves to 52000.
+static constexpr uint16_t AEROACARS_UDP_PORT = 52000;
 
 // Flight-loop callback interval (in seconds). Negative = "every N frames".
 // We use 0.05 s (= 20 Hz) as the baseline — matches xgs Landing Speed

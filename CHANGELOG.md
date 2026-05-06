@@ -4,6 +4,36 @@ Alle nennenswerten Änderungen an AeroACARS. Format: lose an [Keep a Changelog](
 
 ---
 
+## [v0.5.3] — 2026-05-06
+
+🚨 **KRITISCHER Hotfix — Port-Konflikt mit X-Plane behoben.**
+
+Pilot-Bericht mit Screenshot der X-Plane-Netzwerkeinstellungen zeigte: „Fehler bei der Initialisierung des UDP-Netzwerkausgangs (Port 49001). Lokales Netzwerk wird deaktiviert." Mein Plugin hatte 49001 für die Loopback-Kommunikation gewählt — **das ist aber X-Planes eigener Sende-Port**. Beide Apps stritten um denselben Socket → X-Plane konnte sein UDP-Netzwerk nicht initialisieren.
+
+### 🐛 Behoben
+
+- **Port von 49001 → 52000** in Plugin (`AEROACARS_UDP_PORT`) und Client (`PREMIUM_UDP_PORT`). 52000 ist:
+  - **Weit außerhalb** X-Planes 49000-49003 Bereich (Send/Receive)
+  - **Nicht** der X-Plane-Connect-Port (49520, NASA-Research-Tool)
+  - In IANA Dynamic-Range, kein bekannter Service
+  - Komplett konfliktfrei für 99,9% der Setups
+
+### ⚠️ Pilot-Aktion erforderlich
+
+1. AeroACARS-Update auf v0.5.3 installieren (auto-update)
+2. Settings → Debug → Plugin **neu installieren** (lädt v0.5.3-Plugin von GitHub)
+3. **X-Plane neu starten** — die Fehlermeldung über deaktiviertes lokales Netzwerk verschwindet, X-Planes UDP-Netzwerk arbeitet wieder normal
+
+Plugin- und Client-Port müssen synchron sein — die v0.5.3-Auto-Install-Funktion zieht automatisch das passende Plugin-ZIP, daher reicht ein Klick auf „Plugin installieren" nach dem Client-Update.
+
+### 🛠 Intern
+
+- Neuer Defensive-Comment-Block in beiden Source-of-Truth-Konstanten warnt explizit vor X-Planes 49000-49003 Range
+- Tests: 82 grün (unverändert)
+- Plugin-Source ist nur an einer Konstante geändert, alle anderen Logiken stabil
+
+---
+
 ## [v0.5.2] — 2026-05-06
 
 🩹 **Hotfix: kein flackerndes Konsolen-Fenster mehr beim Settings-Tab-Klick.**
