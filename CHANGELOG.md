@@ -4,6 +4,35 @@ Alle nennenswerten Änderungen an AeroACARS. Format: lose an [Keep a Changelog](
 
 ---
 
+## [v0.5.6] — 2026-05-06
+
+🩹 **Plugin-Pendant zur v0.5.5-Touchdown-Logik.**
+
+v0.5.5 hat den Bug im Tauri-Client gefixt; v0.5.6 fixt jetzt auch den Plugin-Code damit beide Schichten konsistent korrekt sind. Plugin sendet jetzt von sich aus den richtigen Wert.
+
+### 🐛 Behoben
+
+Plugin trackt jetzt auch eine **`g_airborne_vs_min`** — den negativsten pitch-korrigierten VS-Wert über den GESAMTEN airborne Segment (ground→air bis air→ground). Beim Touchdown-Edge wird der Wert mit dem Lookback-Window-Min und dem Live-VS verglichen — most-negative wins.
+
+Zusammen mit der v0.5.5-Client-Logik gibt es jetzt **doppelte Korrektheit**:
+- Plugin liefert von sich aus richtige `captured_vs_fpm` aus dem ganzen Anflug
+- Client überschreibt nochmal mit dem eigenen Tracker falls Plugin doch falsch liegt
+
+Reset-Logik im Plugin:
+- Bei jedem ground→air Edge (Takeoff, Go-Around-Lift-off): Tracker = 0
+- Nach erfolgreichem Touchdown-Capture: Tracker = 0 (Touch-and-Go bereit)
+- Bei Plugin-Reload (`XPluginStop`): Tracker = 0
+
+### ⚠️ Pilot-Aktion
+
+1. v0.5.6 Auto-Update annehmen (Tauri-Client)
+2. Settings → Debug → **„Plugin installieren"** klicken (lädt v0.5.6-Plugin)
+3. **X-Plane neu starten** — neuer Plugin lädt erst beim X-Plane-Start
+
+Dann ist das Plugin self-sufficient korrekt, auch ohne Client-Tracker-Override.
+
+---
+
 ## [v0.5.5] — 2026-05-06
 
 🩹 **Hotfix: Touchdown-VS bei aggressivem Flare wird endlich richtig erfasst.**

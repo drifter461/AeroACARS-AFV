@@ -162,6 +162,20 @@ sockaddr_in g_dest{};
 bool prev_in_air = true;
 bool touchdown_captured = false;
 
+// v0.5.6: running peak-descent VS tracker. Updated every flight-loop
+// tick while airborne (gear normal force < threshold). Picks the most
+// negative pitch-corrected VS seen across the ENTIRE airborne segment
+// — the whole approach + final, not just the last 500 ms. Robust
+// against aggressive flares where the peak descent happened seconds
+// before the actual touchdown and the lookback ring buffer has only
+// near-zero rebound samples by the time the edge fires.
+//
+// Reset to 0 (= "no descent yet") on every fresh ground→air transition
+// (takeoff, go-around) so each landing attempt gets a clean tracker.
+// Reset is also done after touchdown is captured so the next landing
+// in a touch-and-go starts fresh.
+float g_airborne_vs_min = 0.0f;
+
 // Sequence counter for outgoing packets (monotonic). Resets on plugin
 // reload, which is acceptable — the client uses it for diagnostics
 // (gap detection) only, not for ordering.
@@ -377,6 +391,24 @@ float flight_loop_cb(float, float, int, void*) noexcept {
     }
     const bool edge = prev_in_air && !in_air_now && !touchdown_captured;
 
+    // -- v0.5.6: running peak-descent VS tracker ------------------------
+    //
+    // Reset on the ground→air edge (= takeoff or go-around lift-off):
+    // we want a fresh tracker per landing attempt. While airborne,
+    // remember the most negative pitch-corrected VS we've ever seen.
+    // The lookback ring buffer is only ~3.2 s wide; this tracker has
+    // unlimited memory for the current airborne segment, which fixes
+    // the aggressive-flare class of bug (peak descent was 8 s before
+    // touchdown, lookback window only sees the last 500 ms = mostly
+    // post-rebound positive VS values, captured wrong).
+    if (in_air_now && !prev_in_air) {
+        // ground→air edge: reset for fresh approach tracking
+        g_airborne_vs_min = 0.0f;
+    }
+    if (in_air_now && vs_fpm < g_airborne_vs_min) {
+        g_airborne_vs_min = vs_fpm;
+    }
+
     // -- Build + send the per-tick telemetry packet ----------------------
     {
         char buf[PACKET_BUF_SIZE];
@@ -421,9 +453,15 @@ float flight_loop_cb(float, float, int, void*) noexcept {
 
     // -- Touchdown event packet (one-shot, frame-perfect) ---------------
     if (edge) {
-        // Find the most-negative VS in the lookback window. This is the
-        // peak descent rate just before contact — the value the client
-        // wants for "landing rate fpm".
+        // Find the most-negative VS — three-way most-negative-wins:
+        //   1. Lookback window (last 500 ms) — fast post-flare values
+        //   2. Running airborne min — full approach memory (v0.5.6)
+        //   3. Live vs_fpm — fallback in case both are stale
+        // Pilot test 2026-05-06 showed the lookback alone misses the
+        // peak when the pilot flares hard in the last few seconds.
+        // The airborne tracker covers the entire approach so it
+        // remembers the actual descent peak even if it happened 30+ s
+        // before the gear edge.
         const double cutoff_t = sim_t - (VS_LOOKBACK_MS / 1000.0);
         float captured_vs = vs_fpm;
         for (size_t i = 0; i < g_vs_buffer_count; ++i) {
@@ -431,6 +469,11 @@ float flight_loop_cb(float, float, int, void*) noexcept {
             if (s.t_sec >= cutoff_t && s.vs_fpm < captured_vs) {
                 captured_vs = s.vs_fpm;
             }
+        }
+        // Airborne running min wins if it's more negative than either
+        // the lookback window or the live snap.
+        if (g_airborne_vs_min < captured_vs) {
+            captured_vs = g_airborne_vs_min;
         }
         char buf[PACKET_BUF_SIZE];
         int n = std::snprintf(buf, sizeof(buf),
@@ -471,6 +514,9 @@ float flight_loop_cb(float, float, int, void*) noexcept {
                  static_cast<double>(gnorm),
                  static_cast<double>(ias_kt));
         touchdown_captured = true;
+        // Reset airborne tracker so the next ground→air edge starts
+        // a clean run (touch-and-go, missed approach with go-around).
+        g_airborne_vs_min = 0.0f;
     }
 
     // -- Update edge state for next tick --------------------------------
@@ -549,6 +595,7 @@ PLUGIN_API void XPluginStop(void) {
     g_vs_buffer_count = 0;
     prev_in_air = true;
     touchdown_captured = false;
+    g_airborne_vs_min = 0.0f;
     g_seq = 0;
 
     log_msg("AeroACARS X-Plane Plugin stopped cleanly");
