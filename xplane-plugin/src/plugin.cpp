@@ -45,7 +45,9 @@
 #include <XPLM/XPLMProcessing.h>
 #include <XPLM/XPLMUtilities.h>
 
+#include <cerrno>
 #include <cmath>
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -299,16 +301,6 @@ void send_packet(const char* payload, size_t len) noexcept {
 // realistic packet size — a fully-populated telemetry frame is ~600 bytes.
 
 constexpr size_t PACKET_BUF_SIZE = 2048;
-
-// Format a double cleanly into the JSON. NaN/Inf become null (per JSON
-// spec — those values aren't representable). All numbers go via "%g"
-// which is compact + readable.
-int jw_double(char* buf, size_t cap, double v) noexcept {
-    if (!std::isfinite(v)) {
-        return std::snprintf(buf, cap, "null");
-    }
-    return std::snprintf(buf, cap, "%g", v);
-}
 
 // =============================================================================
 // Flight-loop callback — the hot path
