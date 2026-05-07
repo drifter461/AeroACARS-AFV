@@ -670,12 +670,20 @@ struct PersistedFlightStats {
     takeoff_weight_kg: Option<f64>,
     #[serde(default)]
     takeoff_fuel_kg: Option<f32>,
+    /// v0.5.16: pitch / bank at takeoff (rotation moment).
+    #[serde(default)]
+    takeoff_pitch_deg: Option<f32>,
+    #[serde(default)]
+    takeoff_bank_deg: Option<f32>,
     #[serde(default)]
     landing_rate_fpm: Option<f32>,
     #[serde(default)]
     landing_g_force: Option<f32>,
     #[serde(default)]
     landing_pitch_deg: Option<f32>,
+    /// v0.5.16: bank angle at touchdown for wing-strike detection.
+    #[serde(default)]
+    landing_bank_deg: Option<f32>,
     #[serde(default)]
     landing_speed_kt: Option<f32>,
     #[serde(default)]
@@ -812,9 +820,12 @@ impl PersistedFlightStats {
             block_on_at: stats.block_on_at,
             takeoff_weight_kg: stats.takeoff_weight_kg,
             takeoff_fuel_kg: stats.takeoff_fuel_kg,
+            takeoff_pitch_deg: stats.takeoff_pitch_deg,
+            takeoff_bank_deg: stats.takeoff_bank_deg,
             landing_rate_fpm: stats.landing_rate_fpm,
             landing_g_force: stats.landing_g_force,
             landing_pitch_deg: stats.landing_pitch_deg,
+            landing_bank_deg: stats.landing_bank_deg,
             landing_speed_kt: stats.landing_speed_kt,
             landing_weight_kg: stats.landing_weight_kg,
             landing_heading_deg: stats.landing_heading_deg,
@@ -885,9 +896,12 @@ impl PersistedFlightStats {
         stats.block_on_at = self.block_on_at;
         stats.takeoff_weight_kg = self.takeoff_weight_kg;
         stats.takeoff_fuel_kg = self.takeoff_fuel_kg;
+        stats.takeoff_pitch_deg = self.takeoff_pitch_deg;
+        stats.takeoff_bank_deg = self.takeoff_bank_deg;
         stats.landing_rate_fpm = self.landing_rate_fpm;
         stats.landing_g_force = self.landing_g_force;
         stats.landing_pitch_deg = self.landing_pitch_deg;
+        stats.landing_bank_deg = self.landing_bank_deg;
         stats.landing_speed_kt = self.landing_speed_kt;
         stats.landing_weight_kg = self.landing_weight_kg;
         stats.landing_heading_deg = self.landing_heading_deg;
@@ -1118,11 +1132,22 @@ struct FlightStats {
     // ---- Capture at takeoff ----
     takeoff_weight_kg: Option<f64>,
     takeoff_fuel_kg: Option<f32>,
+    /// v0.5.16: pitch / bank at takeoff (rotation moment). Submitted
+    /// as numeric PIREP custom fields `takeoff-pitch` / `takeoff-roll`
+    /// — DisposableSpecial dmaintenance reads these for tail-strike
+    /// (pitch > 12.5° default) and wing-strike (roll > 15° default)
+    /// detection. Captured the moment `takeoff_at` is stamped.
+    takeoff_pitch_deg: Option<f32>,
+    takeoff_bank_deg: Option<f32>,
 
     // ---- Capture at touchdown ----
     landing_rate_fpm: Option<f32>,
     landing_g_force: Option<f32>,
     landing_pitch_deg: Option<f32>,
+    /// v0.5.16: bank angle at touchdown — submitted as numeric PIREP
+    /// custom field `landing-roll` for the wing-strike maintenance
+    /// check (default >15° = strike).
+    landing_bank_deg: Option<f32>,
     landing_speed_kt: Option<f32>,
     landing_weight_kg: Option<f64>,
     landing_heading_deg: Option<f32>,
@@ -7527,6 +7552,11 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
                 next_phase = FlightPhase::Takeoff;
                 stats.takeoff_at = Some(now);
                 stats.takeoff_fuel_kg = Some(snap.fuel_total_kg);
+                // v0.5.16: capture pitch + bank for tail-strike /
+                // wing-strike maintenance detection (DisposableSpecial
+                // dmaintenance reads these as numeric custom fields).
+                stats.takeoff_pitch_deg = Some(snap.pitch_deg);
+                stats.takeoff_bank_deg = Some(snap.bank_deg);
                 if let Some(tw) = snap.total_weight_kg {
                     stats.takeoff_weight_kg = Some(tw as f64);
                 } else {
@@ -7648,6 +7678,11 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
                 next_phase = FlightPhase::Takeoff;
                 stats.takeoff_at = Some(now);
                 stats.takeoff_fuel_kg = Some(snap.fuel_total_kg);
+                // v0.5.16: capture pitch + bank for tail-strike /
+                // wing-strike maintenance detection (DisposableSpecial
+                // dmaintenance reads these as numeric custom fields).
+                stats.takeoff_pitch_deg = Some(snap.pitch_deg);
+                stats.takeoff_bank_deg = Some(snap.bank_deg);
                 if let Some(tw) = snap.total_weight_kg {
                     stats.takeoff_weight_kg = Some(tw as f64);
                 } else {
@@ -7697,6 +7732,11 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
                 next_phase = FlightPhase::Takeoff;
                 stats.takeoff_at = Some(now);
                 stats.takeoff_fuel_kg = Some(snap.fuel_total_kg);
+                // v0.5.16: capture pitch + bank for tail-strike /
+                // wing-strike maintenance detection (DisposableSpecial
+                // dmaintenance reads these as numeric custom fields).
+                stats.takeoff_pitch_deg = Some(snap.pitch_deg);
+                stats.takeoff_bank_deg = Some(snap.bank_deg);
                 // Prefer TOTAL WEIGHT (fuel + payload + empty); fall
                 // back to ZFW + fuel only when the SimVar isn't wired.
                 if let Some(tw) = snap.total_weight_kg {
@@ -8188,6 +8228,15 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
                     snap.touchdown_pitch_deg
                         .or_else(|| td_buf_sample.as_ref().map(|s| s.pitch_deg))
                         .unwrap_or(snap.pitch_deg),
+                );
+                // v0.5.16: bank at touchdown for wing-strike maintenance
+                // detection. MSFS latches bank too via the touchdown
+                // SimVar set; X-Plane via the buffered sample. Live
+                // snap as last-resort fallback (resumed flights).
+                stats.landing_bank_deg = Some(
+                    snap.touchdown_bank_deg
+                        .or_else(|| td_buf_sample.as_ref().map(|s| s.bank_deg))
+                        .unwrap_or(snap.bank_deg),
                 );
                 // Heading capture: MSFS gives us a magnetic-heading
                 // touchdown latch; the buffer carries true-heading
@@ -9081,14 +9130,40 @@ fn build_pirep_fields(
         // the latched SimVar reading. Pilots want to see the minus.
         // The peak (post-touchdown refinement) overrides this when
         // available since it's the worse of the two.
+        //
+        // v0.5.16: NUMERIC value only (no " fpm" suffix). The
+        // FatihKoz/DisposableSpecial dmaintenance plugin reads this
+        // field and runs `is_numeric()` against it; "-1641 fpm"
+        // returns false there → hard-landing penalty silently
+        // skipped. Pure numeric makes the maintenance check work.
         let value = stats.landing_peak_vs_fpm.unwrap_or(rate);
-        f.insert("Landing Rate".into(), format!("{:.0} fpm", value));
+        f.insert("Landing Rate".into(), format!("{:.0}", value));
     }
     if let Some(g) = stats.landing_peak_g_force.or(stats.landing_g_force) {
-        f.insert("Landing G-Force".into(), format!("{:.2} G", g));
+        // v0.5.16: pure numeric (no " G" suffix). Some maintenance
+        // plugins also read this; same is_numeric() reasoning.
+        f.insert("Landing G-Force".into(), format!("{:.2}", g));
     }
     if let Some(p) = stats.landing_pitch_deg {
-        f.insert("Landing Pitch".into(), format!("{:+.1}°", p));
+        // v0.5.16: pure numeric — `landing-pitch` slug is the tail-
+        // strike-on-landing trigger in dmaintenance.
+        f.insert("Landing Pitch".into(), format!("{:+.1}", p));
+    }
+    if let Some(b) = stats.landing_bank_deg {
+        // v0.5.16: bank at touchdown — `landing-roll` slug is the
+        // wing-strike-on-landing trigger in dmaintenance (default
+        // limit 15°). Pure numeric.
+        f.insert("Landing Roll".into(), format!("{:+.1}", b));
+    }
+    if let Some(p) = stats.takeoff_pitch_deg {
+        // v0.5.16: `takeoff-pitch` slug — tail-strike-on-takeoff
+        // trigger in dmaintenance. Pure numeric.
+        f.insert("Takeoff Pitch".into(), format!("{:+.1}", p));
+    }
+    if let Some(b) = stats.takeoff_bank_deg {
+        // v0.5.16: `takeoff-roll` slug — wing-strike-on-takeoff
+        // trigger in dmaintenance. Pure numeric.
+        f.insert("Takeoff Roll".into(), format!("{:+.1}", b));
     }
     if let Some(s) = stats.landing_speed_kt.filter(|v| *v > 0.0) {
         f.insert("Landing Speed".into(), format!("{:.0} kt", s));
