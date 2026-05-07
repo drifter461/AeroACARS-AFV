@@ -6976,6 +6976,9 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                         aircraft_icao: flight.aircraft_icao.clone(),
                         dep_icao: flight.dpt_airport.clone(),
                         arr_icao: flight.arr_airport.clone(),
+                        // v0.5.19: phpVMS-side registration overrides
+                        // sim's ATC-ID for the live-tracking stream.
+                        planned_registration: flight.planned_registration.clone(),
                     };
                     // v0.5.14: pass current phase so it's inlined into
                     // the position payload — Monitor doesn't have to

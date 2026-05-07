@@ -84,6 +84,12 @@ pub struct FlightMeta {
     pub aircraft_icao: String,
     pub dep_icao: String,
     pub arr_icao: String,
+    /// v0.5.19: phpVMS-side aircraft registration ("D-ALEU"). Sent
+    /// to the live-tracking server in preference to the simulator's
+    /// own ATC-ID (which payware addons often set to a generic
+    /// placeholder like "FFSTS"). Empty when the bid had no
+    /// registration on file — falls back to the snap's value then.
+    pub planned_registration: String,
 }
 
 /// v0.5.14: rich position telemetry. Goal is "PIREP-grade analysis from
@@ -354,7 +360,15 @@ impl Handle {
             // Identity
             callsign: meta.callsign.clone(),
             aircraft_icao: meta.aircraft_icao.clone(),
-            aircraft_registration: snap.aircraft_registration.clone(),
+            // v0.5.19: prefer phpVMS-side registration (from the bid)
+            // over what the sim reports — payware addons often put
+            // a placeholder ("FFSTS") in the SimConnect ATC-ID.
+            // Falls back to the sim value if the bid had nothing.
+            aircraft_registration: if !meta.planned_registration.is_empty() {
+                Some(meta.planned_registration.clone())
+            } else {
+                snap.aircraft_registration.clone()
+            },
             simulator: simulator_label(snap.simulator),
             dep: meta.dep_icao.clone(),
             arr: meta.arr_icao.clone(),

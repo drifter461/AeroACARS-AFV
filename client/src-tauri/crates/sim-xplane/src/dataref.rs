@@ -65,6 +65,14 @@ pub enum FieldId {
     WindXMs,
     /// Wind Z relative to airframe (m/s).
     WindZMs,
+    /// v0.5.19: meteorological wind speed at aircraft altitude (m/s).
+    /// Source for SimSnapshot::wind_speed_kt — was hardcoded None
+    /// in X-Plane builds before, MQTT live-tracking server reported
+    /// the wind field as missing for X-Plane pilots.
+    WindNowSpeedMs,
+    /// v0.5.19: meteorological wind direction at aircraft altitude
+    /// (degrees true). Source for SimSnapshot::wind_direction_deg.
+    WindNowDirectionDegT,
     // Phase 2 additions:
     LightLanding,
     LightBeacon,
@@ -360,6 +368,18 @@ pub const CATALOG: &[DatarefEntry] = &[
         name: "sim/weather/aircraft/wind_now_z_msc",
         field: FieldId::WindZMs,
     },
+    // v0.5.19: meteorological wind (absolute, not airframe-relative).
+    // Same DataRef family in XP11 + XP12. Live-tracking server uses
+    // these for the wind column in the monitor; was hardcoded None
+    // before so X-Plane pilots showed "—" for wind.
+    DatarefEntry {
+        name: "sim/weather/aircraft/wind_now_speed_msc",
+        field: FieldId::WindNowSpeedMs,
+    },
+    DatarefEntry {
+        name: "sim/weather/aircraft/wind_now_direction_degt",
+        field: FieldId::WindNowDirectionDegT,
+    },
     // Stall warning — annunciator (bool).
     DatarefEntry {
         name: "sim/cockpit2/annunciators/stall_warning",
@@ -489,6 +509,10 @@ pub struct XPlaneState {
     pub local_vz_ms: f32,
     pub wind_x_ms: f32,
     pub wind_z_ms: f32,
+    /// v0.5.19: absolute wind speed (m/s) at aircraft altitude.
+    pub wind_now_speed_ms: f32,
+    /// v0.5.19: absolute wind direction (degrees true) at aircraft altitude.
+    pub wind_now_direction_degt: f32,
     // Phase 2: multi-engine, lights, AP, surfaces, systems, environment.
     pub eng2_running: bool,
     pub eng3_running: bool,
@@ -602,6 +626,8 @@ impl XPlaneState {
             FieldId::LocalVzMs => self.local_vz_ms = value,
             FieldId::WindXMs => self.wind_x_ms = value,
             FieldId::WindZMs => self.wind_z_ms = value,
+            FieldId::WindNowSpeedMs => self.wind_now_speed_ms = value,
+            FieldId::WindNowDirectionDegT => self.wind_now_direction_degt = value,
             FieldId::LightLanding => self.light_landing = value > 0.5,
             FieldId::LightBeacon => self.light_beacon = value > 0.5,
             FieldId::LightStrobe => self.light_strobe = value > 0.5,
@@ -718,8 +744,22 @@ impl XPlaneState {
             touchdown_heading_mag_deg: None,
             touchdown_lat: None,
             touchdown_lon: None,
-            wind_direction_deg: None,
-            wind_speed_kt: None,
+            // v0.5.19: was hardcoded None — server-side live-tracking
+            // monitor showed "—" for wind on every X-Plane pilot.
+            // Now reads `wind_now_speed_msc` (m/s → kt) and
+            // `wind_now_direction_degt` (deg true) DataRefs. We treat
+            // 0/0 as "no wind data yet" (DataRefs not populated on
+            // first tick) → None.
+            wind_direction_deg: if self.wind_now_speed_ms > 0.0 {
+                Some(self.wind_now_direction_degt)
+            } else {
+                None
+            },
+            wind_speed_kt: if self.wind_now_speed_ms > 0.0 {
+                Some(self.wind_now_speed_ms * KT_PER_MS)
+            } else {
+                None
+            },
             qnh_hpa: if self.qnh_inhg > 0.0 {
                 // X-Plane reports altimeter setting in inHg natively;
                 // convert to hPa (1 inHg = 33.8639 hPa).
