@@ -3064,6 +3064,27 @@ async fn init_mqtt_publisher_via_provisioning(app: AppHandle) {
 
     let state = app.state::<AppState>();
 
+    // v0.5.14: Idempotency-Guard. Diese Funktion wird aus drei Stellen
+    // aufgerufen — Setup-Hook, cmd_login, phpvms_load_session. Beim
+    // App-Start mit gespeicherter Session feuern Setup + load_session
+    // praktisch zeitgleich → ohne Guard zwei Clients mit gleichem
+    // (alten v0.5.13) bzw. fast-gleichem (v0.5.14, ms-Timestamp)
+    // client_id, die sich gegenseitig vom Broker kicken. Ergebnis war
+    // Reconnect-Cycle alle 1-10 Sekunden.
+    //
+    // Mit Guard: nur der erste Call macht `start()`, alle weiteren
+    // Aufrufe sind no-op. `phpvms_logout` setzt `state.mqtt = None`
+    // sauber zurück, sodass der nächste Login wieder startet.
+    {
+        let guard = state.mqtt.lock().await;
+        if guard.is_some() {
+            tracing::debug!(
+                "live-tracking: publisher already running, skipping re-init"
+            );
+            return;
+        }
+    }
+
     // Check cache first.
     let cached = (|| -> Option<MqttConfig> {
         let user = secrets::load_api_key(MQTT_KEYRING_USERNAME).ok().flatten()?;
@@ -5635,21 +5656,50 @@ async fn flight_end(
             {
                 let mqtt = state.mqtt.lock().await;
                 if let Some(handle) = mqtt.as_ref() {
-                    let payload = aeroacars_mqtt::PirepPayload {
-                        ts: Utc::now().timestamp_millis(),
-                        pirep_id: flight.pirep_id.clone(),
-                        flight_number: format_callsign(
-                            &flight.airline_icao,
-                            &flight.flight_number,
-                        ),
-                        dep: flight.dpt_airport.clone(),
-                        arr: flight.arr_airport.clone(),
-                        block_time_min: body.flight_time,
-                        fuel_used_kg: body.fuel_used.map(|kg| kg as f32),
-                        landing_vs_fpm: body.landing_rate.map(|r| r as i32),
-                        notes: None,
+                    // Snapshot the rich stats inside a short-lived scope so
+                    // the std::sync::MutexGuard doesn't span any later
+                    // .await — same pattern as the touchdown publish.
+                    let pirep_payload = {
+                        let stats = flight.stats.lock().expect("flight stats");
+                        let touchdown_count = stats.touchdown_events.len() as u32;
+                        aeroacars_mqtt::PirepPayload {
+                            ts: Utc::now().timestamp_millis(),
+                            pirep_id: flight.pirep_id.clone(),
+                            flight_number: format_callsign(
+                                &flight.airline_icao,
+                                &flight.flight_number,
+                            ),
+                            dep: flight.dpt_airport.clone(),
+                            arr: flight.arr_airport.clone(),
+                            block_time_min: body.flight_time,
+                            flight_time_min: body.flight_time,
+                            distance_nm: body.distance.map(|d| d as f32),
+                            fuel_used_kg: body.fuel_used.map(|kg| kg as f32),
+                            planned_burn_kg: stats.planned_burn_kg,
+                            block_fuel_kg: stats.block_fuel_kg,
+                            takeoff_fuel_kg: stats.takeoff_fuel_kg,
+                            landing_fuel_kg: stats.landing_fuel_kg,
+                            takeoff_weight_kg: stats.takeoff_weight_kg.map(|w| w as f32),
+                            landing_weight_kg: stats.landing_weight_kg.map(|w| w as f32),
+                            planned_tow_kg: stats.planned_tow_kg,
+                            planned_ldw_kg: stats.planned_ldw_kg,
+                            peak_altitude_ft: stats.peak_altitude_ft.map(|v| v.round() as i32),
+                            landing_vs_fpm: body.landing_rate.map(|r| r as i32),
+                            landing_score: stats.landing_score.map(|s| s.numeric()),
+                            go_around_count: Some(stats.go_around_count),
+                            touchdown_count: Some(touchdown_count),
+                            dep_gate: stats.dep_gate.clone(),
+                            arr_gate: stats.arr_gate.clone(),
+                            approach_runway: stats.approach_runway.clone(),
+                            divert: stats.divert_hint.as_ref().map(|_| true),
+                            diverted_to: stats
+                                .divert_hint
+                                .as_ref()
+                                .and_then(|h| h.actual_icao.clone()),
+                            notes: None,
+                        }
                     };
-                    handle.pirep(payload);
+                    handle.pirep(pirep_payload);
                 }
             }
             consume_bid_best_effort(&client, flight.bid_id).await;
@@ -6578,9 +6628,14 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
             // Plus snapshot Takeoff/Landing-at flags so we can fire
             // Discord-Webhook-Posts beim None→Some-Übergang nach
             // step_flight (v0.4.0).
-            let (prev_phase, prev_takeoff_at, prev_landing_at) = {
+            let (prev_phase, prev_block_off_at, prev_takeoff_at, prev_landing_at) = {
                 let stats = flight.stats.lock().expect("flight stats");
-                (stats.phase, stats.takeoff_at, stats.landing_at)
+                (
+                    stats.phase,
+                    stats.block_off_at,
+                    stats.takeoff_at,
+                    stats.landing_at,
+                )
             };
             // Update running stats AND step the flight-phase FSM.
             let phase_change = step_flight(&flight, &snap);
@@ -6640,6 +6695,73 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                     tokio::spawn(discord::post_event(discord::EventKind::Landing, ctx));
                 }
             }
+            // v0.5.14: MQTT block + takeoff snapshots. Fire on the same
+            // None→Some transitions used by the Discord webhook block
+            // above. Block fires when block_off_at is stamped (=
+            // pushback / first taxi-out motion); takeoff fires when
+            // takeoff_at is stamped (= aircraft has lifted off).
+            // Both use retain=true so a Monitor that joins mid-flight
+            // sees the snapshot.
+            {
+                let block_payload_opt: Option<aeroacars_mqtt::BlockPayload> = {
+                    let stats = flight.stats.lock().expect("flight stats");
+                    if prev_block_off_at.is_none() && stats.block_off_at.is_some() {
+                        Some(aeroacars_mqtt::BlockPayload {
+                            ts: stats
+                                .block_off_at
+                                .map(|t| t.timestamp_millis())
+                                .unwrap_or(0),
+                            block_fuel_kg: stats.block_fuel_kg,
+                            planned_block_fuel_kg: stats.planned_block_fuel_kg,
+                            planned_burn_kg: stats.planned_burn_kg,
+                            planned_reserve_kg: stats.planned_reserve_kg,
+                            planned_zfw_kg: stats.planned_zfw_kg,
+                            planned_tow_kg: stats.planned_tow_kg,
+                            planned_ldw_kg: stats.planned_ldw_kg,
+                            planned_max_zfw_kg: stats.planned_max_zfw_kg,
+                            planned_max_tow_kg: stats.planned_max_tow_kg,
+                            planned_max_ldw_kg: stats.planned_max_ldw_kg,
+                            planned_route: stats.planned_route.clone(),
+                            planned_alternate: stats.planned_alternate.clone(),
+                            dep_gate: stats.dep_gate.clone(),
+                            dep_metar: stats.dep_metar_raw.clone(),
+                        })
+                    } else {
+                        None
+                    }
+                };
+                let takeoff_payload_opt: Option<aeroacars_mqtt::TakeoffPayload> = {
+                    let stats = flight.stats.lock().expect("flight stats");
+                    if prev_takeoff_at.is_none() && stats.takeoff_at.is_some() {
+                        Some(aeroacars_mqtt::TakeoffPayload {
+                            ts: stats
+                                .takeoff_at
+                                .map(|t| t.timestamp_millis())
+                                .unwrap_or(0),
+                            takeoff_weight_kg: stats.takeoff_weight_kg.map(|w| w as f32),
+                            takeoff_fuel_kg: stats.takeoff_fuel_kg,
+                            takeoff_lat: Some(snap.lat),
+                            takeoff_lon: Some(snap.lon),
+                            dep_metar: stats.dep_metar_raw.clone(),
+                            dep_runway: snap.selected_runway.clone(),
+                        })
+                    } else {
+                        None
+                    }
+                };
+                if block_payload_opt.is_some() || takeoff_payload_opt.is_some() {
+                    let app_state = app.state::<AppState>();
+                    let mqtt = app_state.mqtt.lock().await;
+                    if let Some(handle) = mqtt.as_ref() {
+                        if let Some(p) = block_payload_opt {
+                            handle.block(p);
+                        }
+                        if let Some(p) = takeoff_payload_opt {
+                            handle.takeoff(p);
+                        }
+                    }
+                }
+            }
             // Detect when the touchdown-analyzer window has just locked
             // in a final score so we can emit the activity-log entry
             // exactly once. `landing_score` flips from None to Some
@@ -6657,6 +6779,7 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                 let payload_opt: Option<aeroacars_mqtt::TouchdownPayload> = {
                     let stats = flight.stats.lock().expect("flight stats");
                     stats.landing_at.map(|landing_at| {
+                        let rwy_match = stats.runway_match.as_ref();
                         aeroacars_mqtt::TouchdownPayload {
                             ts: landing_at.timestamp_millis(),
                             vs_fpm: stats
@@ -6671,14 +6794,33 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                             gs_kt: None,
                             pitch_deg: stats.landing_pitch_deg,
                             bank_deg: None,
-                            g_load: stats.landing_peak_g_force,
+                            g_load: stats.landing_g_force,
+                            peak_g_load: stats.landing_peak_g_force,
                             sideslip_deg: stats.touchdown_sideslip_deg,
-                            headwind_kt: None,
-                            crosswind_kt: None,
+                            headwind_kt: stats.landing_headwind_kt,
+                            crosswind_kt: stats.landing_crosswind_kt,
                             score: stats.landing_score.map(|s| s.numeric()),
                             bounce: Some(stats.bounce_count > 0),
+                            bounce_count: Some(stats.bounce_count),
                             runway: stats.approach_runway.clone(),
                             airport: Some(flight.arr_airport.clone()),
+                            lat: stats.landing_lat,
+                            lon: stats.landing_lon,
+                            heading_true_deg: stats.landing_heading_true_deg,
+                            heading_mag_deg: stats.landing_heading_deg,
+                            landing_weight_kg: stats.landing_weight_kg.map(|w| w as f32),
+                            landing_fuel_kg: stats.landing_fuel_kg,
+                            rollout_distance_m: stats.rollout_distance_m.map(|d| d as f32),
+                            approach_vs_stddev_fpm: stats.approach_vs_stddev_fpm,
+                            approach_bank_stddev_deg: stats.approach_bank_stddev_deg,
+                            go_around_count: Some(stats.go_around_count),
+                            arr_metar: stats.arr_metar_raw.clone(),
+                            runway_match_icao: rwy_match.map(|m| m.airport_ident.clone()),
+                            runway_match_ident: rwy_match.map(|m| m.runway_ident.clone()),
+                            runway_match_distance_m: rwy_match
+                                .map(|m| (m.touchdown_distance_from_threshold_ft as f32) * 0.3048),
+                            runway_match_centerline_offset_m: rwy_match
+                                .map(|m| m.centerline_distance_m as f32),
                         }
                     })
                 };
@@ -6793,7 +6935,11 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                         dep_icao: flight.dpt_airport.clone(),
                         arr_icao: flight.arr_airport.clone(),
                     };
-                    handle.position(&snap, &meta);
+                    // v0.5.14: pass current phase so it's inlined into
+                    // the position payload — Monitor doesn't have to
+                    // wait for a separate phase-topic delivery.
+                    let live_phase = phase_change.unwrap_or(prev_phase);
+                    handle.position(&snap, &meta, live_phase);
                 }
             }
 

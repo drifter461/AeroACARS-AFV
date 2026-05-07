@@ -21,13 +21,13 @@
 //! `touchdown`/`pirep` are events, not state, and use `retain=false`.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rumqttc::{AsyncClient, Event, LastWill, MqttOptions, Packet, QoS, TlsConfiguration, Transport};
 use serde::Serialize;
-use sim_core::{FlightPhase, SimSnapshot};
+use sim_core::{FlightPhase, SimSnapshot, Simulator};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use url::Url;
@@ -86,21 +86,80 @@ pub struct FlightMeta {
     pub arr_icao: String,
 }
 
+/// v0.5.14: rich position telemetry. Goal is "PIREP-grade analysis from
+/// live data alone" — server can replay any flight, build approach
+/// profiles, score touchdowns, audit FSM transitions, all without
+/// needing the recorded JSONL. Sent every 5-30 s (phase-dependent).
+///
+/// Sizing: typical payload ~600-800 B JSON. At 30 s cadence in cruise
+/// that's ~24 KB/h per pilot. At 5 s in approach: ~140 KB/h. Well
+/// within Mosquitto+Caddy throughput on the VPS.
 #[derive(Clone, Debug, Serialize)]
 struct PositionPayload {
     ts: i64,
+    /// Current FSM phase as label (PREFLIGHT, TAXI_OUT, TAKEOFF, CLIMB,
+    /// CRUISE, HOLDING, DESCENT, APPROACH, FINAL, LANDING, TAXI_IN,
+    /// ON_BLOCK). Inlined into every position so the Monitor never has
+    /// to wait for a separate phase-topic delivery.
+    phase: &'static str,
+
+    // ---- Position ----
     lat: f64,
     lon: f64,
-    alt_ft: i32,
+    alt_ft: i32,           // MSL altitude
+    agl_ft: i32,           // Above-ground (for approach/landing analysis)
+
+    // ---- Attitude ----
+    pitch_deg: f32,
+    bank_deg: f32,
+    hdg_true: i32,
+    hdg_mag: i32,
+
+    // ---- Speeds ----
     ias_kt: i32,
     tas_kt: i32,
     gs_kt: i32,
     vs_fpm: i32,
-    hdg_true: i32,
-    hdg_mag: i32,
+    mach: Option<f32>,
+
+    // ---- Forces / state ----
+    g_force: f32,
     on_ground: bool,
+    parking_brake: bool,
+    stall_warning: bool,
+    overspeed_warning: bool,
+
+    // ---- Configuration ----
+    gear_position: f32,    // 0=up, 1=down
+    flaps_position: f32,   // 0..1
+    spoilers_position: Option<f32>,
+    spoilers_armed: Option<bool>,
+    engines_running: u8,
+
+    // ---- Fuel ----
+    fuel_total_kg: f32,
+    fuel_used_kg: f32,
+    fuel_flow_kg_h: Option<f32>,
+    total_weight_kg: Option<f32>,
+
+    // ---- Environment ----
+    wind_dir_deg: Option<f32>,
+    wind_speed_kt: Option<f32>,
+    oat_c: Option<f32>,
+    qnh_hpa: Option<f32>,
+
+    // ---- Autopilot (Boolean state) ----
+    ap_master: Option<bool>,
+    ap_hdg: Option<bool>,
+    ap_alt: Option<bool>,
+    ap_nav: Option<bool>,
+    ap_app: Option<bool>,
+
+    // ---- Identity ----
     callsign: String,
     aircraft_icao: String,
+    aircraft_registration: Option<String>,
+    simulator: &'static str,
     dep: String,
     arr: String,
 }
@@ -109,6 +168,44 @@ struct PositionPayload {
 struct PhasePayload {
     ts: i64,
     phase: &'static str,
+}
+
+/// v0.5.14: authoritative block snapshot. Fires once when the FSM
+/// transitions Preflight/Boarding → Pushback/TaxiOut (= block-off
+/// is stamped). Carries fuel + planned-OFP values that are STABLE
+/// at this point — `position` payloads during PREFLIGHT show LIVE
+/// fuel which can still be loading and is NOT authoritative.
+#[derive(Clone, Debug, Serialize)]
+pub struct BlockPayload {
+    pub ts: i64,
+    pub block_fuel_kg: Option<f32>,
+    pub planned_block_fuel_kg: Option<f32>,
+    pub planned_burn_kg: Option<f32>,
+    pub planned_reserve_kg: Option<f32>,
+    pub planned_zfw_kg: Option<f32>,
+    pub planned_tow_kg: Option<f32>,
+    pub planned_ldw_kg: Option<f32>,
+    pub planned_max_zfw_kg: Option<f32>,
+    pub planned_max_tow_kg: Option<f32>,
+    pub planned_max_ldw_kg: Option<f32>,
+    pub planned_route: Option<String>,
+    pub planned_alternate: Option<String>,
+    pub dep_gate: Option<String>,
+    pub dep_metar: Option<String>,
+}
+
+/// v0.5.14: takeoff snapshot. Fires once when the FSM stamps
+/// `takeoff_at` (= aircraft has left the ground). Authoritative
+/// TOW + fuel-at-takeoff values for fuel-burn / overweight analysis.
+#[derive(Clone, Debug, Serialize)]
+pub struct TakeoffPayload {
+    pub ts: i64,
+    pub takeoff_weight_kg: Option<f32>,
+    pub takeoff_fuel_kg: Option<f32>,
+    pub takeoff_lat: Option<f64>,
+    pub takeoff_lon: Option<f64>,
+    pub dep_metar: Option<String>,
+    pub dep_runway: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -120,13 +217,33 @@ pub struct TouchdownPayload {
     pub pitch_deg: Option<f32>,
     pub bank_deg: Option<f32>,
     pub g_load: Option<f32>,
+    pub peak_g_load: Option<f32>,
     pub sideslip_deg: Option<f32>,
     pub headwind_kt: Option<f32>,
     pub crosswind_kt: Option<f32>,
     pub score: Option<i32>,
     pub bounce: Option<bool>,
+    pub bounce_count: Option<u8>,
     pub runway: Option<String>,
     pub airport: Option<String>,
+    pub lat: Option<f64>,
+    pub lon: Option<f64>,
+    pub heading_true_deg: Option<f32>,
+    pub heading_mag_deg: Option<f32>,
+    pub landing_weight_kg: Option<f32>,
+    pub landing_fuel_kg: Option<f32>,
+    pub rollout_distance_m: Option<f32>,
+    /// V/S standard deviation over the approach window (fpm) — lower = more stable.
+    pub approach_vs_stddev_fpm: Option<f32>,
+    /// Bank-angle standard deviation over the approach window (deg).
+    pub approach_bank_stddev_deg: Option<f32>,
+    pub go_around_count: Option<u32>,
+    pub arr_metar: Option<String>,
+    /// True if a runway was correlated from the touchdown coord (OurAirports CSV).
+    pub runway_match_icao: Option<String>,
+    pub runway_match_ident: Option<String>,
+    pub runway_match_distance_m: Option<f32>,
+    pub runway_match_centerline_offset_m: Option<f32>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -137,14 +254,35 @@ pub struct PirepPayload {
     pub dep: String,
     pub arr: String,
     pub block_time_min: Option<i32>,
+    pub flight_time_min: Option<i32>,
+    pub distance_nm: Option<f32>,
     pub fuel_used_kg: Option<f32>,
+    pub planned_burn_kg: Option<f32>,
+    pub block_fuel_kg: Option<f32>,
+    pub takeoff_fuel_kg: Option<f32>,
+    pub landing_fuel_kg: Option<f32>,
+    pub takeoff_weight_kg: Option<f32>,
+    pub landing_weight_kg: Option<f32>,
+    pub planned_tow_kg: Option<f32>,
+    pub planned_ldw_kg: Option<f32>,
+    pub peak_altitude_ft: Option<i32>,
     pub landing_vs_fpm: Option<i32>,
+    pub landing_score: Option<i32>,
+    pub go_around_count: Option<u32>,
+    pub touchdown_count: Option<u32>,
+    pub dep_gate: Option<String>,
+    pub arr_gate: Option<String>,
+    pub approach_runway: Option<String>,
+    pub divert: Option<bool>,
+    pub diverted_to: Option<String>,
     pub notes: Option<String>,
 }
 
 enum Cmd {
     Position(Box<PositionPayload>),
     Phase(PhasePayload),
+    Block(Box<BlockPayload>),
+    Takeoff(Box<TakeoffPayload>),
     Touchdown(Box<TouchdownPayload>),
     Pirep(Box<PirepPayload>),
     Shutdown,
@@ -156,21 +294,68 @@ pub struct Handle {
 }
 
 impl Handle {
-    pub fn position(&self, snap: &SimSnapshot, meta: &FlightMeta) {
+    pub fn position(&self, snap: &SimSnapshot, meta: &FlightMeta, phase: FlightPhase) {
         let payload = PositionPayload {
             ts: snap.timestamp.timestamp_millis(),
+            phase: phase_label(phase),
+
+            // Position
             lat: snap.lat,
             lon: snap.lon,
             alt_ft: snap.altitude_msl_ft.round() as i32,
+            agl_ft: snap.altitude_agl_ft.round() as i32,
+
+            // Attitude
+            pitch_deg: snap.pitch_deg,
+            bank_deg: snap.bank_deg,
+            hdg_true: snap.heading_deg_true.round() as i32,
+            hdg_mag: snap.heading_deg_magnetic.round() as i32,
+
+            // Speeds
             ias_kt: snap.indicated_airspeed_kt.round() as i32,
             tas_kt: snap.true_airspeed_kt.round() as i32,
             gs_kt: snap.groundspeed_kt.round() as i32,
             vs_fpm: snap.vertical_speed_fpm.round() as i32,
-            hdg_true: snap.heading_deg_true.round() as i32,
-            hdg_mag: snap.heading_deg_magnetic.round() as i32,
+            mach: snap.mach,
+
+            // Forces / state
+            g_force: snap.g_force,
             on_ground: snap.on_ground,
+            parking_brake: snap.parking_brake,
+            stall_warning: snap.stall_warning,
+            overspeed_warning: snap.overspeed_warning,
+
+            // Config
+            gear_position: snap.gear_position,
+            flaps_position: snap.flaps_position,
+            spoilers_position: snap.spoilers_handle_position,
+            spoilers_armed: snap.spoilers_armed,
+            engines_running: snap.engines_running,
+
+            // Fuel
+            fuel_total_kg: snap.fuel_total_kg,
+            fuel_used_kg: snap.fuel_used_kg,
+            fuel_flow_kg_h: snap.fuel_flow_kg_per_h,
+            total_weight_kg: snap.total_weight_kg,
+
+            // Environment
+            wind_dir_deg: snap.wind_direction_deg,
+            wind_speed_kt: snap.wind_speed_kt,
+            oat_c: snap.outside_air_temp_c,
+            qnh_hpa: snap.qnh_hpa,
+
+            // AP
+            ap_master: snap.autopilot_master,
+            ap_hdg: snap.autopilot_heading,
+            ap_alt: snap.autopilot_altitude,
+            ap_nav: snap.autopilot_nav,
+            ap_app: snap.autopilot_approach,
+
+            // Identity
             callsign: meta.callsign.clone(),
             aircraft_icao: meta.aircraft_icao.clone(),
+            aircraft_registration: snap.aircraft_registration.clone(),
+            simulator: simulator_label(snap.simulator),
             dep: meta.dep_icao.clone(),
             arr: meta.arr_icao.clone(),
         };
@@ -191,6 +376,28 @@ impl Handle {
             phase: phase_label(phase),
         };
         let _ = self.tx.try_send(Cmd::Phase(payload));
+    }
+
+    pub fn block(&self, payload: BlockPayload) {
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let _ = tokio::time::timeout(
+                Duration::from_millis(500),
+                tx.send(Cmd::Block(Box::new(payload))),
+            )
+            .await;
+        });
+    }
+
+    pub fn takeoff(&self, payload: TakeoffPayload) {
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let _ = tokio::time::timeout(
+                Duration::from_millis(500),
+                tx.send(Cmd::Takeoff(Box::new(payload))),
+            )
+            .await;
+        });
     }
 
     pub fn touchdown(&self, payload: TouchdownPayload) {
@@ -240,11 +447,23 @@ pub fn start(cfg: MqttConfig) -> Result<Handle> {
         _ => url.host_str().context("no host in broker_url")?.to_string(),
     };
 
+    // v0.5.14: client_id eindeutig pro start()-Aufruf (PID + ms-Timestamp).
+    // Falls die Idempotency-Guard im Caller versehentlich umgangen wird
+    // (Race zwischen check und insert in `state.mqtt`), würden zwei
+    // Clients mit gleichem client_id sich gegenseitig vom Broker kicken
+    // (MQTT-Spec: "Client X already connected, closing old connection").
+    // Belt-and-suspenders: unterschiedliche IDs → koexistierende Clients
+    // wären zwar unschön (doppelte Pubs), aber kein Connection-Drop.
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
     let client_id = format!(
-        "aeroacars-pilot-{}-{}-{}",
+        "aeroacars-pilot-{}-{}-{}-{}",
         cfg.va_prefix,
         cfg.pilot_id,
-        std::process::id()
+        std::process::id(),
+        now_ms
     );
     let status_topic = cfg.topic("status");
 
@@ -302,10 +521,29 @@ pub fn start(cfg: MqttConfig) -> Result<Handle> {
             warn!("initial status publish failed: {e}");
         }
 
+        // v0.5.14: Initial phase publish. Without this, a pilot
+        // sitting at the gate (FSM = Preflight, no transition yet)
+        // never publishes a phase → Monitor shows "—". Retained
+        // message means new Monitor subscribers see it on connect.
+        let initial_phase = PhasePayload {
+            ts: chrono::Utc::now().timestamp_millis(),
+            phase: phase_label(FlightPhase::Preflight),
+        };
+        publish_json(
+            &pub_client,
+            &cfg_for_pub.topic("phase"),
+            &initial_phase,
+            QoS::AtLeastOnce,
+            true,
+        )
+        .await;
+
         while let Some(cmd) = rx.recv().await {
             match cmd {
                 Cmd::Position(p) => publish_json(&pub_client, &cfg_for_pub.topic("position"), &p, QoS::AtMostOnce, true).await,
                 Cmd::Phase(p) => publish_json(&pub_client, &cfg_for_pub.topic("phase"), &p, QoS::AtLeastOnce, true).await,
+                Cmd::Block(p) => publish_json(&pub_client, &cfg_for_pub.topic("block"), &p, QoS::AtLeastOnce, true).await,
+                Cmd::Takeoff(p) => publish_json(&pub_client, &cfg_for_pub.topic("takeoff"), &p, QoS::AtLeastOnce, true).await,
                 Cmd::Touchdown(p) => publish_json(&pub_client, &cfg_for_pub.topic("touchdown"), &p, QoS::AtLeastOnce, false).await,
                 Cmd::Pirep(p) => publish_json(&pub_client, &cfg_for_pub.topic("pirep"), &p, QoS::AtLeastOnce, false).await,
                 Cmd::Shutdown => {
@@ -343,6 +581,16 @@ fn default_tls_config() -> TlsConfiguration {
         .with_root_certificates(roots)
         .with_no_client_auth();
     TlsConfiguration::Rustls(Arc::new(cfg))
+}
+
+fn simulator_label(sim: Simulator) -> &'static str {
+    match sim {
+        Simulator::Msfs2020 => "MSFS_2020",
+        Simulator::Msfs2024 => "MSFS_2024",
+        Simulator::XPlane11 => "XP11",
+        Simulator::XPlane12 => "XP12",
+        Simulator::Other => "OTHER",
+    }
 }
 
 fn phase_label(p: FlightPhase) -> &'static str {
