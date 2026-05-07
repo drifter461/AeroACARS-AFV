@@ -4,6 +4,53 @@ Alle nennenswerten Änderungen an AeroACARS. Format: lose an [Keep a Changelog](
 
 ---
 
+## [v0.5.10] — 2026-05-07
+
+🎯 **Phasen-Erkennung für GA, Helikopter und Pattern-Flüge — komplette FSM-Audit.**
+
+Pilot-Frage: „Können wir mal alle Flugphasen für GA / Airliner / Heli prüfen — die generelle Erkennung muss besser werden?" — ja, die FSM war bisher auf Airliner-Profile optimiert. Drei Klassen-Bugs aufgedeckt und behoben.
+
+### 🐛 Behoben
+
+**Bug A — Helikopter (vertikaler Start aus Taxi):**
+TaxiOut → TakeoffRoll erwartet GS > 30 kt am Boden. Helikopter erreichen das nie (vertikales Lift-off). Vorher: FSM hängt für den ganzen Flug in TaxiOut.
+
+Fix: Wenn in TaxiOut der `on_ground`-Flag von true auf false wechselt UND Engines laufen → direkt Takeoff (TakeoffRoll überspringen). Vertikales Lift-off wird erkannt.
+
+**Bug A2 — Helikopter (pure Hover-Departure aus Boarding):**
+Heli die direkt vom Gate ohne Bodenrollen abheben (GS bleibt 0) gehen nie auf TaxiOut, also auch nicht TakeoffRoll. FSM stuck in Boarding.
+
+Fix: Boarding → Takeoff direkt wenn `on_ground` edge feuert + Engines laufen + AGL > 3 ft (false-positive-Schutz gegen Sim-Glitches während Boarding).
+
+**Bug B — GA-Niedrigflug (Climb-Sackgasse):**
+Cessna mit Cruise auf 3000 ft AGL: erreicht nie Climb → Cruise (braucht > 5000 ft) UND erreicht nie Climb → Descent (braucht VS < -500 fpm, GA sinkt sanft mit -300). FSM bleibt komplett in Climb.
+
+Fix: Climb → Descent triggert jetzt in DREI Szenarien:
+- Standard TOD (Airliner): vs<-500 + lost>200 ft
+- **NEU** Low-altitude approach: vs<-100 + AGL<3000 + lost>500 ft (GA-Pattern-Anflug)
+- **NEU** Near-ground catchall: AGL<2000 + lost>800 ft + vs<0 (Bush-Flying / Heli-Operations)
+
+**Bug C — Pattern-Cruise nicht erkannt:**
+Aircraft die auf 1500-3000 ft AGL leveln (Pattern, GA-Cruise, Heli-Enroute): Climb→Cruise feuert nie (braucht AGL > 5000).
+
+Fix: Alternativer Climb → Cruise Pfad wenn `vs.abs()<100 + Höhe stabil über Climb-Peak (Δ<100 ft) + AGL>1000 ft`. Echtes Level-Off auf jeder Höhe wird erkannt, ohne dass momentane VS=0-Smoothing während Climb fälschlich triggert.
+
+### Phasen-Audit-Ergebnis (alle Klassen)
+
+| Klasse | Boarding→Taxi | Takeoff | Cruise | Descent | Approach→Landing |
+|---|---|---|---|---|---|
+| Airliner | ✅ | ✅ | ✅ FL | ✅ TOD-Drop | ✅ |
+| GA Cessna 172 | ✅ | ✅ | ✅ **NEU** | ✅ **NEU** | ✅ |
+| Helikopter mit Taxi | ✅ | ✅ **NEU** vertikal | ✅ **NEU** | ✅ **NEU** | ✅ |
+| Helikopter pure Hover | ✅ **NEU** direct | ✅ **NEU** | ✅ **NEU** | ✅ **NEU** | ✅ |
+
+### 🛠 Intern
+- Tests: 82 grün
+- Wirkt für **MSFS und X-Plane** (FSM-Code ist sim-agnostisch)
+- Universal-Arrived-Fallback bleibt als zweite Verteidigungslinie aktiv
+
+---
+
 ## [v0.5.9] — 2026-05-07
 
 🩹 **Climb→Descent FSM-Bug: ein einzelner VS-Spike beendete den Steigflug.**

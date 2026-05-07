@@ -6730,6 +6730,33 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
                     FlightPhase::TaxiOut
                 };
             }
+            // v0.5.10: pure-hover helicopter departure escape hatch.
+            // Helis that lift off straight from the gate without
+            // ground-rolling (GS stays at 0) would otherwise stay in
+            // Boarding forever. Detect the on_ground edge with
+            // engines running and skip straight to Takeoff.
+            else if was_on_ground
+                && !snap.on_ground
+                && snap.engines_running > 0
+                && snap.altitude_agl_ft > 3.0
+            {
+                next_phase = FlightPhase::Takeoff;
+                stats.takeoff_at = Some(now);
+                stats.takeoff_fuel_kg = Some(snap.fuel_total_kg);
+                if let Some(tw) = snap.total_weight_kg {
+                    stats.takeoff_weight_kg = Some(tw as f64);
+                } else {
+                    let zfw = snap.zfw_kg.unwrap_or(0.0);
+                    let weight = zfw as f64 + snap.fuel_total_kg as f64;
+                    if weight > 0.0 {
+                        stats.takeoff_weight_kg = Some(weight);
+                    }
+                }
+                tracing::info!(
+                    pirep_id = %flight.pirep_id,
+                    "vertical takeoff from boarding (helicopter pure-hover) — Boarding → Takeoff"
+                );
+            }
         }
         FlightPhase::Pushback => {
             // Pushback → TaxiOut Übergang. Echter Ablauf am Gate:
@@ -6789,6 +6816,34 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
                 && snap.engines_running > 0
             {
                 next_phase = FlightPhase::TakeoffRoll;
+            }
+            // v0.5.10: helicopter / VTOL escape hatch.
+            //
+            // Helicopters take off vertically — ground speed never
+            // exceeds 30 kt on the ground, so TakeoffRoll never
+            // fires. Without this, the FSM would stay in TaxiOut
+            // forever during the entire helicopter flight.
+            //
+            // When we observe the on_ground edge (true → false)
+            // while still in TaxiOut, treat it as a direct takeoff:
+            // skip TakeoffRoll, jump straight to Takeoff.
+            else if was_on_ground && !snap.on_ground && snap.engines_running > 0 {
+                next_phase = FlightPhase::Takeoff;
+                stats.takeoff_at = Some(now);
+                stats.takeoff_fuel_kg = Some(snap.fuel_total_kg);
+                if let Some(tw) = snap.total_weight_kg {
+                    stats.takeoff_weight_kg = Some(tw as f64);
+                } else {
+                    let zfw = snap.zfw_kg.unwrap_or(0.0);
+                    let weight = zfw as f64 + snap.fuel_total_kg as f64;
+                    if weight > 0.0 {
+                        stats.takeoff_weight_kg = Some(weight);
+                    }
+                }
+                tracing::info!(
+                    pirep_id = %flight.pirep_id,
+                    "vertical takeoff detected (helicopter / VTOL) — TaxiOut → Takeoff"
+                );
             }
         }
         FlightPhase::TakeoffRoll => {
@@ -6874,11 +6929,48 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
             // thousands of feet quickly).
             let lost_from_peak =
                 stats.climb_peak_msl.unwrap_or(0.0) - snap.altitude_msl_ft as f32;
-            if snap.vertical_speed_fpm < -500.0 && lost_from_peak > 200.0 {
+
+            // Climb → Descent triggers in any of three scenarios:
+            //   (a) Standard TOD: sustained sink (-500 fpm) AND
+            //       altitude actually lost (>200 ft) — Airliners.
+            //   (b) v0.5.10: GA / Heli low-altitude approach —
+            //       gentle descent (-100 fpm) AND we're below
+            //       3000 ft AGL AND lost >500 ft from climb peak.
+            //       Catches GA flights that cruise at 2-3000 ft and
+            //       descend gently at 300-500 fpm to a pattern
+            //       altitude landing.
+            //   (c) v0.5.10: anything significantly below climb peak
+            //       AND below 2000 ft AGL — robust catchall for
+            //       low-altitude operations where neither (a) nor
+            //       (b) clearly fires (helicopter ops, bush flying).
+            let standard_tod = snap.vertical_speed_fpm < -500.0
+                && lost_from_peak > 200.0;
+            let low_altitude_descent = snap.vertical_speed_fpm < -100.0
+                && snap.altitude_agl_ft < 3000.0
+                && lost_from_peak > 500.0;
+            let near_ground_descent = snap.altitude_agl_ft < 2000.0
+                && lost_from_peak > 800.0
+                && snap.vertical_speed_fpm < 0.0;
+            if standard_tod || low_altitude_descent || near_ground_descent {
                 next_phase = FlightPhase::Descent;
             } else if snap.vertical_speed_fpm.abs() < 200.0
                 && snap.altitude_agl_ft > 5000.0
             {
+                next_phase = FlightPhase::Cruise;
+            } else if snap.vertical_speed_fpm.abs() < 100.0
+                && lost_from_peak.abs() < 100.0
+                && stats.climb_peak_msl.is_some()
+                && snap.altitude_agl_ft > 1000.0
+            {
+                // v0.5.10: low-altitude Cruise alternative. Pattern /
+                // GA / heli flights that level off below 5000 ft AGL
+                // (e.g. Cessna at 2500 ft, heli at 1500 ft) deserve a
+                // proper Cruise phase too. Trigger when level flight
+                // is sustained: very low VS (<100 fpm) AND altitude
+                // hasn't drifted significantly from climb peak (<100 ft).
+                // The latter ensures we're actually at a level
+                // segment, not in the middle of a continuing climb
+                // momentarily smoothing through 0 fpm.
                 next_phase = FlightPhase::Cruise;
             }
         }
