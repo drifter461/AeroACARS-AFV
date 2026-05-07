@@ -250,6 +250,16 @@ pub struct TouchdownPayload {
     pub runway_match_ident: Option<String>,
     pub runway_match_distance_m: Option<f32>,
     pub runway_match_centerline_offset_m: Option<f32>,
+    /// v0.5.22: total length of the matched runway in metres (from the
+    /// OurAirports CSV row). Required server-side for the "Bahn-Auslastung"
+    /// sub-score (rollout / length × 100) so the live monitor can show
+    /// the same breakdown the AeroACARS app shows pilots in-flight.
+    pub runway_length_m: Option<f32>,
+    /// v0.5.22: (actual_burn − planned_burn) / planned_burn × 100. Same
+    /// computation as `LandingRecord.fuel_efficiency_pct` in the client
+    /// — drives the "Spritverbrauch" sub-score. None when the bid had
+    /// no SimBrief OFP attached (planned-burn unavailable).
+    pub fuel_efficiency_pct: Option<f32>,
 }
 
 #[derive(Clone, Debug, Serialize)]

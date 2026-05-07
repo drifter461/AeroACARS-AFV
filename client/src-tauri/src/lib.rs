@@ -6881,6 +6881,28 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                                 .map(|m| (m.touchdown_distance_from_threshold_ft as f32) * 0.3048),
                             runway_match_centerline_offset_m: rwy_match
                                 .map(|m| m.centerline_distance_m as f32),
+                            // v0.5.22: feeds the live-monitor's "Bahn-
+                            // Auslastung"-sub-score so it matches the
+                            // in-app PIREP value 1:1.
+                            runway_length_m: rwy_match
+                                .map(|m| m.length_ft * 0.3048),
+                            // v0.5.22: actual_burn − planned_burn over
+                            // planned_burn × 100. Mirrors the client's
+                            // `LandingRecord.fuel_efficiency_pct`.
+                            // actual_burn = block_fuel − landing_fuel.
+                            fuel_efficiency_pct: match (
+                                stats.block_fuel_kg,
+                                stats.landing_fuel_kg,
+                                stats.planned_burn_kg,
+                            ) {
+                                (Some(block), Some(landing), Some(plan))
+                                    if plan > 0.0 =>
+                                {
+                                    let actual = block - landing;
+                                    Some(((actual - plan) / plan) * 100.0)
+                                }
+                                _ => None,
+                            },
                         }
                     })
                 };
