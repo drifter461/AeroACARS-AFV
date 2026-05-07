@@ -53,6 +53,18 @@ const RESUME_MAX_AGE_HOURS: i64 = 12;
 /// on the live map; cruise is straight-and-level so a sparse sample is fine
 /// and saves API budget. Spec §10 ("configurable intervals") — these are
 /// the defaults; a future settings panel can override.
+/// v0.5.21: MQTT live-tracking publish interval. Constant 3 s
+/// regardless of phase — gives the live-tracking server 10x more
+/// position points in cruise (was 30 s) for smoother live maps and
+/// finer post-flight analytics. Decoupled from phpVMS POST cadence
+/// (which stays phase-aware via `position_interval`) so the phpVMS
+/// DB doesn't get hammered.
+///
+/// Per-pilot bandwidth at 3 s: ~1.3 MB/h with WSS+TLS overhead;
+/// for a 5 h flight that's less than 1 minute of YouTube traffic.
+/// VPS handles it trivially even with 200 concurrent pilots.
+const MQTT_PUBLISH_INTERVAL_SECS: u64 = 3;
+
 fn position_interval(phase: FlightPhase) -> Duration {
     let secs = match phase {
         // Brief, critical events — sample a touch faster so the touchdown
@@ -6557,12 +6569,18 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
         // einfrieren.
         let mut last_good_snap: Option<SimSnapshot> = None;
         let mut last_good_snap_at: Option<std::time::Instant> = None;
+        // v0.5.21: track last phpVMS POST so we can keep its cadence
+        // phase-aware (4-30 s) while running the loop body itself —
+        // and the MQTT publish — at 3 s.
+        let mut last_phpvms_post_at: Option<std::time::Instant> = None;
         loop {
             let current_phase = {
                 let stats = flight.stats.lock().expect("flight stats");
                 stats.phase
             };
-            tokio::time::sleep(position_interval(current_phase)).await;
+            // v0.5.21: loop runs at MQTT cadence (constant 3 s).
+            // phpVMS POST throttled separately further down.
+            tokio::time::sleep(Duration::from_secs(MQTT_PUBLISH_INTERVAL_SECS)).await;
             if flight.stop.load(Ordering::Relaxed) {
                 break;
             }
@@ -6988,7 +7006,27 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                 }
             }
 
-            match client
+            // v0.5.21: phpVMS POST throttled to phase-aware cadence
+            // (`position_interval(phase)`, 4-30 s). The streamer-tick
+            // itself runs at 3 s for MQTT — without this gate every
+            // tick would slam phpVMS, causing 10x DB-row growth in
+            // `pirep_positions` plus matching cron-load increase.
+            //
+            // First post fires immediately (last_phpvms_post_at is
+            // None); subsequent posts wait until the phase-specific
+            // interval has elapsed since the previous successful or
+            // attempted post.
+            let should_post_phpvms = match last_phpvms_post_at {
+                None => true,
+                Some(t) => t.elapsed() >= position_interval(current_phase),
+            };
+            if !should_post_phpvms {
+                // Skip phpVMS this tick — the MQTT publish above
+                // already went out at 3 s cadence; phpVMS will catch
+                // up on the next eligible tick.
+            } else {
+                last_phpvms_post_at = Some(std::time::Instant::now());
+                match client
                 .post_positions(&flight.pirep_id, &[position.clone()])
                 .await
             {
@@ -7062,6 +7100,7 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                     }
                 }
             }
+            } // end `if should_post_phpvms`
 
             // Periodically flush running stats to disk so a Tauri restart
             // (or crash) doesn't lose distance/fuel/phase data. The
