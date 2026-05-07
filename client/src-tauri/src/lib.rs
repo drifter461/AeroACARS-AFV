@@ -686,6 +686,9 @@ struct PersistedFlightStats {
     landing_bank_deg: Option<f32>,
     #[serde(default)]
     landing_speed_kt: Option<f32>,
+    /// v0.5.17: groundspeed at touchdown.
+    #[serde(default)]
+    landing_groundspeed_kt: Option<f32>,
     #[serde(default)]
     landing_weight_kg: Option<f64>,
     #[serde(default)]
@@ -827,6 +830,7 @@ impl PersistedFlightStats {
             landing_pitch_deg: stats.landing_pitch_deg,
             landing_bank_deg: stats.landing_bank_deg,
             landing_speed_kt: stats.landing_speed_kt,
+            landing_groundspeed_kt: stats.landing_groundspeed_kt,
             landing_weight_kg: stats.landing_weight_kg,
             landing_heading_deg: stats.landing_heading_deg,
             landing_fuel_kg: stats.landing_fuel_kg,
@@ -903,6 +907,7 @@ impl PersistedFlightStats {
         stats.landing_pitch_deg = self.landing_pitch_deg;
         stats.landing_bank_deg = self.landing_bank_deg;
         stats.landing_speed_kt = self.landing_speed_kt;
+        stats.landing_groundspeed_kt = self.landing_groundspeed_kt;
         stats.landing_weight_kg = self.landing_weight_kg;
         stats.landing_heading_deg = self.landing_heading_deg;
         stats.landing_fuel_kg = self.landing_fuel_kg;
@@ -1149,6 +1154,11 @@ struct FlightStats {
     /// check (default >15° = strike).
     landing_bank_deg: Option<f32>,
     landing_speed_kt: Option<f32>,
+    /// v0.5.17: groundspeed at touchdown. Sent in MQTT touchdown
+    /// payload as `gs_kt` so the live-tracking server can compute
+    /// real-world rollout distance vs. IAS-derived rollout (which
+    /// distorts when there's strong head/tailwind).
+    landing_groundspeed_kt: Option<f32>,
     landing_weight_kg: Option<f64>,
     landing_heading_deg: Option<f32>,
     landing_fuel_kg: Option<f32>,
@@ -6816,9 +6826,16 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                                 .landing_speed_kt
                                 .map(|v| v.round() as i32)
                                 .unwrap_or(0),
-                            gs_kt: None,
+                            // v0.5.17: GS captured separately from IAS,
+                            // falls aware of head/tailwind.
+                            gs_kt: stats
+                                .landing_groundspeed_kt
+                                .map(|v| v.round() as i32),
                             pitch_deg: stats.landing_pitch_deg,
-                            bank_deg: None,
+                            // v0.5.17: bank at touchdown (= "Landing
+                            // Roll" in maintenance-plugin lingo,
+                            // captured in v0.5.16 alongside pitch).
+                            bank_deg: stats.landing_bank_deg,
                             g_load: stats.landing_g_force,
                             peak_g_load: stats.landing_peak_g_force,
                             sideslip_deg: stats.touchdown_sideslip_deg,
@@ -8260,6 +8277,15 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
                         .as_ref()
                         .map(|s| s.indicated_airspeed_kt)
                         .unwrap_or(snap.indicated_airspeed_kt),
+                );
+                // v0.5.17: groundspeed at touchdown (parallel to IAS).
+                // Buffered sample preferred — live snap is the post-
+                // rollout fallback for resumed flights only.
+                stats.landing_groundspeed_kt = Some(
+                    td_buf_sample
+                        .as_ref()
+                        .map(|s| s.groundspeed_kt)
+                        .unwrap_or(snap.groundspeed_kt),
                 );
                 stats.landing_fuel_kg = Some(snap.fuel_total_kg);
 
