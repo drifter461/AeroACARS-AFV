@@ -27,7 +27,7 @@ use storage::{
     ApproachSample, LandingProfilePoint, LandingRecord, LandingRunwayMatch, LandingStore,
     PositionQueue, QueuedPosition,
 };
-use sim_core::{FlightPhase, SimKind, SimSnapshot};
+use sim_core::{FlightPhase, SimKind, SimSnapshot, Simulator};
 use tauri::{AppHandle, Manager};
 use tracing_subscriber::EnvFilter;
 
@@ -2240,8 +2240,15 @@ fn estimate_xplane_touchdown_vs_from_agl(
             continue;
         }
         // Touchdown sample (latest) must really be at the ground.
+        // v0.5.12: accept on_ground=true OR AGL ≤ 5 ft. MSFS reports
+        // AGL ≈ 9.4 ft (sometimes 13 ft) even when on_ground=true at
+        // the physical contact frame — this is a sim quirk, not a
+        // pre-touchdown sample. Strict AGL ≤ 5 ft alone would reject
+        // every MSFS touchdown.
         let last = samples.last()?;
-        if last.agl_ft > TD_AGL_MAX_AT_TOUCHDOWN_FT {
+        let is_at_touchdown =
+            last.on_ground || last.agl_ft <= TD_AGL_MAX_AT_TOUCHDOWN_FT;
+        if !is_at_touchdown {
             continue;
         }
         // Window-start sample must already be near the ground (i.e.
@@ -3139,6 +3146,19 @@ async fn phpvms_load_session(
                     format!("Session restored — {}", profile.name),
                     Some(format!("Sim: {:?}", saved_kind)),
                 );
+            }
+            // v0.5.12: belt-and-suspenders — kick off MQTT live-tracking
+            // provisioning here too, in case the setup-hook race lost
+            // out to a not-yet-ready keyring on this platform. The
+            // function is idempotent: if MQTT is already running this
+            // is a no-op (well, almost — it may try to overwrite the
+            // handle, but the existing one keeps working). If keyring
+            // wasn't ready at setup time but is now, this is the catch.
+            {
+                let app_for_mqtt = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    init_mqtt_publisher_via_provisioning(app_for_mqtt).await;
+                });
             }
             Ok(Some(LoginResult { profile, base_url }))
         }
@@ -7735,60 +7755,67 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
                     .find(|s| s.on_ground)
                     .cloned();
 
-                // v0.5.11: clean priority chain per pilot's deep
-                // analysis (2026-05-07). The bug class fixed here:
-                // earlier versions let "most-negative VS anywhere
-                // in approach" win, which produced phantom hard-
-                // landing reports when a pre-flare descent at
-                // -1346 fpm @ 943 ft AGL beat the actual gentle
-                // touchdown at -200 fpm @ 0 ft.
+                // v0.5.12: SIM-AWARE touchdown capture — different
+                // priority chains for MSFS vs X-Plane.
                 //
-                // New architecture — landing rate ONLY from samples
-                // close to the ground:
+                // The earlier v0.5.11 unified chain (AGL-Δ primary
+                // for both sims) was a scope error — MSFS already
+                // had a perfect source via the `PLANE TOUCHDOWN
+                // NORMAL VELOCITY` SimVar (frame-accurate, latched
+                // at the exact contact moment by the sim itself).
+                // Routing MSFS through the AGL estimator with strict
+                // AGL ≤ 5 guards rejected it (MSFS reports AGL ≈ 14 ft
+                // even when on_ground=true — sim quirk), the chain
+                // fell through to the X-Plane-style sampler which
+                // captured a transient -1173 fpm spike from MSFS's
+                // gear-contact rebound oscillation. Pilot's
+                // 2026-05-07 LH595 DNAA→EDDF report: actual rate
+                // ~-419/-560 fpm (Volanta + LHA + MSFS-latched),
+                // we reported -1173. Bug class: cross-contamination
+                // from a refactor that should've been X-Plane only.
                 //
-                //   1. AGL-derivative estimator (PRIMARY) — geometric
-                //      ΔAGL/Δt over tight windows (750 ms → 12 s
-                //      sparse-fallback), all guarded by AGL ≤ 250 ft
-                //      at window-start AND AGL ≤ 5 ft at touchdown.
-                //   2. Sampler-side gear-edge capture (FALLBACK) —
-                //      v0.4.4 mechanism. negative_only filtered.
-                //   3. MSFS-latched touchdown SimVar (FALLBACK) —
-                //      MSFS-only, normally a clean signal but
-                //      negative_only filtered for safety.
-                //   4. Tight buffer-window scan around actual_td_at
-                //      (FALLBACK) — TOUCHDOWN_VS_WINDOW_MS / 2 each
-                //      side, negative_only filtered.
-                //   5. low_agl_vs_min_fpm (LAST-RESORT) — only
-                //      contains VS samples from AGL ≤ 250 ft so it
-                //      can't introduce pre-flare phantoms.
+                // Clean architecture v0.5.12:
                 //
-                // The plugin's captured_vs_fpm is included via path 2
-                // (it pre-fills sampler_touchdown_vs_fpm). The plugin
-                // is now a touchdown-EDGE source, not the VS authority.
+                //   MSFS:
+                //     1. snap.touchdown_vs_fpm (PRIMARY — latched
+                //        SimVar, frame-accurate, gold standard)
+                //     2. AGL-Δ estimator (sanity fallback if SimVar
+                //        wasn't populated for some reason)
+                //     3. Buffer scan
                 //
-                // Use sampler timestamp when available — much more
-                // precise than the streamer's 5-s tick edge.
+                //   X-Plane:
+                //     1. AGL-Δ estimator (PRIMARY — LandingRate-1
+                //        algorithm, Volanta uses the same)
+                //     2. sampler_touchdown_vs_fpm (FALLBACK — uses
+                //        fnrml_gear edge from v0.4.4 sampler)
+                //     3. Buffer scan
+                //     4. low_agl_vs_min_fpm
+                //
+                // Both paths apply negative_only filtering.
                 if let Some(sampler_at) = stats.sampler_touchdown_at {
                     stats.landing_at = Some(sampler_at);
                 }
                 let actual_td_at = stats.landing_at.unwrap_or(actual_td_at);
 
-                // ---- Path 1: AGL-derivative (PRIMARY) ----
+                let is_msfs = matches!(
+                    snap.simulator,
+                    Simulator::Msfs2020 | Simulator::Msfs2024
+                );
+                let is_xplane = matches!(
+                    snap.simulator,
+                    Simulator::XPlane11 | Simulator::XPlane12
+                );
+
+                // AGL-derivative estimator runs once and is used by
+                // both paths (priority differs).
                 let agl_estimate = estimate_xplane_touchdown_vs_from_agl(
                     &stats.snapshot_buffer,
                     actual_td_at,
                 );
-                if let Some(ref est) = agl_estimate {
-                    tracing::info!(
-                        fpm = est.fpm,
-                        source = est.source,
-                        window_ms = est.window_ms,
-                        sample_count = est.sample_count,
-                        "touchdown VS — AGL-derivative estimator (PRIMARY)"
-                    );
-                }
 
-                // ---- Fallback paths (only used if AGL estimate fails) ----
+                // Tight buffer-window scan (used by both paths as a
+                // fallback — AGL ≤ 250 ft filter prevents pre-flare
+                // contamination).
                 let half_window =
                     chrono::Duration::milliseconds(TOUCHDOWN_VS_WINDOW_MS / 2);
                 let vs_window_start = actual_td_at - half_window;
@@ -7806,19 +7833,80 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
                     None
                 };
 
-                // negative_only filter on every fallback. Positive
-                // values are physically impossible touchdown rates —
-                // they're rebound oscillation captures, not landings.
-                let touchdown_vs = agl_estimate
-                    .map(|e| e.fpm)
-                    .or_else(|| negative_only(stats.sampler_touchdown_vs_fpm))
-                    .or_else(|| negative_only(snap.touchdown_vs_fpm))
-                    .or_else(|| negative_only(buffered_vs_min))
-                    .or_else(|| negative_only(stats.low_agl_vs_min_fpm))
-                    .unwrap_or(0.0);
+                let touchdown_vs = if is_msfs {
+                    // MSFS: priority chain (validated against 11 real
+                    // pilot flights 2026-05-07 — Pete + Michael):
+                    //   1. Latched SimVar (PLANE TOUCHDOWN NORMAL VELOCITY)
+                    //      — gold standard when present, but only set
+                    //      in ~10% of MSFS-2024 flights observed
+                    //   2. AGL-Δ estimator with on_ground-aware guard —
+                    //      geometric truth, works with the MSFS AGL ≈
+                    //      9-14 ft sim-quirk (the relaxed guard above
+                    //      accepts on_ground=true)
+                    //   3. Buffered VS-min in tight window — last resort
+                    //
+                    // EXPLICITLY NOT used for MSFS:
+                    //   * sampler_touchdown_vs_fpm — captures MSFS gear-
+                    //     contact rebound spikes (-1173 fpm phantom in
+                    //     Michael's LH595 DNAA→EDDF report 2026-05-07)
+                    //   * low_agl_vs_min_fpm — same risk, polluted by
+                    //     MSFS gear-bounce oscillation samples
+                    let result = negative_only(snap.touchdown_vs_fpm)
+                        .or_else(|| agl_estimate.map(|e| e.fpm))
+                        .or_else(|| negative_only(buffered_vs_min))
+                        .unwrap_or(0.0);
+                    tracing::info!(
+                        sim = "msfs",
+                        latched = ?snap.touchdown_vs_fpm,
+                        agl_estimate = ?agl_estimate.map(|e| e.fpm),
+                        buffer_min = ?buffered_vs_min,
+                        chosen = result,
+                        "touchdown VS captured (MSFS path — sampler explicitly bypassed)"
+                    );
+                    result
+                } else if is_xplane {
+                    // X-Plane: AGL-Δ is geometric truth, sampler is
+                    // backup for sparse-buffer cases.
+                    let result = agl_estimate
+                        .map(|e| e.fpm)
+                        .or_else(|| negative_only(stats.sampler_touchdown_vs_fpm))
+                        .or_else(|| negative_only(buffered_vs_min))
+                        .or_else(|| negative_only(stats.low_agl_vs_min_fpm))
+                        .unwrap_or(0.0);
+                    if let Some(ref est) = agl_estimate {
+                        tracing::info!(
+                            sim = "xplane",
+                            agl_fpm = est.fpm,
+                            source = est.source,
+                            window_ms = est.window_ms,
+                            sample_count = est.sample_count,
+                            chosen = result,
+                            "touchdown VS captured (X-Plane path, AGL-Δ primary)"
+                        );
+                    } else {
+                        tracing::info!(
+                            sim = "xplane",
+                            sampler_vs = ?stats.sampler_touchdown_vs_fpm,
+                            buffer_min = ?buffered_vs_min,
+                            low_agl_min = ?stats.low_agl_vs_min_fpm,
+                            chosen = result,
+                            "touchdown VS captured (X-Plane path, AGL-Δ unavailable)"
+                        );
+                    }
+                    result
+                } else {
+                    // Unknown sim — generic fallback, preserves prior
+                    // behaviour for edge cases (Other/sim_set_kind=Off).
+                    negative_only(snap.touchdown_vs_fpm)
+                        .or_else(|| agl_estimate.map(|e| e.fpm))
+                        .or_else(|| negative_only(stats.sampler_touchdown_vs_fpm))
+                        .or_else(|| negative_only(buffered_vs_min))
+                        .unwrap_or(0.0)
+                };
 
                 if touchdown_vs == 0.0 {
                     tracing::warn!(
+                        sim = ?snap.simulator,
                         sampler_vs = ?stats.sampler_touchdown_vs_fpm,
                         latched = ?snap.touchdown_vs_fpm,
                         buffer_min = ?buffered_vs_min,

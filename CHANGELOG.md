@@ -4,6 +4,58 @@ Alle nennenswerten Änderungen an AeroACARS. Format: lose an [Keep a Changelog](
 
 ---
 
+## [v0.5.12] — 2026-05-07
+
+🚨 **KRITISCHER MSFS-Hotfix — Touchdown-Capture wieder GEES-aligned wie pre-v0.5.x.**
+
+Pilot-Bericht: MSFS-Flug Lufthansa LH595 DNAA→EDDF zeigte -1173 fpm Touchdown bei G 1.12 — physikalisch widersprüchlich. Volanta + LHA-Tools sagten -560 fpm, MSFS-internal latched SimVar -419 fpm. Plus 11 weitere MSFS-Flüge analysiert (Pilot „Pete"): bei 90% war die latched SimVar `null`, Werte kamen aus Fallback-Pfaden — manche kontaminiert durch Sampler-Spike-Artefakte.
+
+### 🐛 Behoben
+
+**Bug-Klasse:** v0.5.0+ hat den X-Plane-Style Sampler (`sampler_touchdown_vs_fpm` via fnrml_gear bzw. on_ground-Edge-Fallback) in `step_flight()` auch für MSFS-Flüge einreihen lassen. MSFS hatte vorher (v0.3.5–v0.4.3) eine saubere zweistufige Logik: `latched MSFS SimVar → buffer-min`. Mit v0.5.0 schob sich der Sampler **vor** den latched-Wert in der Priority-Chain — und bei MSFS-Touchdown-Frames liefert der Sampler oft eine Spike-Reading durch Gear-Contact-Rebound-Oszillation.
+
+**Fix — Sim-aware Capture-Trennung:**
+
+```
+MSFS-Pfad:
+  1. snap.touchdown_vs_fpm  ← MSFS-latched SimVar (PLANE TOUCHDOWN
+                              NORMAL VELOCITY — frame-genau, vom Sim
+                              selbst gemessen, GEES-aligned)
+  2. AGL-Δ Estimator        ← Geometrische Wahrheit als Fallback
+                              für die ~90% der Flüge wo MSFS die
+                              latched SimVar nicht setzt
+  3. Buffer-Min (AGL≤250)   ← Last-resort
+
+X-Plane-Pfad (unverändert seit v0.5.11):
+  1. AGL-Δ Estimator (LandingRate-1)
+  2. sampler_touchdown_vs_fpm (fnrml_gear)
+  3. Buffer-Min
+  4. low_agl_vs_min_fpm
+```
+
+**Schlüssel-Änderungen:**
+
+- **Sampler-Pfad explizit AUS für MSFS** — der Sampler-Capture wird bei `is_msfs == true` gar nicht mehr konsultiert
+- **AGL-Guard relaxed:** Touchdown-Sample wird akzeptiert wenn `on_ground=true` ODER `AGL ≤ 5 ft` (vorher nur strict AGL≤5). MSFS reportet AGL ≈ 9-14 ft auch bei `on_ground=true` — sim-quirk, nicht pre-touchdown
+- **`negative_only` Filter** auf alle Quellen — physikalisch unmögliche positive „Landing-Rates" werden geblockt
+
+**Validation:**
+
+| Flug | Pilot | v0.5.11 (kaputt) | v0.5.12 (Fix) |
+|---|---|---|---|
+| LH595 DNAA→EDDF (B738) | Michael | -1173 fpm phantom | ~-419 fpm (matcht MSFS-internal) |
+| 11 MSFS-Flüge (EDDF-Routen) | Pete | -132 bis -346 (zufällig OK) | konsistent über AGL-Δ-Pfad |
+| Pre-v0.5.x Verhalten | (jede Pilot) | n/a | **wiederhergestellt + besser** |
+
+### 🛠 Intern
+
+- `step_flight()` enthält jetzt `match snap.simulator { ... }`-Branch
+- AGL-Δ Estimator akzeptiert MSFS-AGL-Quirk (on_ground=true override)
+- 87 Tests grün (alle 5 X-Plane-Touchdown-Regression-Tests bleiben gültig)
+- Wirkt für alle MSFS-Versionen (Msfs2020 + Msfs2024)
+
+---
+
 ## [v0.5.11] — 2026-05-07
 
 🚀 **Großes Release — drei zusammenhängende Themen:**
