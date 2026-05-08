@@ -4,6 +4,29 @@ Alle nennenswerten Änderungen an AeroACARS. Format: lose an [Keep a Changelog](
 
 ---
 
+## [v0.5.32] — 2026-05-08
+
+🐞 **Aircraft-Picker zeigt jetzt einzelne Aircraft, nicht Subfleets.**
+
+### 🐞 Behoben
+
+**Problem (User-Feedback aus v0.5.30/31):**
+Im VFR/Manual-Mode-Aircraft-Picker tauchten Einträge wie „DLH-A319-CFM-SL", „BAW-A319-IAE-WTF" auf — das sind **Subfleet-Namen, keine Aircraft-Registrations**. Pilot konnte daraus keinen einzelnen Flieger auswählen („mit einem Subfleet kann ich nicht fliegen").
+
+**Root-Cause:**
+phpVMS-V7-Endpoint `GET /api/fleet` liefert **Subfleets** (= Sammlung von Aircraft eines Typs), nicht einzelne Aircraft. Unsere v0.5.27-Implementation hat den Response naiv in `AircraftDetails` deserialisiert — das hat zwar deserialisiert (alle Felder sind `Option`), aber `registration`/`icao` der Subfleet-Liste sind eben Subfleet-Felder, nicht Aircraft-Felder.
+
+**Fix in v0.5.32:**
+- Neuer `SubfleetSummary`-Typ in `api-client` für korrekte Subfleet-Deserialisierung (`id`, `name`, `icao`, `type`)
+- Neue Methode `Client::get_all_aircraft()`: aggregiert über alle Subfleets via N+1-Pattern (`GET /api/fleet/{id}/aircraft` pro Subfleet)
+- Per-Subfleet-Failures werden geloggt aber nicht propagiert — ein einzelner kaputter Subfleet crashed nicht den Picker
+- `fleet_list_at_airport` ruft jetzt `get_all_aircraft()` statt `get_fleet()` auf
+- phpVMS-Subfleet-Rank-Restriktion wirkt weiter server-seitig (= Pilot sieht nur was er fliegen darf)
+
+Versions-Bump 0.5.31 → 0.5.32.
+
+---
+
 ## [v0.5.31] — 2026-05-08
 
 🎯 **Mode-Hint-Box deutlicher: klare Regel statt Marketing-Text.**

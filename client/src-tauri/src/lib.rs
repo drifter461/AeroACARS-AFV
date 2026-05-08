@@ -5369,7 +5369,7 @@ async fn fleet_list_at_airport(
     let client = current_client(&state)?;
     let icao_upper = icao.trim().to_uppercase();
 
-    let raw = client.get_fleet().await?;
+    let raw = client.get_all_aircraft().await?;
     let mut entries: Vec<AircraftPickerEntry> = raw
         .into_iter()
         .map(|a| {

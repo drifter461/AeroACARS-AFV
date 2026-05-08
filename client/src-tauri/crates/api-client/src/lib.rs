@@ -815,6 +815,22 @@ pub struct PirepSummary {
     pub arr_airport_id: Option<String>,
 }
 
+/// v0.5.32: Subfleet-Summary fuer `/api/fleet`. phpVMS-API gibt hier
+/// SUBFLEETS zurueck (nicht einzelne Aircraft) — Subfleet = Sammlung
+/// von Aircraft eines Typs (z.B. "DLH-A319-CFM-SL"). Wir brauchen die
+/// `id` um danach `/api/fleet/{id}/aircraft` abzufragen fuer die
+/// einzelnen Aircraft.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubfleetSummary {
+    pub id: i64,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub icao: Option<String>,
+    #[serde(default, rename = "type")]
+    pub subfleet_type: Option<String>,
+}
+
 /// Subset of `GET /api/fleet/aircraft/{id}` we use for diagnostic purposes,
 /// e.g. when phpVMS rejects a prefile with `aircraft-not-available`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1237,12 +1253,40 @@ impl Client {
         self.get_data(&path).await
     }
 
-    /// v0.5.27: `GET /api/fleet` — komplette Fleet-Liste (= alle Aircraft
-    /// die der Pilot fliegen darf). Fallback fuer den Aircraft-Picker
-    /// wenn `/api/airports/{icao}/aircraft` leer zurueckkommt (= nicht
-    /// alle phpVMS-Deployments unterstuetzen den airport-Filter).
-    pub async fn get_fleet(&self) -> Result<Vec<AircraftDetails>, ApiError> {
+    /// v0.5.27: `GET /api/fleet` — komplette Fleet-Liste.
+    /// **WICHTIG**: phpVMS-API liefert hier SUBFLEETS, nicht einzelne
+    /// Aircraft! Subfleet = Sammlung von Aircraft eines Typs (z.B.
+    /// "DLH-A319-CFM-SL"). Fuer einzelne Aircraft siehe
+    /// `get_all_aircraft()` (= aggregiert ueber alle Subfleets).
+    pub async fn get_fleet(&self) -> Result<Vec<SubfleetSummary>, ApiError> {
         self.get_data("/api/fleet").await
+    }
+
+    /// v0.5.32: alle einzelnen Aircraft die der Pilot fliegen darf.
+    /// Aggregiert via N+1: erst Subfleets holen, dann pro Subfleet die
+    /// Aircraft-Liste. Phpvms-V7 enforced Subfleet-Rank-Restriktion
+    /// server-seitig, also kommen nur erlaubte Aircraft zurueck.
+    ///
+    /// Per-Subfleet-Failures werden geloggt aber nicht propagiert —
+    /// einzelne kaputte Subfleets sollten nicht den Aircraft-Picker
+    /// crashen.
+    pub async fn get_all_aircraft(&self) -> Result<Vec<AircraftDetails>, ApiError> {
+        let subfleets = self.get_fleet().await?;
+        let mut all = Vec::new();
+        for sf in subfleets {
+            let path = format!("/api/fleet/{}/aircraft", sf.id);
+            match self.get_data::<Vec<AircraftDetails>>(&path).await {
+                Ok(aircraft) => all.extend(aircraft),
+                Err(e) => {
+                    tracing::warn!(
+                        subfleet_id = sf.id,
+                        error = %e,
+                        "could not fetch aircraft for subfleet — skipping"
+                    );
+                }
+            }
+        }
+        Ok(all)
     }
 }
 
