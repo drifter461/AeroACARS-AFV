@@ -162,12 +162,33 @@ struct PositionPayload {
     ap_app: Option<bool>,
 
     // ---- Identity ----
-    callsign: String,
-    aircraft_icao: String,
+    //
+    // v0.5.23: alle Identity-Felder sind jetzt Option<String> mit
+    // skip_serializing_if. Hintergrund: phpVMS-API liefert manchmal leere
+    // ICAO-Codes (Aircraft ohne ICAO-Feld in der DB). Wenn wir diese als
+    // `""` serialisieren, ueberschreibt der Server-COALESCE-UPSERT den
+    // vorher akkumulierten korrekten Wert mit "". Mit Option<String>+
+    // skip_serializing_if = "Option::is_none" verschwindet das Feld
+    // komplett aus dem JSON wenn leer → Server faellt sauber auf den
+    // alten Wert zurueck. Fuer callsign/dep/arr aequivalent (defensive).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    callsign: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    aircraft_icao: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     aircraft_registration: Option<String>,
     simulator: &'static str,
-    dep: String,
-    arr: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dep: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    arr: Option<String>,
+}
+
+/// Convert empty/whitespace-only strings to None — used at the JSON-edge
+/// to keep payloads clean of "" values that would muddy the server side.
+fn non_empty(s: &str) -> Option<String> {
+    let t = s.trim();
+    if t.is_empty() { None } else { Some(t.to_string()) }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -367,21 +388,26 @@ impl Handle {
             ap_nav: snap.autopilot_nav,
             ap_app: snap.autopilot_approach,
 
-            // Identity
-            callsign: meta.callsign.clone(),
-            aircraft_icao: meta.aircraft_icao.clone(),
+            // Identity — alle non_empty(): leere Strings werden zu None und
+            // verschwinden aus dem JSON statt "" zu serialisieren. Server-
+            // seitige COALESCE-UPSERTs bleiben so frei von Empty-String-
+            // Vergiftung der flights-Tabelle.
+            callsign: non_empty(&meta.callsign),
+            aircraft_icao: non_empty(&meta.aircraft_icao),
             // v0.5.19: prefer phpVMS-side registration (from the bid)
             // over what the sim reports — payware addons often put
             // a placeholder ("FFSTS") in the SimConnect ATC-ID.
             // Falls back to the sim value if the bid had nothing.
-            aircraft_registration: if !meta.planned_registration.is_empty() {
-                Some(meta.planned_registration.clone())
+            aircraft_registration: if !meta.planned_registration.trim().is_empty() {
+                Some(meta.planned_registration.trim().to_string())
             } else {
-                snap.aircraft_registration.clone()
+                snap.aircraft_registration
+                    .as_deref()
+                    .and_then(non_empty)
             },
             simulator: simulator_label(snap.simulator),
-            dep: meta.dep_icao.clone(),
-            arr: meta.arr_icao.clone(),
+            dep: non_empty(&meta.dep_icao),
+            arr: non_empty(&meta.arr_icao),
         };
         match self.tx.try_send(Cmd::Position(Box::new(payload))) {
             Ok(()) => {}
