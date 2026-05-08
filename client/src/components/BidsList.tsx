@@ -130,27 +130,9 @@ function flightTypeKind(type: string): string {
   }
 }
 
-/**
- * v0.5.28: IFR/VFR-Hinweis-Pill basierend auf flight_type. Reine
- * Information für den Piloten, KEINE Enforcement — Pilot entscheidet
- * selbst ob er IFR (mit SimBrief) oder VFR (manuell) fliegt.
- *
- * Returns "IFR" / "VFR" / null (= unklar, kein Pill anzeigen).
- *
- * Detection-Konventionen:
- *   - flight_type contains "VFR"          → VFR
- *   - flight_type ∈ {G, T, X}             → VFR (General Aviation, Training, Test)
- *   - flight_type ∈ {J, F, C, M, I, V, S} → IFR (Scheduled, Charter, Mil, Special)
- *   - sonst                                → null (kein Hint)
- */
-function flightRulesHint(type: string | null | undefined): "IFR" | "VFR" | null {
-  if (!type) return null;
-  const t = type.toUpperCase().trim();
-  if (t.includes("VFR")) return "VFR";
-  if (["G", "T", "X"].includes(t)) return "VFR";
-  if (["J", "F", "C", "M", "I", "V", "S", "R"].includes(t)) return "IFR";
-  return null;
-}
+// v0.5.29: flightRulesHint() entfernt — Auto-Kategorisierung war zu eng.
+// Pilot entscheidet selbst ob IFR oder VFR (= klare Hinweis-Text-Box
+// statt Pill). Falls künftig wieder gebraucht, im git history (v0.5.28).
 
 function buildCallsigns(flight: Flight): string {
   const icao = flight.airline?.icao?.trim();
@@ -565,24 +547,10 @@ export function BidsList({
                             {flightTypeLabel(f.flight_type)}
                           </span>
                         )}
-                        {/* v0.5.28: IFR/VFR-Hinweis-Pill — reine Info,
-                            keine Enforcement. Pilot entscheidet selbst. */}
-                        {(() => {
-                          const rules = flightRulesHint(f.flight_type);
-                          if (!rules) return null;
-                          return (
-                            <span
-                              className={`bid-card__rules-badge bid-card__rules-badge--${rules.toLowerCase()}`}
-                              title={
-                                rules === "IFR"
-                                  ? "IFR-typischer Bid (Scheduled / Charter). Empfohlener Flow: SimBrief-OFP + 'IFR Start'-Button. Du kannst aber auch VFR/Manual fliegen."
-                                  : "VFR-typischer Bid (GA / Training / Test). Empfohlener Flow: 'VFR Start (manuell)'-Button. Du kannst aber auch SimBrief nutzen falls vorhanden."
-                              }
-                            >
-                              {rules}
-                            </span>
-                          );
-                        })()}
+                        {/* v0.5.29: IFR/VFR-Auto-Detection-Pills entfernt
+                            — Pilot entscheidet selbst, Auto-Kategorisierung
+                            war zu eng. Hinweis steht jetzt als Text-Line
+                            unter den Action-Buttons. */}
                       </div>
                     </div>
 
@@ -676,6 +644,14 @@ export function BidsList({
                       </button>
                     )}
                   </div>
+                  {/* v0.5.29: Hinweis-Text statt Auto-Kategorisierung. */}
+                  {!hasActiveFlight && (
+                    <div className="bid-card__mode-hint">
+                      💡 <strong>IFR Start</strong>: nutzt SimBrief-OFP (Block-Fuel/Route/Weights aus dem Plan).
+                      &nbsp;<strong>VFR Start</strong>: funktioniert auch ohne SB — du wählst Aircraft + Block-Fuel selbst.
+                      Pilot entscheidet je nach Flug.
+                    </div>
+                  )}
 
                   {startError?.bidId === bid.id && (
                     <p className="bid-card__start-error" role="alert">

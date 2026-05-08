@@ -4,6 +4,38 @@ Alle nennenswerten Änderungen an AeroACARS. Format: lose an [Keep a Changelog](
 
 ---
 
+## [v0.5.29] — 2026-05-08
+
+🎯 **Pilot entscheidet komplett selbst — Auto-IFR/VFR-Kategorisierung entfernt, durch klaren Hinweis-Text ersetzt.**
+
+### 🔧 Geändert
+
+**v0.5.28 hatte automatische IFR/VFR-Pills** auf jeder Bid-Card (gruen/gelb basierend auf `flight_type`-Code). Das war zwar "nur Hinweis", fühlte sich aber wie eine Kategorisierung an — Bids wurden mit einem Label versehen.
+
+**v0.5.29: Pills entfernt, statt dessen klare Text-Box** unter den Action-Buttons:
+
+> 💡 **IFR Start**: nutzt SimBrief-OFP (Block-Fuel/Route/Weights aus dem Plan).
+> **VFR Start**: funktioniert auch ohne SB — du wählst Aircraft + Block-Fuel selbst.
+> Pilot entscheidet je nach Flug.
+
+**Konsequenz:**
+- Keine Auto-Detection mehr nach `flight_type` (= keine Annahme „dieser Bid ist IFR")
+- Keine farblichen Kategorien-Pills
+- Hinweis-Text steht IMMER da (nicht conditional)
+- Beide Buttons immer sichtbar wenn kein aktiver Flug läuft
+- Trust-the-Pilot in Reinform
+
+### 🔧 Implementation
+
+- `flightRulesHint()`-Helper entfernt (= Auto-Detection-Logik)
+- IFR/VFR-Pill-JSX in BidsList aus dem Header entfernt
+- Neuer `.bid-card__mode-hint`-Block unter den Buttons mit kompaktem Erklärungs-Text
+- CSS umgebaut: `.bid-card__rules-badge--*` entfernt, neuer `.bid-card__mode-hint` Style (subtle grau-bordered)
+
+Versions-Bump 0.5.28 → 0.5.29.
+
+---
+
 ## [v0.5.28] — 2026-05-08
 
 🎯 **UX-Polish für VFR/Manual-Mode: klarere Button-Labels + IFR/VFR-Hinweis-Pill auf Bid-Cards.**
