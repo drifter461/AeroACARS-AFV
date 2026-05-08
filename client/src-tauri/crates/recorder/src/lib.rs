@@ -83,6 +83,8 @@ pub enum FlightLogEvent {
     },
     /// Touchdown analyzer settled — final score with the contributing
     /// peak values. Mirrors the LandingScore enum in lib.rs.
+    /// **Beibehalten fuer Backwards-Compat** — neue Forensik-Konsumenten
+    /// nutzen `TouchdownComplete` (siehe unten).
     LandingScored {
         timestamp: DateTime<Utc>,
         score: String,
@@ -90,11 +92,45 @@ pub enum FlightLogEvent {
         peak_g_force: f32,
         bounce_count: u8,
     },
+    /// v0.5.34: vollstaendiger Touchdown-Forensik-Payload (gleiche Daten
+    /// wie der MQTT-`touchdown`-Topic). Enthaelt ALLE Felder die der
+    /// Live-Recorder bekommt — Approach-Stability v2, Landing-Quality
+    /// (Wing-Strike, Float, TD-Zone, Vref), V/S-Estimator-Vergleiche,
+    /// Runway-Match, Wind-Komponenten, etc.
+    ///
+    /// Damit kann ein offline Re-Importer (recorder/cli/recoverFromJsonl)
+    /// die Touchdown-Row 1:1 rekonstruieren falls die DB-Daten verloren
+    /// gehen. Format: serde_json::Value damit das Schema mitwachsen kann
+    /// ohne dass alte Logs unparsbar werden.
+    TouchdownComplete {
+        timestamp: DateTime<Utc>,
+        payload: serde_json::Value,
+    },
     /// PIREP filed (clean or manual) or cancelled. Closes the log.
     FlightEnded {
         timestamp: DateTime<Utc>,
         pirep_id: String,
         outcome: FlightOutcome,
+    },
+    /// v0.5.34: vollstaendiger PIREP-Payload (gleiche Daten wie der
+    /// MQTT-`pirep`-Topic). Block/Flight-Time, Fuel-Aggregate, Distance,
+    /// Peak-Altitude, Landing-Score, Go-Around-Count, Touchdown-Count,
+    /// Gates, Approach-Runway, Divert-Hints, Notes.
+    PirepFiled {
+        timestamp: DateTime<Utc>,
+        payload: serde_json::Value,
+    },
+    /// v0.5.34: Block-Snapshot beim Out-Of-Block (gleiche Daten wie der
+    /// MQTT-`block`-Topic). Pre-Flight Plan-Snapshot fuer Forensik.
+    BlockSnapshot {
+        timestamp: DateTime<Utc>,
+        payload: serde_json::Value,
+    },
+    /// v0.5.34: Takeoff-Snapshot beim Wheels-Up (gleiche Daten wie der
+    /// MQTT-`takeoff`-Topic). Wheels-Up-Snapshot fuer Forensik.
+    TakeoffSnapshot {
+        timestamp: DateTime<Utc>,
+        payload: serde_json::Value,
     },
 }
 

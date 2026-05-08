@@ -6621,6 +6621,19 @@ async fn flight_end(
                             notes: None,
                         }
                     };
+                    // v0.5.34: PIREP-Forensik ins JSONL — Block/Flight-Time,
+                    // Fuel-Aggregate, Distance, Peak-Altitude, Landing-Score,
+                    // Go-Arounds, Touchdown-Count etc. Damit kann der
+                    // Recovery-Tool Pireps + abhaengige Stats rekonstruieren.
+                    record_event(
+                        &app,
+                        &flight.pirep_id,
+                        &FlightLogEvent::PirepFiled {
+                            timestamp: Utc::now(),
+                            payload: serde_json::to_value(&pirep_payload)
+                                .unwrap_or(serde_json::Value::Null),
+                        },
+                    );
                     handle.pirep(pirep_payload);
                 }
             }
@@ -7840,9 +7853,29 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                     let mqtt = app_state.mqtt.lock().await;
                     if let Some(handle) = mqtt.as_ref() {
                         if let Some(p) = block_payload_opt {
+                            // v0.5.34: Forensik-Mitschnitt ins JSONL
+                            record_event(
+                                &app,
+                                &flight.pirep_id,
+                                &FlightLogEvent::BlockSnapshot {
+                                    timestamp: Utc::now(),
+                                    payload: serde_json::to_value(&p)
+                                        .unwrap_or(serde_json::Value::Null),
+                                },
+                            );
                             handle.block(p);
                         }
                         if let Some(p) = takeoff_payload_opt {
+                            // v0.5.34: Forensik-Mitschnitt ins JSONL
+                            record_event(
+                                &app,
+                                &flight.pirep_id,
+                                &FlightLogEvent::TakeoffSnapshot {
+                                    timestamp: Utc::now(),
+                                    payload: serde_json::to_value(&p)
+                                        .unwrap_or(serde_json::Value::Null),
+                                },
+                            );
                             handle.takeoff(p);
                         }
                     }
@@ -7979,6 +8012,18 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                     })
                 };
                 if let Some(payload) = payload_opt {
+                    // v0.5.34: gleicher Forensik-Payload landet ins JSONL.
+                    // Damit kann ein Recovery-Tool die Touchdown-DB-Row
+                    // 1:1 rekonstruieren falls die Server-DB Daten verliert.
+                    record_event(
+                        &app,
+                        &flight.pirep_id,
+                        &FlightLogEvent::TouchdownComplete {
+                            timestamp: Utc::now(),
+                            payload: serde_json::to_value(&payload)
+                                .unwrap_or(serde_json::Value::Null),
+                        },
+                    );
                     let app_state = app.state::<AppState>();
                     let mqtt = app_state.mqtt.lock().await;
                     if let Some(handle) = mqtt.as_ref() {

@@ -4,6 +4,37 @@ Alle nennenswerten Änderungen an AeroACARS. Format: lose an [Keep a Changelog](
 
 ---
 
+## [v0.5.34] — 2026-05-08
+
+🛡 **JSONL-Forensik-Logs jetzt vollstaendig — alles was MQTT publiziert landet auch im Log.**
+
+### Hintergrund
+
+Beim Recovery-Vorfall heute hatten wir versucht aus den JSONL-Forensik-Logs die verlorenen Touchdown-Daten zu rekonstruieren. Problem: das `landing_scored`-Event im JSONL hatte nur 4 Felder (`score`, `peak_vs_fpm`, `peak_g_force`, `bounce_count`) — die ~50 detaillierten Forensik-Felder die der Live-MQTT-Touchdown-Topic publiziert (Approach-Stability v2, Landing-Quality, Wind-Komponenten, Runway-Match, V/S-Estimator-Vergleiche, etc.) fehlten komplett.
+
+### 🆕 Neue JSONL-Events
+
+`recorder::FlightLogEvent` bekommt 4 neue Variants — alle parallel zum jeweiligen MQTT-Topic geschrieben:
+
+- **`TouchdownComplete`** — kompletter `TouchdownPayload` (= alle ~50 Felder die der Live-Recorder bekommt)
+- **`PirepFiled`** — kompletter `PirepPayload` (Block/Flight-Time, Fuel-Aggregate, Distance, Peak-Altitude, Landing-Score, Go-Arounds, Touchdown-Count, Gates, Approach-Runway, Divert)
+- **`BlockSnapshot`** — Out-Of-Block Pre-Flight-Snapshot
+- **`TakeoffSnapshot`** — Wheels-Up-Snapshot
+
+Format: `{ "type": "...", "timestamp": "...", "payload": {...} }` — `payload` ist `serde_json::Value` damit das Schema mitwachsen kann ohne dass alte Logs unparsbar werden.
+
+### Was das ermoeglicht
+
+Falls die Server-DB jemals wieder Daten verliert, kann ein offline Recovery-Tool die Touchdown-/PIREP-Rows **1:1** aus dem JSONL rekonstruieren — keine Approximationen mehr, keine fehlenden Felder.
+
+### Backwards-Compat
+
+`LandingScored` (v0.5.0+) bleibt erhalten als kleinerer Event fuer Tools die nur den Score-Indikator brauchen. `TouchdownComplete` wird zusaetzlich geschrieben.
+
+Versions-Bump 0.5.33 → 0.5.34.
+
+---
+
 ## [v0.5.33] — 2026-05-08
 
 🐞 **Aircraft-Picker funktioniert jetzt richtig: alle Flugzeuge, nur Ground+Active, voll DE+EN.**
