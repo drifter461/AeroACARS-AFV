@@ -4,6 +4,37 @@ Alle nennenswerten Änderungen an AeroACARS. Format: lose an [Keep a Changelog](
 
 ---
 
+## [v0.5.31] — 2026-05-08
+
+🎯 **Mode-Hint-Box deutlicher: klare Regel statt Marketing-Text.**
+
+### 🔧 Geändert
+
+User-Feedback: der v0.5.29-Hinweis war zu unscheinbar/unklar. „IFR Start: nutzt SimBrief-OFP" sagt nicht eindeutig dass es **PFLICHT** ist. „VFR Start funktioniert auch ohne SB" sagt nicht eindeutig dass es **OPTIONAL** ist.
+
+**v0.5.31 — neue Hint-Box mit klarer Regel-Struktur:**
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ 💡 Welchen Button nutzen?                                   │
+│                                                             │
+│ 🛫 IFR Start    NUR mit SimBrief-OFP (Plan-Daten kommen    │
+│                  aus dem OFP).                              │
+│                                                             │
+│ 🛩 VFR Start    AUCH OHNE SimBrief-OFP — du gibst Aircraft  │
+│                  + Block-Fuel selbst ein.                   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+- **Titel** „Welchen Button nutzen?" macht Frage explizit
+- **Zwei klare Zeilen** mit Icon + Button-Name (color-coded blau/gelb) + Regel
+- **Bold-Highlights** auf dem entscheidenden Wort: „NUR mit" vs „AUCH OHNE"
+- **Karten-Border** statt linker Border-Strich — visuell prominenter
+
+Versions-Bump 0.5.30 → 0.5.31.
+
+---
+
 ## [v0.5.30] — 2026-05-08
 
 🎯 **Aircraft-Picker zeigt jetzt die GESAMTE Fleet — keine Airport-/State-Einschränkung.**

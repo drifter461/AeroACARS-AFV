@@ -644,12 +644,27 @@ export function BidsList({
                       </button>
                     )}
                   </div>
-                  {/* v0.5.29: Hinweis-Text statt Auto-Kategorisierung. */}
+                  {/* v0.5.31: Klare Regel-Erklaerung statt
+                      Marketing-Sprech. IFR = SB-Pflicht, VFR = SB-frei. */}
                   {!hasActiveFlight && (
                     <div className="bid-card__mode-hint">
-                      💡 <strong>IFR Start</strong>: nutzt SimBrief-OFP (Block-Fuel/Route/Weights aus dem Plan).
-                      &nbsp;<strong>VFR Start</strong>: funktioniert auch ohne SB — du wählst Aircraft + Block-Fuel selbst.
-                      Pilot entscheidet je nach Flug.
+                      <div className="bid-card__mode-hint-title">
+                        💡 Welchen Button nutzen?
+                      </div>
+                      <div className="bid-card__mode-hint-row bid-card__mode-hint-row--ifr">
+                        <span className="bid-card__mode-hint-icon">🛫</span>
+                        <span className="bid-card__mode-hint-key">IFR Start</span>
+                        <span className="bid-card__mode-hint-rule">
+                          <strong>NUR mit SimBrief-OFP</strong> (Plan-Daten kommen aus dem OFP).
+                        </span>
+                      </div>
+                      <div className="bid-card__mode-hint-row bid-card__mode-hint-row--vfr">
+                        <span className="bid-card__mode-hint-icon">🛩</span>
+                        <span className="bid-card__mode-hint-key">VFR Start</span>
+                        <span className="bid-card__mode-hint-rule">
+                          <strong>AUCH OHNE SimBrief-OFP</strong> — du gibst Aircraft + Block-Fuel selbst ein.
+                        </span>
+                      </div>
                     </div>
                   )}
 
