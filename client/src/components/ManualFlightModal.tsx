@@ -201,10 +201,10 @@ export function ManualFlightModal({ bid, simHint, onClose, onFlightStarted }: Pr
               1. Aircraft auswählen
             </div>
             {loadingFleet ? (
-              <div className="manual-modal__loading">Lade Aircraft am {bid.flight.dpt_airport_id}…</div>
+              <div className="manual-modal__loading">Lade gesamte Fleet…</div>
             ) : aircraftList && aircraftList.length === 0 ? (
               <div className="manual-modal__empty">
-                Keine Aircraft am {bid.flight.dpt_airport_id} verfügbar (alle in use, in Maintenance, oder phpVMS-Endpoint nicht eingerichtet).
+                Keine Aircraft in deiner Fleet verfügbar — phpVMS-Endpoint /api/fleet nicht eingerichtet oder du hast keine Subfleet-Berechtigung. Sprich VA-Admin an.
               </div>
             ) : (
               <>
@@ -216,21 +216,56 @@ export function ManualFlightModal({ bid, simHint, onClose, onFlightStarted }: Pr
                   className="manual-modal__search"
                   autoFocus
                 />
+                <div style={{ fontSize: "0.78rem", color: "var(--text-dim)", marginBottom: 8 }}>
+                  {aircraftList?.length ?? 0} Aircraft gesamt · Aircraft am {bid.flight.dpt_airport_id} stehen oben in der Liste.
+                </div>
                 <div className="manual-modal__list">
-                  {filtered.map((a) => (
-                    <button
-                      key={a.id}
-                      type="button"
-                      className={`manual-modal__list-item ${selected?.id === a.id ? "selected" : ""}`}
-                      onClick={() => setSelected(a)}
-                    >
-                      <span className="manual-modal__list-icao">{a.icao || "—"}</span>
-                      <span className="manual-modal__list-reg">{a.registration || "—"}</span>
-                      {a.name && a.name !== a.icao && (
-                        <span className="manual-modal__list-name">{a.name}</span>
-                      )}
-                    </button>
-                  ))}
+                  {filtered.map((a) => {
+                    const stateLabel =
+                      a.state === 0 ? null :
+                      a.state === 1 ? "🔒 in Use" :
+                      a.state === 2 ? "✈ in Flight" :
+                      "🔧 Maintenance";
+                    const stateColor =
+                      a.state === 0 ? undefined :
+                      a.state === 1 ? "#fbbf24" :
+                      a.state === 2 ? "#67e8f9" :
+                      "#f87171";
+                    const atDpt = a.airport_id?.toUpperCase() === bid.flight.dpt_airport_id.toUpperCase();
+                    return (
+                      <button
+                        key={a.id}
+                        type="button"
+                        className={`manual-modal__list-item ${selected?.id === a.id ? "selected" : ""}`}
+                        onClick={() => setSelected(a)}
+                        title={a.state === 0
+                          ? `Verfügbar${atDpt ? ` am ${bid.flight.dpt_airport_id}` : a.airport_id ? ` (steht in ${a.airport_id})` : ""}`
+                          : `${stateLabel} — phpVMS lehnt ggf. den Prefile ab.`}
+                      >
+                        <span className="manual-modal__list-icao">{a.icao || "—"}</span>
+                        <span className="manual-modal__list-reg">{a.registration || "—"}</span>
+                        {a.airport_id && (
+                          <span
+                            className="manual-modal__list-name"
+                            style={atDpt ? { color: "#86efac", fontWeight: 600 } : undefined}
+                          >
+                            @{a.airport_id}
+                          </span>
+                        )}
+                        {a.name && a.name !== a.icao && (
+                          <span className="manual-modal__list-name">{a.name}</span>
+                        )}
+                        {stateLabel && (
+                          <span
+                            className="manual-modal__list-name"
+                            style={{ color: stateColor, marginLeft: "auto", fontSize: "0.8em" }}
+                          >
+                            {stateLabel}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
                   {filtered.length === 0 && (
                     <div className="manual-modal__empty">
                       Kein Aircraft passt zu „{search}".

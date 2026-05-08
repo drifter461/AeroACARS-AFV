@@ -4,6 +4,39 @@ Alle nennenswerten Änderungen an AeroACARS. Format: lose an [Keep a Changelog](
 
 ---
 
+## [v0.5.30] — 2026-05-08
+
+🎯 **Aircraft-Picker zeigt jetzt die GESAMTE Fleet — keine Airport-/State-Einschränkung.**
+
+### 🔧 Geändert
+
+**Problem (User-Feedback aus v0.5.27/28-Tests):**
+Beim VFR/Manual-Mode-Aircraft-Picker für einen LEPA-Bid:
+
+> „Keine Aircraft am LEPA verfügbar (alle in use, in Maintenance, oder phpVMS-Endpoint nicht eingerichtet)."
+
+Pilot konnte keinen Flug starten obwohl Aircraft in der Fleet existieren — sie standen aber an anderen Airports.
+
+**v0.5.30 Lösung:**
+- **Kein Airport-Filter mehr** — alle Aircraft die der Pilot fliegen darf werden angezeigt (= /api/fleet, Subfleet-Rank-Restriktion bleibt server-seitig)
+- **Kein State-Filter mehr** — auch in-use / in-flight / Maintenance Aircraft werden angezeigt mit visuellem Indikator
+- **Smart-Sort**: Aircraft am Departure-Airport stehen oben in der Liste, dann nach State (parked vor in-use), dann alphabetisch
+- **Visuelle Indikatoren** in der Liste:
+  - Grün-fettes `@LEPA`-Tag wenn Aircraft am Dep-Airport steht
+  - Status-Pill: `🔒 in Use` (gelb) / `✈ in Flight` (cyan) / `🔧 Maintenance` (rot) bei nicht-parked Aircraft
+- **Header zeigt Count**: "12 Aircraft gesamt · Aircraft am LEPA stehen oben"
+
+**Falls Pilot ein in-use/Maintenance-Aircraft auswählt:** phpVMS-Prefile lehnt mit klarer Fehlermeldung ab — Pilot kann dann anderes wählen.
+
+### 🔧 Implementation
+
+- **Rust**: `fleet_list_at_airport()` ruft jetzt nur `client.get_fleet()` (= alle Aircraft), nicht mehr `/api/airports/{icao}/aircraft`. icao-Parameter bleibt für Sort-Priority. State-Filter (`state == 0`) entfernt.
+- **Frontend**: Aircraft-List-Item zeigt Airport + State-Pill. Empty-State-Message angepasst.
+
+Versions-Bump 0.5.29 → 0.5.30.
+
+---
+
 ## [v0.5.29] — 2026-05-08
 
 🎯 **Pilot entscheidet komplett selbst — Auto-IFR/VFR-Kategorisierung entfernt, durch klaren Hinweis-Text ersetzt.**

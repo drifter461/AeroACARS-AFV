@@ -5349,10 +5349,18 @@ pub struct AircraftPickerEntry {
     pub display: String,
 }
 
-/// Liste verfuegbarer Aircraft am Departure-Airport. Server-side
-/// enforced phpVMS schon Subfleet-Rank-Filter — wir filtern hier nur
-/// auf Status (parked) damit Maintenance-/in-flight-Aircraft nicht
-/// als waehlbar erscheinen.
+/// v0.5.30: Liste ALLER verfuegbaren Aircraft fuer den Piloten (= keine
+/// Airport-/State-Einschraenkung im Frontend). Pilot waehlt frei aus
+/// dem gesamten Fleet, Suche im UI filtert Live.
+///
+/// `icao`-Parameter wird nur fuer SORT-Priority genutzt: Aircraft am
+/// Departure-Airport stehen oben in der Liste, Rest folgt alphabetisch.
+/// Phpvms enforced Subfleet-Rank-Restriktion server-seitig (= nur was
+/// der Pilot fliegen darf kommt vom /api/fleet zurueck).
+///
+/// State-Filter entfernt: Pilot sieht auch in-use / maintenance Aircraft
+/// (mit visuellem Indikator). Falls ausgewaehlte Aircraft nicht
+/// verfuegbar ist, lehnt phpVMS-Prefile mit klarer Fehlermeldung ab.
 #[tauri::command]
 async fn fleet_list_at_airport(
     state: tauri::State<'_, AppState>,
@@ -5361,31 +5369,9 @@ async fn fleet_list_at_airport(
     let client = current_client(&state)?;
     let icao_upper = icao.trim().to_uppercase();
 
-    // Try airport-specific endpoint first.
-    let raw: Vec<api_client::AircraftDetails> = match client
-        .get_aircraft_at_airport(&icao_upper)
-        .await
-    {
-        Ok(a) if !a.is_empty() => a,
-        _ => {
-            // Fallback: full-fleet + client-side airport filter. Manche
-            // phpVMS-Versionen unterstuetzen den airport-Endpoint nicht.
-            tracing::info!(icao = %icao_upper, "airport-aircraft endpoint empty/unavailable, falling back to /api/fleet");
-            let all = client.get_fleet().await?;
-            all.into_iter()
-                .filter(|a| {
-                    a.airport_id
-                        .as_deref()
-                        .map(|s| s.trim().eq_ignore_ascii_case(&icao_upper))
-                        .unwrap_or(false)
-                })
-                .collect()
-        }
-    };
-
-    let entries: Vec<AircraftPickerEntry> = raw
+    let raw = client.get_fleet().await?;
+    let mut entries: Vec<AircraftPickerEntry> = raw
         .into_iter()
-        .filter(|a| a.state.map(|s| s == 0).unwrap_or(true)) // 0=parked
         .map(|a| {
             let icao = a.icao.clone().unwrap_or_default();
             let reg = a.registration.clone().unwrap_or_default();
@@ -5411,6 +5397,20 @@ async fn fleet_list_at_airport(
             }
         })
         .collect();
+
+    // Sortieren: Aircraft am Departure-Airport zuerst, dann nach State
+    // (parked vor in-use), dann alphabetisch nach ICAO+Reg.
+    entries.sort_by(|a, b| {
+        let a_here = a.airport_id.eq_ignore_ascii_case(&icao_upper);
+        let b_here = b.airport_id.eq_ignore_ascii_case(&icao_upper);
+        match (a_here, b_here) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.state.cmp(&b.state)
+                .then_with(|| a.icao.cmp(&b.icao))
+                .then_with(|| a.registration.cmp(&b.registration)),
+        }
+    });
 
     Ok(entries)
 }
