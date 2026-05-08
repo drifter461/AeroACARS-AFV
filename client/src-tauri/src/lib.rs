@@ -1296,6 +1296,11 @@ struct FlightStats {
     approach_stable_config: Option<bool>,
     /// "Nutzte HAT statt AGL?" — fuer UI-Confidence-Indikator.
     approach_used_hat: bool,
+    /// v0.5.27: Quelle des Flugplans. None = pre-v0.5.27 (Annahme:
+    /// SimBrief), "simbrief" = OFP via SB, "manual" = VFR/manual mode.
+    /// Wird im PIREP-Body weitergegeben damit der aeroacars-live-
+    /// Monitor "Manual"-Pill anzeigen kann.
+    flight_plan_source: Option<&'static str>,
     // ─── v0.5.26 Erweiterte Landung-Metriken ───────────────────────────
     //
     // Phase 1 — Sicherheits-Indikatoren:
@@ -4042,6 +4047,7 @@ async fn flight_refresh_simbrief(
         stats.planned_max_zfw_kg = Some(ofp.max_zfw_kg).filter(|&v| v > 0.0);
         stats.planned_max_tow_kg = Some(ofp.max_tow_kg).filter(|&v| v > 0.0);
         stats.planned_max_ldw_kg = Some(ofp.max_ldw_kg).filter(|&v| v > 0.0);
+        stats.flight_plan_source = Some("simbrief");
         drop(stats);
         save_active_flight(&app, flight);
     }
@@ -5208,6 +5214,7 @@ async fn flight_start(
         stats.planned_max_zfw_kg = Some(ofp.max_zfw_kg).filter(|&v| v > 0.0);
         stats.planned_max_tow_kg = Some(ofp.max_tow_kg).filter(|&v| v > 0.0);
         stats.planned_max_ldw_kg = Some(ofp.max_ldw_kg).filter(|&v| v > 0.0);
+        stats.flight_plan_source = Some("simbrief");
         drop(stats);
         // Persist immediately so a Tauri restart mid-flight doesn't
         // lose the plan.
@@ -5302,6 +5309,399 @@ async fn flight_start(
     // "Flight started" to "Phase: Pushback" later, leaving the
     // Boarding stage of the timeline unrepresented in the textual
     // log even though the UI marks it as the active checkpoint.
+    log_activity(
+        &state,
+        ActivityLevel::Info,
+        "Phase: Boarding".to_string(),
+        None,
+    );
+    record_event(
+        &app,
+        &flight.pirep_id,
+        &FlightLogEvent::FlightStarted {
+            timestamp: Utc::now(),
+            pirep_id: flight.pirep_id.clone(),
+            airline_icao: flight.airline_icao.clone(),
+            flight_number: flight.flight_number.clone(),
+            dpt_airport: flight.dpt_airport.clone(),
+            arr_airport: flight.arr_airport.clone(),
+        },
+    );
+    Ok(info)
+}
+
+// ─── v0.5.27 VFR/Manual-Mode ───────────────────────────────────────────
+//
+// Fuer VFR-Fluege oder kleine Pisten wo SimBrief keinen OFP erstellen
+// kann. Pilot waehlt Aircraft manuell aus dem Fleet + traegt Block-Fuel,
+// erwartete Flugzeit + optional Cruise/Route/Alternate ein.
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AircraftPickerEntry {
+    pub id: i64,
+    pub registration: String,
+    pub icao: String,
+    pub name: String,
+    pub airport_id: String,
+    /// 0=parked / 1=in_use / 2=in_flight (phpVMS AircraftState).
+    pub state: i32,
+    /// Searchable display-string ("CL60 D-A3MD Bombardier Challenger 605").
+    pub display: String,
+}
+
+/// Liste verfuegbarer Aircraft am Departure-Airport. Server-side
+/// enforced phpVMS schon Subfleet-Rank-Filter — wir filtern hier nur
+/// auf Status (parked) damit Maintenance-/in-flight-Aircraft nicht
+/// als waehlbar erscheinen.
+#[tauri::command]
+async fn fleet_list_at_airport(
+    state: tauri::State<'_, AppState>,
+    icao: String,
+) -> Result<Vec<AircraftPickerEntry>, UiError> {
+    let client = current_client(&state)?;
+    let icao_upper = icao.trim().to_uppercase();
+
+    // Try airport-specific endpoint first.
+    let raw: Vec<api_client::AircraftDetails> = match client
+        .get_aircraft_at_airport(&icao_upper)
+        .await
+    {
+        Ok(a) if !a.is_empty() => a,
+        _ => {
+            // Fallback: full-fleet + client-side airport filter. Manche
+            // phpVMS-Versionen unterstuetzen den airport-Endpoint nicht.
+            tracing::info!(icao = %icao_upper, "airport-aircraft endpoint empty/unavailable, falling back to /api/fleet");
+            let all = client.get_fleet().await?;
+            all.into_iter()
+                .filter(|a| {
+                    a.airport_id
+                        .as_deref()
+                        .map(|s| s.trim().eq_ignore_ascii_case(&icao_upper))
+                        .unwrap_or(false)
+                })
+                .collect()
+        }
+    };
+
+    let entries: Vec<AircraftPickerEntry> = raw
+        .into_iter()
+        .filter(|a| a.state.map(|s| s == 0).unwrap_or(true)) // 0=parked
+        .map(|a| {
+            let icao = a.icao.clone().unwrap_or_default();
+            let reg = a.registration.clone().unwrap_or_default();
+            let name = a.name.clone().unwrap_or_default();
+            let display = format!(
+                "{} {}{}",
+                icao,
+                reg,
+                if !name.is_empty() && name != icao {
+                    format!(" — {name}")
+                } else {
+                    String::new()
+                },
+            );
+            AircraftPickerEntry {
+                id: a.id,
+                registration: reg,
+                icao,
+                name,
+                airport_id: a.airport_id.unwrap_or_default(),
+                state: a.state.unwrap_or(0),
+                display,
+            }
+        })
+        .collect();
+
+    Ok(entries)
+}
+
+/// VFR/Manual-Mode-Flugplan vom Frontend.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ManualFlightPlan {
+    /// MUST: Aircraft-ID aus dem fleet_list_at_airport-Picker.
+    pub aircraft_id: i64,
+    /// MUST: geplanter Block-Fuel (Ramp Fuel) in kg. Pilot's Schaetzung
+    /// fuer den Trip + Reserve. Brauchen wir fuer Fuel-Efficiency-Score.
+    pub planned_block_fuel_kg: f32,
+    /// MUST: Erwartete Flugzeit in Minuten. Fuer ETA-Anzeige + Janitor-
+    /// Heuristik wann ein Flug "abgelaufen" ist.
+    pub planned_flight_time_min: i32,
+    /// Optional: geplanter Reise-Level in ft (z.B. 4500 fuer VFR).
+    pub cruise_level_ft: Option<i32>,
+    /// Optional: free-text Route ("direct", "via LMV VFR", waypoint-list).
+    pub planned_route: Option<String>,
+    /// Optional: Alternate-Airport ICAO.
+    pub alt_airport_id: Option<String>,
+    /// Optional: geplantes Zero-Fuel-Weight in kg fuer Loadsheet.
+    pub planned_zfw_kg: Option<f32>,
+    /// Optional: geplanter Trip-Burn in kg (= planned_block - reserve - alternate).
+    /// Wenn nicht gesetzt, fallback: 90% des block_fuel als Trip-Schaetzung.
+    pub planned_burn_kg: Option<f32>,
+}
+
+/// VFR/Manual-Flight-Start. Parallele Funktion zu flight_start aber
+/// OHNE SimBrief-OFP-Pflicht. Pilot bringt aircraft_id + minimale
+/// Plan-Daten manuell mit. Rest des Flows identisch (PIREP-Prefile,
+/// Streamer-Spawn, Touchdown-Sampler, Activity-Log).
+#[tauri::command]
+async fn flight_start_manual(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    bid_id: i64,
+    plan: ManualFlightPlan,
+) -> Result<ActiveFlightInfo, UiError> {
+    let setup_guard = FlightSetupGuard::try_acquire(&state.flight_setup_in_progress)?;
+
+    {
+        let guard = state.active_flight.lock().expect("active_flight lock");
+        if guard.is_some() {
+            return Err(UiError::new(
+                "flight_already_active",
+                "another flight is already active",
+            ));
+        }
+    }
+
+    // Validierung der Pflicht-Felder
+    if plan.planned_block_fuel_kg <= 0.0 {
+        return Err(UiError::new(
+            "invalid_block_fuel",
+            "Block-Fuel muss > 0 kg sein",
+        ));
+    }
+    if plan.planned_flight_time_min <= 0 {
+        return Err(UiError::new(
+            "invalid_flight_time",
+            "Erwartete Flugzeit muss > 0 Minuten sein",
+        ));
+    }
+
+    let client = current_client(&state)?;
+    let bids = client.get_bids().await?;
+    let bid = bids
+        .into_iter()
+        .find(|b| b.id == bid_id)
+        .ok_or_else(|| UiError::new("bid_not_found", "bid not found in current bids"))?;
+
+    // Pre-flight gating: ground + departure-airport (gleicher Code wie flight_start)
+    let snapshot = current_snapshot(&app).ok_or_else(|| {
+        UiError::new("no_sim_snapshot", "no sim snapshot yet — is the simulator connected?")
+    })?;
+    if !snapshot.on_ground {
+        return Err(UiError::new(
+            "not_on_ground",
+            "you must be on the ground to start a flight",
+        ));
+    }
+    let dpt_icao = bid.flight.dpt_airport_id.trim().to_uppercase();
+    let cached_dpt: Option<Airport> = {
+        let guard = state.airports.lock().expect("airports lock");
+        guard.get(&dpt_icao).cloned()
+    };
+    let dpt_airport = match cached_dpt {
+        Some(a) => a,
+        None => {
+            let fetched = client.get_airport(&dpt_icao).await?;
+            let mut guard = state.airports.lock().expect("airports lock");
+            guard.insert(dpt_icao.clone(), fetched.clone());
+            fetched
+        }
+    };
+    if let (Some(lat), Some(lon)) = (dpt_airport.lat, dpt_airport.lon) {
+        let distance_nm =
+            ::geo::distance_m(snapshot.lat, snapshot.lon, lat, lon) / 1852.0;
+        if distance_nm > MAX_START_DISTANCE_NM {
+            return Err(UiError::new(
+                "not_at_departure",
+                format!(
+                    "you are {:.1} nm from {} — start the flight at the departure airport",
+                    distance_nm, dpt_icao
+                ),
+            ));
+        }
+    }
+
+    let airline_id = bid.flight.airline.as_ref().map(|a| a.id).ok_or_else(|| {
+        UiError::new("missing_airline", "bid has no airline relation")
+    })?;
+    let aircraft_id = plan.aircraft_id;
+
+    // Aircraft-mismatch-Gate gegen Sim-loaded Aircraft
+    let expected_aircraft = client.get_aircraft(aircraft_id).await?;
+    let expected_icao = expected_aircraft
+        .icao
+        .as_ref()
+        .map(|s| s.trim().to_uppercase())
+        .filter(|s| !s.is_empty());
+    let sim_icao = snapshot
+        .aircraft_icao
+        .as_deref()
+        .and_then(clean_atc_model);
+    let sim_title = snapshot
+        .aircraft_title
+        .as_deref()
+        .unwrap_or("")
+        .to_string();
+    if let (Some(expected), Some(actual)) = (expected_icao.as_ref(), sim_icao.as_ref()) {
+        let title_supports_expected = title_mentions_icao(&sim_title, expected);
+        let types_match_loose = aircraft_types_match(expected, actual);
+        if !types_match_loose && !title_supports_expected {
+            let registration = expected_aircraft
+                .registration
+                .as_deref()
+                .unwrap_or("?");
+            return Err(UiError::new(
+                "aircraft_mismatch",
+                format!(
+                    "Aircraft mismatch: gewählt {expected} ({registration}), Sim hat {actual}. Lade den richtigen Aircraft-Type im Sim oder waehle ein anderes Aircraft.",
+                ),
+            ));
+        }
+    }
+
+    // PIREP prefile (gleiche Logik wie flight_start, ohne SB-Felder)
+    let body = PrefileBody {
+        airline_id,
+        aircraft_id: aircraft_id.to_string(),
+        flight_number: bid.flight.flight_number.clone(),
+        dpt_airport_id: bid.flight.dpt_airport_id.clone(),
+        arr_airport_id: bid.flight.arr_airport_id.clone(),
+        alt_airport_id: plan.alt_airport_id.clone()
+            .or(bid.flight.alt_airport_id.clone()),
+        flight_type: bid.flight.flight_type.clone(),
+        route_code: bid.flight.route_code.clone(),
+        route_leg: bid.flight.route_leg.clone(),
+        level: plan.cruise_level_ft.filter(|&l| l > 0),
+        planned_distance: bid.flight.distance.as_ref().and_then(|d| d.nmi),
+        planned_flight_time: Some(plan.planned_flight_time_min),
+        route: plan.planned_route.clone().filter(|s| !s.is_empty()),
+        source_name: format!("AeroACARS/{}", env!("CARGO_PKG_VERSION")),
+        notes: Some(format!(
+            "Manual/VFR-Mode (kein SimBrief-OFP). Block: {:.0} kg, ETA: {} min",
+            plan.planned_block_fuel_kg, plan.planned_flight_time_min,
+        )),
+    };
+
+    let existing = client.get_user_pireps().await.unwrap_or_default();
+    let adoptable = existing.into_iter().find(|p| {
+        p.state == Some(0)
+            && p.flight_number.as_deref() == Some(body.flight_number.as_str())
+            && (p.airline_id.is_none() || p.airline_id == Some(airline_id))
+    });
+    let pirep = if let Some(adopt) = adoptable {
+        api_client::PirepCreated { id: adopt.id }
+    } else {
+        client.prefile_pirep(&body).await.map_err(|e| match e {
+            ApiError::Server { status: 400, body: ref err_body }
+                if err_body.contains("aircraft-not-available") =>
+            {
+                UiError::new(
+                    "aircraft_not_available",
+                    "Aircraft nicht verfügbar — anderer Pilot fliegt es vielleicht oder es ist in Maintenance.",
+                )
+            }
+            other => other.into(),
+        })?
+    };
+
+    let update_body = UpdateBody {
+        state: Some(0),
+        status: Some("BST".to_string()),
+        source_name: Some(format!("AeroACARS/{}", env!("CARGO_PKG_VERSION"))),
+        ..Default::default()
+    };
+    let _ = client.update_pirep(&pirep.id, &update_body).await;
+
+    // Aircraft-Daten + Airline-Logo holen
+    let aircraft_details = client.get_aircraft(aircraft_id).await.ok();
+    let planned_registration = aircraft_details
+        .as_ref()
+        .and_then(|a| a.registration.clone())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let aircraft_icao = aircraft_details
+        .as_ref()
+        .and_then(|a| a.icao.clone())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let aircraft_name = aircraft_details
+        .as_ref()
+        .and_then(|a| a.name.clone())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let airline = bid.flight.airline.as_ref();
+
+    // VFR/Manual-Mode: keine SimBrief-Fares verfuegbar. Empty-list ist
+    // OK fuer phpVMS-PIREP-File (= keine Pax/Cargo-Loads).
+    let fares: Vec<(i64, i32)> = Vec::new();
+
+    let flight = Arc::new(ActiveFlight {
+        pirep_id: pirep.id.clone(),
+        bid_id,
+        started_at: Utc::now(),
+        airline_icao: airline.map(|a| a.icao.clone()).unwrap_or_default(),
+        airline_logo_url: airline.and_then(|a| a.logo.clone()).filter(|s| !s.is_empty()),
+        planned_registration,
+        aircraft_icao,
+        aircraft_name,
+        flight_number: bid.flight.flight_number.clone(),
+        dpt_airport: bid.flight.dpt_airport_id.clone(),
+        arr_airport: bid.flight.arr_airport_id.clone(),
+        fares,
+        stats: Mutex::new(FlightStats::new()),
+        stop: AtomicBool::new(false),
+        was_just_resumed: AtomicBool::new(false),
+        streamer_spawned: AtomicBool::new(false),
+        cancelled_remotely: AtomicBool::new(false),
+    });
+
+    save_active_flight(&app, &flight);
+    {
+        let mut guard = state.active_flight.lock().expect("active_flight lock");
+        *guard = Some(Arc::clone(&flight));
+    }
+    setup_guard.disarm();
+
+    // Manual-Plan in FlightStats schreiben (analog zu SB-OFP-Path)
+    {
+        let mut stats = flight.stats.lock().expect("flight stats lock");
+        stats.planned_block_fuel_kg = Some(plan.planned_block_fuel_kg);
+        // planned_burn = explicit oder 90%-Fallback
+        stats.planned_burn_kg = plan.planned_burn_kg
+            .or(Some(plan.planned_block_fuel_kg * 0.9));
+        stats.planned_zfw_kg = plan.planned_zfw_kg;
+        stats.planned_tow_kg = match (plan.planned_zfw_kg, Some(plan.planned_block_fuel_kg)) {
+            (Some(zfw), Some(fuel)) => Some(zfw + fuel),
+            _ => None,
+        };
+        stats.planned_route = plan.planned_route;
+        stats.planned_alternate = plan.alt_airport_id;
+        stats.flight_plan_source = Some("manual");
+        drop(stats);
+        save_active_flight(&app, &flight);
+    }
+
+    spawn_position_streamer(app.clone(), Arc::clone(&flight), client.clone());
+    spawn_touchdown_sampler(app.clone(), Arc::clone(&flight));
+    clear_activity_log_for_new_flight(&app);
+
+    let info = flight_info(flight.as_ref());
+    log_activity(
+        &state,
+        ActivityLevel::Info,
+        format!(
+            "Manual-Mode-Flug gestartet: {} {} → {} (Block {:.0} kg, ETA {} min)",
+            format_callsign(&flight.airline_icao, &flight.flight_number),
+            flight.dpt_airport,
+            flight.arr_airport,
+            plan.planned_block_fuel_kg,
+            plan.planned_flight_time_min,
+        ),
+        Some(format!("PIREP prefiled as {}", flight.pirep_id)),
+    );
     log_activity(
         &state,
         ActivityLevel::Info,
@@ -13571,6 +13971,8 @@ pub fn run() {
             airport_get,
             flight_status,
             flight_start,
+            flight_start_manual,
+            fleet_list_at_airport,
             flight_end,
             flight_end_manual,
             flight_cancel,

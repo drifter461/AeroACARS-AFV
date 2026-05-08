@@ -4,6 +4,58 @@ Alle nennenswerten Änderungen an AeroACARS. Format: lose an [Keep a Changelog](
 
 ---
 
+## [v0.5.27] — 2026-05-08
+
+🎯 **VFR/Manual-Flight-Mode — Flug-Start ohne SimBrief-OFP für VFR-Flüge, kleine Pisten, GA.**
+
+### ✨ Neu
+
+**Problem:** AeroACARS hat bisher SimBrief-OFP für jeden Bid verlangt (siehe `lib.rs` Z.4848: `"no aircraft on this bid — please prepare a SimBrief OFP first"`). Für VFR-Flüge unterstützt SimBrief aber kein OFP-Routing — Pilot konnte zwar Bid in phpVMS erstellen, AeroACARS verweigerte aber den Start.
+
+**Lösung:** Neuer „🛩 VFR/Manual-Mode" Button auf jeder Bid-Card. Pilot wählt:
+
+1. **Aircraft-Picker** mit Suche
+   - phpVMS-API `GET /api/airports/{icao}/aircraft` (mit Fallback auf `/api/fleet`)
+   - Filter: nur Aircraft im State `parked` (= verfügbar)
+   - Sim-Default-Auswahl: AeroACARS sieht den im Sim geladenen Aircraft → vorausgewählt mit Match-Erkennung über Registration ODER ICAO
+   - Volltext-Suche über ICAO / Registration / Name
+
+2. **Manual-Flight-Plan-Form**
+   - **Pflicht-Felder**: Block-Fuel (kg), erwartete Flugzeit (min) — sonst keine Fuel-Score / ETA möglich
+   - **Optional**: Cruise-Level (ft), Route (free-text), Alternate (ICAO), ZFW (kg)
+
+3. Klick „🛩 Flug starten" → identischer Flow wie Standard-`flight_start` aber ohne SimBrief-Pflicht.
+
+### 🔧 Implementation
+
+**Client (lib.rs):**
+- Neue Tauri-Commands `fleet_list_at_airport(icao)` + `flight_start_manual(bid_id, plan)`
+- `ManualFlightPlan` Deserialize-Struct mit Pflicht-Feldern + Optionals
+- Identischer Pre-Flight-Gate (ground + dpt-distance), Aircraft-Mismatch-Check, PIREP-Prefile, Streamer-Spawn
+- `FlightStats.flight_plan_source: "simbrief" / "manual" / None` (carry-through im PIREP-Body als notes-Prefix)
+- `planned_burn_kg` Fallback: 90% des block_fuel falls Pilot's planned_burn nicht angibt
+
+**API-Client (api-client/src/lib.rs):**
+- Neue Methoden `client.get_aircraft_at_airport(icao)` + `client.get_fleet()`
+
+**Frontend (TS/React):**
+- Neue Komponente `<ManualFlightModal>` mit 2-Stage-Workflow (Aircraft → Plan)
+- 130+ Zeilen CSS für das Modal (matching dark theme)
+- Manual-Mode-Button in BidsList:
+  - Bei Bid OHNE simbrief: „🛩 VFR/Manual-Mode" als gleichwertige Action
+  - Bei Bid MIT simbrief: „🛩 Manual-Override" (= falls Pilot anderes Aircraft fliegen will)
+- Sim-Snapshot wird als simHint übergeben für Aircraft-Default-Auswahl + Block-Fuel-Default
+
+**Backward-kompatibel:** existierender `flight_start`-Flow bleibt unverändert. SimBrief-Bids gehen weiter den OFP-Path, Manual-Mode ist additiv.
+
+### ⚠ Hinweise
+
+- **Aircraft-Subfleet-Validation**: phpVMS enforced server-side — Pilot mit Rank-N kann keine Aircraft fliegen die Rank N+1 brauchen. Manual-Picker zeigt aber alle Aircraft am Departure-Airport.
+- **Fuel-Planung**: ohne explicit `planned_burn_kg` nehmen wir 90% des Block-Fuel als Trip-Schätzung. Realistischer wäre 75% (= mit Reserve), aber 90% ist bei VFR/GA üblicher.
+- **PIREP-Notes**: bei Manual-Mode wird automatisch `Manual/VFR-Mode (kein SimBrief-OFP). Block: XXX kg, ETA: YY min` in den PIREP-Notes-Block geschrieben damit VA-Owner sieht dass es ein Manual-Flug war.
+
+---
+
 ## [v0.5.26] — 2026-05-08
 
 🎯 **9 neue Landung-Sicherheits-Indikatoren + DA-Gate (200 ft) + sim-/aircraft-spezifische Limits.**

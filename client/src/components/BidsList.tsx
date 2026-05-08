@@ -13,6 +13,7 @@ import type {
   SimSnapshot,
   UiError,
 } from "../types";
+import { ManualFlightModal } from "./ManualFlightModal";
 
 /**
  * Maximum distance (in nautical miles) between the aircraft and the bid's
@@ -172,6 +173,8 @@ export function BidsList({
     bidId: number;
     message: string;
   } | null>(null);
+  /** v0.5.27: Manual/VFR-Mode-Modal — Bid für den's gerade geöffnet ist. */
+  const [manualModalBid, setManualModalBid] = useState<Bid | null>(null);
   /** Cached airport coords keyed by uppercase ICAO. */
   const [airports, setAirports] = useState<Record<string, AirportInfo>>({});
   /** Tracks ICAOs we've already requested so we don't fetch the same one twice. */
@@ -616,6 +619,21 @@ export function BidsList({
                     >
                       {t("bids.open_flight_page")} ↗
                     </button>
+                    {/* v0.5.27 VFR/Manual-Mode-Button: immer verfuegbar.
+                        Hauptanwendung: Bids ohne SimBrief-OFP (= VFR /
+                        kleine Pisten / GA-Anfluege). Auch nutzbar als
+                        Override wenn Pilot anderes Aircraft als im Bid
+                        fliegen will. */}
+                    {hasActiveFlight ? null : (
+                      <button
+                        type="button"
+                        className="button"
+                        onClick={() => setManualModalBid(bid)}
+                        title="Manueller Flug-Start ohne SimBrief-OFP — Aircraft + Plan selbst eintragen"
+                      >
+                        🛩 {f.simbrief?.id ? "Manual-Override" : "VFR/Manual-Mode"}
+                      </button>
+                    )}
                   </div>
 
                   {startError?.bidId === bid.id && (
@@ -628,6 +646,23 @@ export function BidsList({
             );
           })}
         </ul>
+      )}
+
+      {/* v0.5.27 Manual/VFR-Mode-Modal */}
+      {manualModalBid && (
+        <ManualFlightModal
+          bid={manualModalBid}
+          simHint={simSnapshot ? {
+            aircraft_icao: simSnapshot.aircraft_icao,
+            aircraft_registration: simSnapshot.aircraft_registration,
+            fuel_total_kg: simSnapshot.fuel_total_kg,
+          } : null}
+          onClose={() => setManualModalBid(null)}
+          onFlightStarted={(info) => {
+            setManualModalBid(null);
+            onFlightStarted?.(info);
+          }}
+        />
       )}
     </section>
   );

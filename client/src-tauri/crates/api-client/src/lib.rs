@@ -1224,6 +1224,26 @@ impl Client {
             Err(e) => Err(e),
         }
     }
+
+    /// v0.5.27: `GET /api/airports/{icao}/aircraft` — Aircraft die aktuell
+    /// am Departure-Airport stehen. Fuer den VFR/Manual-Mode-Aircraft-
+    /// Picker. Filter `?status=active` damit Maintenance-Aircraft nicht
+    /// in der Liste landen.
+    ///
+    /// phpVMS gibt nur Aircraft zurueck die der Pilot per Subfleet-Rank
+    /// fliegen darf — Server-side enforcement, kein Client-Filter noetig.
+    pub async fn get_aircraft_at_airport(&self, icao: &str) -> Result<Vec<AircraftDetails>, ApiError> {
+        let path = format!("/api/airports/{}/aircraft", icao.to_uppercase());
+        self.get_data(&path).await
+    }
+
+    /// v0.5.27: `GET /api/fleet` — komplette Fleet-Liste (= alle Aircraft
+    /// die der Pilot fliegen darf). Fallback fuer den Aircraft-Picker
+    /// wenn `/api/airports/{icao}/aircraft` leer zurueckkommt (= nicht
+    /// alle phpVMS-Deployments unterstuetzen den airport-Filter).
+    pub async fn get_fleet(&self) -> Result<Vec<AircraftDetails>, ApiError> {
+        self.get_data("/api/fleet").await
+    }
 }
 
 async fn check_status(response: Response, path: &str) -> Result<Response, ApiError> {
