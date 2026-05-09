@@ -1676,6 +1676,14 @@ struct FlightStats {
     /// reset durch sampler_touchdown_at).
     touchdown_window_dumped_at: Option<DateTime<Utc>>,
 
+    /// v0.5.39: Berechnete Forensik-Analyse aus dem TouchdownWindow-Buffer.
+    /// Sampler schreibt sie hier rein wenn der Buffer 10s post-TD gedumpt
+    /// wird; der Touchdown-Payload-Builder liest sie aus und packt sie ins
+    /// MQTT-Touchdown-Event damit der Live-Monitor die Volanta-/DLHv-
+    /// equivalenten VS-Werte und den Flare-Score sieht. None bis Sampler
+    /// fertig (typisch 10s post-TD).
+    landing_analysis: Option<serde_json::Value>,
+
     /// True once the "Aircraft: {title}" banner has been emitted to
     /// the activity log for this flight. Persisted across resumes
     /// so a Tauri restart mid-flight doesn't re-fire the banner — it
@@ -7442,6 +7450,22 @@ fn spawn_flight_log_upload(app: &AppHandle, pirep_id: String) {
     });
 }
 
+/// v0.5.39: Helper um Felder aus dem landing_analysis-JSON-Value zu lesen.
+/// Werden vom Touchdown-Payload-Builder benutzt damit wir nicht jedes Mal
+/// die gleichen .get(...).and_then(...).map(...) Kette dranschreiben.
+fn ana_f32(v: &Option<serde_json::Value>, key: &str) -> Option<f32> {
+    v.as_ref()?.get(key)?.as_f64().map(|x| x as f32)
+}
+fn ana_i32(v: &Option<serde_json::Value>, key: &str) -> Option<i32> {
+    v.as_ref()?.get(key)?.as_i64().map(|x| x as i32)
+}
+fn ana_u32(v: &Option<serde_json::Value>, key: &str) -> Option<u32> {
+    v.as_ref()?.get(key)?.as_u64().map(|x| x as u32)
+}
+fn ana_bool(v: &Option<serde_json::Value>, key: &str) -> Option<bool> {
+    v.as_ref()?.get(key)?.as_bool()
+}
+
 /// v0.5.39: Forensik-Bewertung der Landung aus dem 50-Hz-Sample-Buffer
 /// um den TD-Edge. Gibt JSON-Map zurück, die im LandingAnalysis-Event in
 /// die JSONL geschrieben + im MQTT-Touchdown-Payload mit-publisht wird.
@@ -7979,14 +8003,23 @@ fn spawn_touchdown_sampler(app: AppHandle, flight: Arc<ActiveFlight>) {
                 stats.snapshot_buffer.pop_front();
             }
 
+            // Forensik-Analyse VOR Lock-Drop berechnen + im stats persistieren
+            // damit der Touchdown-Payload-Builder im Streamer-Tick die Felder
+            // direkt zur Verfuegung hat (anstatt aus der JSONL re-zu-parsen).
+            let prepared_dump = if let Some((edge_at, samples)) = dump_payload {
+                let analysis = compute_landing_analysis(&samples, edge_at);
+                stats.landing_analysis = Some(analysis.clone());
+                Some((edge_at, samples, analysis))
+            } else {
+                None
+            };
+
             // Dump-IO außerhalb des Lock-Holds — record_event macht
             // synchroness File-Append (~1-10 ms auf NTFS), das wollen wir
             // nicht das stats-Lock blockieren lassen.
             drop(stats);
-            if let Some((edge_at, samples)) = dump_payload {
+            if let Some((edge_at, samples, analysis)) = prepared_dump {
                 let count = samples.len();
-                // Forensik-Analyse vor dem Move ins Event berechnen
-                let analysis = compute_landing_analysis(&samples, edge_at);
                 record_event(
                     &app,
                     &flight.pirep_id,
@@ -8480,6 +8513,27 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                                 }
                                 _ => None,
                             },
+                            // v0.5.39: 50-Hz-Forensik aus dem Sampler-Buffer.
+                            // landing_analysis ist ein serde_json::Value das
+                            // von compute_landing_analysis() im Sampler-Loop
+                            // geschrieben wird. Wenn None (Sampler hat noch
+                            // nicht 10s post-TD gesehen, oder Touchdown vor
+                            // Buffer-Init), bleiben alle Felder None.
+                            vs_at_edge_fpm: ana_f32(&stats.landing_analysis, "vs_at_edge_fpm"),
+                            vs_smoothed_250ms_fpm: ana_f32(&stats.landing_analysis, "vs_smoothed_250ms_fpm"),
+                            vs_smoothed_500ms_fpm: ana_f32(&stats.landing_analysis, "vs_smoothed_500ms_fpm"),
+                            vs_smoothed_1000ms_fpm: ana_f32(&stats.landing_analysis, "vs_smoothed_1000ms_fpm"),
+                            vs_smoothed_1500ms_fpm: ana_f32(&stats.landing_analysis, "vs_smoothed_1500ms_fpm"),
+                            peak_g_post_500ms: ana_f32(&stats.landing_analysis, "peak_g_post_500ms"),
+                            peak_g_post_1000ms: ana_f32(&stats.landing_analysis, "peak_g_post_1000ms"),
+                            peak_vs_pre_flare_fpm: ana_f32(&stats.landing_analysis, "peak_vs_pre_flare_fpm"),
+                            vs_at_flare_end_fpm: ana_f32(&stats.landing_analysis, "vs_at_flare_end_fpm"),
+                            flare_reduction_fpm: ana_f32(&stats.landing_analysis, "flare_reduction_fpm"),
+                            flare_dvs_dt_fpm_per_sec: ana_f32(&stats.landing_analysis, "flare_dvs_dt_fpm_per_sec"),
+                            flare_quality_score: ana_i32(&stats.landing_analysis, "flare_quality_score"),
+                            flare_detected: ana_bool(&stats.landing_analysis, "flare_detected"),
+                            bounce_max_agl_ft: ana_f32(&stats.landing_analysis, "bounce_max_agl_ft"),
+                            forensic_sample_count: ana_u32(&stats.landing_analysis, "sample_count"),
                         }
                     })
                 };

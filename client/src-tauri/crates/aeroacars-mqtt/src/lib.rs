@@ -409,6 +409,64 @@ pub struct TouchdownPayload {
     /// Brake-Energy-Proxy in kJ/m. Hoch = brake-pack-thermal-stress.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub landing_brake_energy_proxy: Option<f32>,
+
+    // ─── v0.5.39 50-Hz-Forensik aus TouchdownWindow-Buffer ────────────
+    //
+    // Berechnet vom compute_landing_analysis() ueber das 5s-pre + 10s-post
+    // Sample-Buffer rund um den TD-Edge. Adressiert die Volanta-/DLHv-
+    // Diskrepanz: Beide Tools nehmen smoothed VS (250-1500 ms-Mittel) und
+    // peak G ueber post-TD-Window — AeroACARS war bisher auf das einzelne
+    // SimVar-Latched VS angewiesen, das im Fenix-A321-Fall um Faktor 2-3
+    // abweichen kann. Mit diesen Feldern kann der VA-Owner im Touchdown-
+    // Detail-Modal direkt sehen welcher Wert mit welcher Methode rauskommt.
+    /// VS linear interpoliert auf den exakten on_ground-Edge (zwischen
+    /// den zwei umschliessenden 20-ms-Samples).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vs_at_edge_fpm: Option<f32>,
+    /// Mean VS ueber 250 ms vor Edge (airborne-Samples).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vs_smoothed_250ms_fpm: Option<f32>,
+    /// Mean VS ueber 500 ms vor Edge (= Volanta-Style).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vs_smoothed_500ms_fpm: Option<f32>,
+    /// Mean VS ueber 1000 ms vor Edge (= DLHv-Style).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vs_smoothed_1000ms_fpm: Option<f32>,
+    /// Mean VS ueber 1500 ms vor Edge.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vs_smoothed_1500ms_fpm: Option<f32>,
+    /// Peak G ueber 500 ms post-Edge — der echte Gear-Compression-Spike.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peak_g_post_500ms: Option<f32>,
+    /// Peak G ueber 1000 ms post-Edge.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peak_g_post_1000ms: Option<f32>,
+    /// Steepste Sinkrate in [-2000, -100] ms vor Edge — Pre-Flare.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peak_vs_pre_flare_fpm: Option<f32>,
+    /// VS unmittelbar vor Edge (ts ~ -100 ms).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vs_at_flare_end_fpm: Option<f32>,
+    /// Reduktion durch Flare: vs_at_flare_end - peak_vs_pre_flare.
+    /// Positiv = Flare hat Sinkrate verkleinert.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flare_reduction_fpm: Option<f32>,
+    /// dVS/dt im Flare-Window (fpm pro Sekunde).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flare_dvs_dt_fpm_per_sec: Option<f32>,
+    /// Flare-Score 0..100. 100 = >400 fpm Reduktion + sanfter Endwert,
+    /// 0 = keine Reduktion (Pilot zog zu spaet oder gar nicht).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flare_quality_score: Option<i32>,
+    /// True wenn signifikante VS-Reduktion (>50 fpm) im Flare-Window.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flare_detected: Option<bool>,
+    /// Bounce-Hoehe (max AGL ueber alle Excursionen post-TD, >5 ft Filter).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bounce_max_agl_ft: Option<f32>,
+    /// Anzahl Samples im 50-Hz-Buffer (5 s pre + 10 s post). >500 = OK.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forensic_sample_count: Option<u32>,
 }
 
 fn is_false(b: &bool) -> bool { !*b }
