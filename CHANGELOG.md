@@ -4,6 +4,35 @@ Alle nennenswerten Änderungen an AeroACARS. Format: lose an [Keep a Changelog](
 
 ---
 
+## [v0.5.40] — 2026-05-09
+
+🐞 **Fix: Phase-FSM hing 9 h in Pushback** bei Aerosoft A340-600 Pro (URO 913 ZWWW→EHBK).
+
+### Hintergrund
+
+Pilot meldete: nur Boarding→Pushback und Pushback→Arrived in der Phase-Historie. Die kompletten 9 h dazwischen (TaxiOut, TakeoffRoll, Takeoff, Climb, Cruise, Descent, Approach, Final, Landing, TaxiIn) wurden übersprungen — obwohl der Flug echt war (max IAS 331 kt, max ALT 36340 ft, 7173 Position-Snaps, 7069 davon airborne).
+
+### Zwei Bugs
+
+**Bug 1 — `pushback_state == 3` falsch interpretiert:**
+MSFS PUSHBACK STATE = 3 ist der **Default-Wert** ("kein Pushback aktiv"), nicht "Pushback gerade abgeschlossen". Werte 0/1/2 = Push aktiv (forward/back/slow), 3 = idle. Der Pilot pushed mit GSX (oder manuell), wodurch der MSFS-State NIE auf 0/1/2 wechselte — nur 3 die ganze Zeit. Die FSM las das als „Tug ist gerade fertig" und wartete auf 10 s Stillstand vor TaxiOut. Pilot rollte aber schon mit 14 kt, also kam nie ein Stillstand → Phase blieb hängen.
+
+**Bug 2 — Aerosoft A340-600 Pro flickert `engines_running`:**
+Der Aerosoft-A346 zappelt die `GENERAL ENG COMBUSTION` SimVar zwischen 0 und 4 — 27 Wechsel in 7 min Pushback-Phase observed. Die FSM-Bedingung `snap.engines_running > 0` lieferte zufällig true/false. Selbst wenn die Stillstand-Logik nicht blockiert hätte, wäre die Engines-Bedingung nicht stabil getriggert.
+
+### Fix
+
+- **`saw_pushback_state_active`** Track-State: nur wenn `pushback_state` jemals 0/1/2 war seit Flight-Start, gilt der spätere 3-Wert als „Tug detached". Sonst Fall-back auf alte Heuristik (engines + gs > 3 kt = TaxiOut)
+- **`engines_effectively_running()`** Helper: Anti-Flicker mit 2-s-Grace-Window. Wenn `engines_running > 0` zuletzt < 2 s zurück, gilt als laufend. Verwendet in Pushback→TaxiOut + TaxiOut→TakeoffRoll
+- Existierende 5-s-Debounce für Activity-Log bleibt unangetastet (nur FSM-Pfad gefixt)
+
+### Was Piloten merken
+
+- Aerosoft A340-600 Pro + andere Aircraft mit GSX-Pushback / flickerigem `engines_running`-SimVar tracken jetzt alle Phasen sauber
+- Default-MSFS-Pushback (Tug-Animation) funktioniert weiter wie vorher (saw_pushback_state_active wird true → alte Logik greift)
+
+---
+
 ## [v0.5.39] — 2026-05-09
 
 🎯 **50-Hz-Touchdown-Forensik + Flare-Quality + Critical-Window-Priority.**

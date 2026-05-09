@@ -1676,6 +1676,28 @@ struct FlightStats {
     /// reset durch sampler_touchdown_at).
     touchdown_window_dumped_at: Option<DateTime<Utc>>,
 
+    /// v0.5.40: Anti-Flicker für `engines_running`. Aerosoft A340-600 Pro
+    /// (und andere Add-ons) zappeln den `GENERAL ENG COMBUSTION` SimVar
+    /// pro Tick zwischen 0 und N (sauber observiert: 27 Wechsel in 7 min
+    /// Pushback-Phase). Die Phase-FSM-Bedingung `engines_running > 0`
+    /// liefert dann zufällig true/false und blockiert Pushback→TaxiOut.
+    /// Hier merken wir uns den Zeitpunkt des letzten >0-Reading und
+    /// behandeln Engines als "effektiv laufend" für 2 s nach diesem Tick
+    /// (Grace-Window). Ändert nichts am detect_telemetry_changes-Logging
+    /// (dort hängt's an der bestehenden 5-s-Debounce).
+    last_engines_running_above_zero_at: Option<DateTime<Utc>>,
+
+    /// v0.5.40: Track ob `pushback_state` jemals != 3 war seit Flight-
+    /// Start. MSFS PUSHBACK STATE = 3 ist der Default ("kein Pushback
+    /// aktiv"). Wenn der Pilot mit GSX/manuell rausgeschoben wird oder
+    /// der Sim/das Add-on den Wert nie auf 0/1/2 setzt, würde die FSM
+    /// fälschlich `tug_done = (state == Some(3))` als "Pushback ist
+    /// abgeschlossen" werten und auf 10-s-Stillstand warten — der nie
+    /// kommt wenn der Pilot schon rollt. Lösung: nur dann den 3-State
+    /// als "tug detached" werten, wenn vorher mal ein 0/1/2 gesehen
+    /// wurde. Sonst Fall-back auf old-school engines+gs Heuristik.
+    saw_pushback_state_active: bool,
+
     /// v0.5.39: Berechnete Forensik-Analyse aus dem TouchdownWindow-Buffer.
     /// Sampler schreibt sie hier rein wenn der Buffer 10s post-TD gedumpt
     /// wird; der Touchdown-Payload-Builder liest sie aus und packt sie ins
@@ -9083,8 +9105,34 @@ fn current_premium_status(app: &AppHandle) -> sim_xplane::PremiumStatus {
 
 /// Update running stats AND step the flight-phase FSM. Returns the new phase
 /// when a transition fires, otherwise `None`.
+/// v0.5.40: Anti-Flicker für `engines_running`. Aerosoft A340-600 Pro
+/// (und etliche andere Add-ons) zappeln den GENERAL ENG COMBUSTION SimVar
+/// pro Tick zwischen 0 und N. Die Phase-FSM sieht dann zufällig false und
+/// blockiert Pushback→TaxiOut. Hier: gilt als "effektiv laufend" wenn
+/// snap.engines_running > 0 ODER der letzte >0-Reading <2 s her ist.
+fn engines_effectively_running(stats: &FlightStats, snap: &SimSnapshot, now: DateTime<Utc>) -> bool {
+    if snap.engines_running > 0 { return true; }
+    stats
+        .last_engines_running_above_zero_at
+        .map(|t| (now - t).num_milliseconds() < 2000)
+        .unwrap_or(false)
+}
+
 fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase> {
     let mut stats = flight.stats.lock().expect("flight stats");
+    let _now_for_state_update = Utc::now();
+
+    // v0.5.40: Anti-Flicker-State + Pushback-Active-Tracking refreshen.
+    // Muss am Anfang passieren damit alle nachfolgenden Phase-Handler den
+    // aktuellen Stand sehen.
+    if snap.engines_running > 0 {
+        stats.last_engines_running_above_zero_at = Some(_now_for_state_update);
+    }
+    if let Some(pb) = snap.pushback_state {
+        if pb != 3 {
+            stats.saw_pushback_state_active = true;
+        }
+    }
 
     // Distance accounting.
     if let (Some(prev_lat), Some(prev_lon)) = (stats.last_lat, stats.last_lon) {
@@ -9392,7 +9440,11 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
             // > 3 kt fälschlicherweise schon TaxiOut triggern.
             //
             // Implementierung als 3-Stufen-Gate:
-            //   * `tug_done` = MSFS meldet PUSHBACK STATE == 3
+            //   * `tug_done` = MSFS meldet PUSHBACK STATE == 3 — ABER nur
+            //                  gültig wenn vorher mal 0/1/2 gesehen wurde
+            //                  (`saw_pushback_state_active`); sonst ist 3
+            //                  einfach der Default und kein Pushback war
+            //                  je aktiv (GSX-Pushback / manuell)
             //   * `stopped`  = Flugzeug ist nach tug_done zum Stillstand
             //                  gekommen (gs < 0.5 kt). Wir merken uns
             //                  den Zeitpunkt in `pushback_stopped_at`.
@@ -9400,14 +9452,22 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
             //   * `powered_taxi` = Triebwerke + gs > 3 kt
             // Nur wenn alles stimmt, springt die Phase auf TaxiOut.
             //
-            // Sims ohne PUSHBACK STATE (X-Plane / manche Add-ons) fallen
-            // auf die alte Heuristik zurück — sonst würden sie für immer
-            // in Pushback stecken bleiben.
+            // Sims ohne PUSHBACK STATE (X-Plane / manche Add-ons) UND
+            // Aircraft die den State nie auf 0/1/2 setzen (z.B. Aerosoft
+            // A340-600 Pro mit GSX-Pushback) fallen auf die alte
+            // Heuristik zurück — sonst würden sie für immer in Pushback
+            // stecken bleiben (siehe URO 913 ZWWW→EHBK 2026-05-09:
+            // 9 h hängen geblieben weil pushback_state konstant 3 war).
             const PUSHBACK_DWELL_SECS: i64 = 10;
-            let tug_done = snap.pushback_state == Some(3);
+            let engines_running = engines_effectively_running(&stats, snap, now);
             let powered_taxi = snap.on_ground
-                && snap.engines_running > 0
+                && engines_running
                 && snap.groundspeed_kt > 3.0;
+            // tug_done greift nur wenn der State MAL aktiv (≠3) war
+            let tug_done = snap.pushback_state == Some(3)
+                && stats.saw_pushback_state_active;
+            let no_tug_ever = snap.pushback_state.is_none()
+                || (snap.pushback_state == Some(3) && !stats.saw_pushback_state_active);
 
             if tug_done {
                 // Stillstand nach Tug-Ab: Timestamp setzen (einmal).
@@ -9422,9 +9482,10 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
                     stats.pushback_stopped_at = None;
                     next_phase = FlightPhase::TaxiOut;
                 }
-            } else if snap.pushback_state.is_none() && powered_taxi {
-                // Kein PUSHBACK STATE vom Sim verfügbar — alte
-                // Fallback-Logik: bewegt sich + Triebwerke an = TaxiOut.
+            } else if no_tug_ever && powered_taxi {
+                // Kein PUSHBACK STATE vom Sim verfügbar (X-Plane) ODER
+                // der State war nie != 3 (GSX-Pushback / manuell).
+                // Alte Fallback-Logik: bewegt sich + Triebwerke an = TaxiOut.
                 next_phase = FlightPhase::TaxiOut;
             }
         }
@@ -9436,7 +9497,7 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
             // doesn't accidentally trigger TakeoffRoll without throttle.
             if snap.on_ground
                 && snap.groundspeed_kt > 30.0
-                && snap.engines_running > 0
+                && engines_effectively_running(&stats, snap, now)
             {
                 next_phase = FlightPhase::TakeoffRoll;
             }
