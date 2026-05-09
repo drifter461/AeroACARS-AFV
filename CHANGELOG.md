@@ -4,6 +4,52 @@ Alle nennenswerten Änderungen an AeroACARS. Format: lose an [Keep a Changelog](
 
 ---
 
+## [v0.5.45] — 2026-05-09
+
+🔧 **Sampler-Hardening: dichte Approach-Cadence + Phantom-TD-Fix + Resume-Schutz.**
+
+### Hintergrund
+
+User-Reports DLH 1731, CFG 9746 LDZA→EDDM (MSFS Fenix) sowie GSG 302 X-Plane DA40 Bush-Strip — drei Probleme im Anflug-/Touchdown-Bereich:
+
+1. **Sample-Cadence im Final-Approach 3.5 sec** statt der geplanten 1-2 sec
+2. **Phantom-Touchdown beim Taxi auf unebenem Bush-Strip** (gear_normal_force_n schwankte)
+3. **Doppel-TD nach App-Resume** weil Sampler-Guard zurückgesetzt wurde
+
+### 🆕 Vier zusammengehörige Fixes
+
+**1. `adaptive_tick_interval` enger gestaffelt (Option B aus User-Vorschlag):**
+
+| AGL | vorher | jetzt |
+|---|---|---|
+| < 100 ft | 500 ms | 500 ms |
+| < 500 ft | 1000 ms | **750 ms** |
+| < 1000 ft | 2000 ms | **1000 ms** |
+| < 1500 ft | (default 3000 ms) | **1000 ms** |
+| < 2000 ft | (default 3000 ms) | **1500 ms** |
+
+**2. Critical-Window AGL-Trigger 300 → 1500 ft (Option A):** phpVMS-POST pausiert ab Final-Approach. JSONL/MQTT-Cadence wird nicht mehr durch HTTP-Latency gestretcht.
+
+**3. Phase-Guard gegen Phantom-Touchdowns:** TD-Edge wird nur akzeptiert wenn `FlightStats.phase` ∈ {Approach, Final, Landing}. Schließt Bush-Strip-Bumps in TaxiOut/TakeoffRoll als False-Positive aus. Greift in beiden Edge-Detection-Pfaden (RREF on_ground + X-Plane-Premium-Plugin-Touchdown-Event).
+
+**4. Resume-Hardening:** `PersistedFlightStats` bekommt 4 neue Felder die jetzt mit-persistiert werden:
+
+- `sampler_touchdown_at`
+- `sampler_takeoff_at`
+- `touchdown_window_dumped_at`
+- `landing_score_finalized`
+
+Verhindert Re-Capture nach App-Resume wenn der TD vor dem Quit/Restart bereits gefeuert hat. War das Root-Cause beim X-Plane-Bush-Strip-Doppel-TD: Phantom-Edge → flight_resumed → Guards waren None → echter Landing-Edge wurde als zweites Capture aufgezeichnet.
+
+### Was Piloten merken
+
+- **Approach-Stabilitäts-Analyse beim Touchdown** sieht jetzt jeden V/S-Spike (4-5x dichtere Sample-Cadence im Final-Approach)
+- **GA-Flieger auf unebenen Bush-Strips** (DA40, Cessna mit High-Float-Gear) bekommen keine Phantom-TDs mehr während Taxi
+- **App-Restart mid-flight** (Sim-Crash, geplanter Reboot) verliert keine Sampler-State mehr
+- phpVMS sieht Position-Punkte im Final-Approach ein paar Sekunden verzögert (akzeptabel — Live-Map via MQTT bleibt live)
+
+---
+
 ## [v0.5.44] — 2026-05-09
 
 🛩 **Aircraft-Type-Fallback aus Sim-Snapshot — auch ohne SimBrief OFP gesetzt.**
