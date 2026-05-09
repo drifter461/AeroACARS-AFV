@@ -36,9 +36,19 @@ Erste persist_outbox-Implementierung machte `queue.replace(&items)` mit nur den 
 
 **Fix:** Read-modify-write Pattern — read all, filter aktuellen pirep raus, append outbox snapshot, write combined back. Auch leere Outbox triggert write (= file gelöscht wenn nichts mehr da).
 
-### 🟢 Phase-aware-Cadence-Mythos im Docstring + position_interval entfernt
+### 🔴 Bug — `position_interval(phase)` faelschlich entfernt → fix 3s im Worker statt phase-aware
 
-Worker-Docstring claimte „phase-aware (4-30s) batched" — beides war false (3s fix + Single-Item). Docstring auf Wahrheit umgestellt (3-sec Tick + Batch-POST + Exponential Backoff). `position_interval(phase)`-Funktion entfernt (war nur noch im Worker als Log-Garnierung gemacht — die echte Cadence-Steuerung sitzt im AGL-basierten Streamer-Tick + Worker-Backoff).
+In meinem ersten v0.6.1-Pass hatte ich die `position_interval(phase)`-Funktion gelöscht und den Worker auf fix 3s-Cadence umgestellt — mit der Begründung „eine fixe Cadence + Batching von 50 Items effektiver als Phase-aware". **Das war Quatsch.** Der Pilot hat mich darauf gestoßen.
+
+`position_interval(phase)` hatte einen realen Sinn: im Cruise muss phpVMS nur alle **30s** ein POST sehen (langer gerader Leg, sparse samples reichen für die Live-Map), im **Pushback nur alle 4s** (sonst wird die Phase verpasst, weil sie in 8-15s vorbei sein kann), im **Approach 8s** (präziser inbound Track). Mit fix 3s hätte der Worker 10× mehr POSTs im Cruise produziert als nötig — Bandbreite, phpVMS-Server-Load, DB-Bloat.
+
+**Fix:** Funktion `position_interval(phase)` ist wieder zurück. Worker-Loop tickt jetzt mit kurzer **TICK=1s** (responsive Stop-Check + Backoff-Aufloesung), aber die ECHTE POST-Cadence kommt aus `position_interval(phase)`. Tracking via `last_post_at: Option<Instant>` — gepostet wird nur wenn `last_post_at.elapsed() >= interval`. Resultat:
+
+- **Cruise:** Worker tickt 1s, postet aber alle 30s — 30 Items im Batch (Streamer pusht alle ~3s). Eine HTTP-Anfrage pro halbe Minute statt 10.
+- **Pushback:** Worker postet alle 4s mit dem aktuellen Item.
+- **Approach/Final:** alle 8s, im Touchdown-Frame (sampler 50Hz) sind alle ~16 frames in der Outbox.
+
+Plus: **Exponential Backoff non-blocking umgebaut.** Vorher war's `tokio::time::sleep(extra_secs).await` im Loop — blockte den responsive Stop-Check. Jetzt: `backoff_until: Option<Instant>` wird gesetzt, der Loop-Top-Check skipped bis dahin. Stop-Signal wird in jedem TICK=1s erkannt selbst während Backoff läuft.
 
 ### Spawn-Order konsistent
 

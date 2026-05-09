@@ -117,15 +117,53 @@ fn adaptive_tick_interval(phase: FlightPhase, agl_ft: Option<f64>) -> Duration {
     Duration::from_secs(MQTT_PUBLISH_INTERVAL_SECS)
 }
 
-// v0.6.0: `position_interval(phase)` ist entfallen — die Cadence-Steuerung
-// hat sich aufgeteilt:
-//  - Streamer-Tick laeuft adaptive nach AGL (500ms im Final, bis 3s im
-//    Cruise). Phase ist hier nicht mehr direkt der Treiber, weil der Tick
-//    eh nur in die Outbox pusht (kein HTTP-IO).
-//  - phpVMS-Worker laeuft mit fixer 3-sec-Cadence + Exponential-Backoff
-//    bei Failures. Phase ist nicht mehr Teil der Throttle-Logik weil eine
-//    fixe Cadence + Batching von 50 Items effektiver ist als Phase-aware
-//    Single-Item-POSTs.
+/// v0.5.x/v0.6.1 — phase-aware POST-Cadence an phpVMS.
+///
+/// **Wichtig:** Die *Streamer-Tick*-Cadence ist seit v0.6.0 davon
+/// entkoppelt — der Streamer tickt adaptiv nach AGL (500ms-3s) und
+/// pusht jede Position in die Memory-Outbox. Diese Funktion steuert
+/// nur wie oft der **phpVMS-Worker** seine gepufferten Positions als
+/// Batch an phpVMS abliefert.
+///
+/// Warum phase-aware: im Cruise ist 1 POST alle 30s genug (langer
+/// gerader Leg, sparse samples reichen für die Live-Map). Im Pushback
+/// muss alle 4s gepostet werden weil die Phase in 8-15s vorbei sein
+/// kann — sonst springt das Dashboard direkt von Boarding auf Taxi
+/// ohne Pushback-Snapshot. Im Approach/Final 8s damit der inbound-
+/// Track präzise ist.
+fn position_interval(phase: FlightPhase) -> Duration {
+    let secs = match phase {
+        // Brief, critical events — sample a touch faster so the touchdown
+        // point and the actual liftoff don't get smeared between two posts.
+        FlightPhase::Takeoff | FlightPhase::Landing => 5,
+        // Boarding + Pushback need fast ticks because a real pushback
+        // can be over in 8–15 s; if the streamer only fires every 10 s
+        // we miss the entire phase between two snapshots and the
+        // dashboard jumps straight from Boarding to Taxi.
+        FlightPhase::Boarding | FlightPhase::Pushback => 4,
+        // On the ground (taxi, takeoff roll) — 10 s is plenty;
+        // movements are slow and the live map just needs a clean trail.
+        FlightPhase::TaxiOut | FlightPhase::TakeoffRoll | FlightPhase::TaxiIn => 10,
+        // Approach / final — pilot wants the inbound track precise (ILS,
+        // localizer, glideslope) without overdoing samples.
+        FlightPhase::Approach | FlightPhase::Final => 8,
+        // Climb / descent: moderate change rate.
+        FlightPhase::Climb | FlightPhase::Descent => 10,
+        // Cruise: long straight legs, sparse samples are enough — capped
+        // at 30 s so the live map never goes more than half a minute stale.
+        FlightPhase::Cruise => 30,
+        // v0.5.11: Holding — same cadence as Cruise (slow track update,
+        // we're circling at constant altitude).
+        FlightPhase::Holding => 30,
+        // Parked / pre-/post-flight — keep a 30 s heartbeat so phpVMS
+        // sees the PIREP is alive while the pilot files.
+        FlightPhase::Preflight
+        | FlightPhase::BlocksOn
+        | FlightPhase::Arrived
+        | FlightPhase::PirepSubmitted => 30,
+    };
+    Duration::from_secs(secs)
+}
 
 /// Minimum great-circle distance between two consecutive samples before we
 /// add it to the running total. Filters out GPS jitter while parked.
@@ -6562,16 +6600,22 @@ fn record_event(app: &AppHandle, pirep_id: &str, event: &FlightLogEvent) {
 /// Das war der Ursprung der Bug-Klasse „Streamer hängt auf phpVMS"
 /// (Pilot-Reports v0.5.45-v0.5.51).
 ///
-/// Jetzt: separater eigenständiger Worker mit fester 3-sec-Cadence:
+/// Jetzt: separater eigenständiger Worker mit phase-aware POST-Cadence:
 ///
 ///   1. **Init-Load (einmalig beim Spawn):** items aus `position_queue.json`
 ///      die zur aktuellen `pirep_id` gehoeren in die Memory-Outbox laden
 ///      (Recovery nach App-Restart).
-///   2. **Loop alle 3s:** bis zu `MAX_BATCH=50` items aus der Outbox draining,
-///      als EIN Batch-POST an `client.post_positions(pirep_id, &batch)`
-///      mit `BATCH_TIMEOUT=15s`.
+///   2. **Loop alle TICK=1s** (responsive Stop-Check + Backoff-Aufloesung):
+///      a. Stop-Check; bei `flight.stop` final persist_outbox + break
+///      b. Backoff-Check: wenn `backoff_until > now`, skip
+///      c. **Phase-aware Throttle:** `position_interval(phase)` liefert
+///         4-30s (Cruise=30s, Pushback=4s, Approach=8s usw). Nur posten
+///         wenn `last_post_at.elapsed() >= interval`.
+///      d. Bis `MAX_BATCH=50` items aus der Outbox draining
+///      e. EIN Batch-POST an `client.post_positions(pirep_id, &batch)`
+///         mit `BATCH_TIMEOUT=15s`
 ///   3. **Bei Erfolg:** `last_position_at` + `queued_position_count`
-///      updaten, Backoff-Counter resetten.
+///      updaten, Backoff-Counter resetten, `last_post_at = now`.
 ///   4. **Bei 404:** PIREP serverseitig weg, `handle_remote_cancellation`
 ///      + Worker terminiert sauber.
 ///   5. **Bei anderem Fehler / Timeout:** kompletter Batch zurueck in die
@@ -6580,9 +6624,10 @@ fn record_event(app: &AppHandle, pirep_id: &str, event: &FlightLogEvent) {
 ///   6. **Persist-Trigger:** wenn Outbox > 500 items, `persist_outbox()`
 ///      schreibt aktuellen Stand in `position_queue.json` (read-modify-write,
 ///      bewahrt items anderer pireps).
-///   7. **Exponential Backoff:** bei `consecutive_failures > 0` extra
-///      sleep `min(60, 3 << (n-1))` Sekunden — verhindert dass wir bei
-///      tote Verbindung jede 3s gegen die Wand laufen.
+///   7. **Exponential Backoff:** bei `consecutive_failures > 0` setzen wir
+///      `backoff_until = now + min(60, 3 << (n-1))` Sekunden — verhindert
+///      dass wir bei toter Verbindung jede TICK gegen die Wand laufen.
+///      Nicht-blocking (loop-top check) damit Stop-Check responsive bleibt.
 ///
 /// **Streamer-Tick MUSS NIE warten** — der pusht nur in die Outbox-
 /// VecDeque (= ein schneller `std::sync::Mutex`-Push, ~1µs, kein
@@ -6608,11 +6653,26 @@ fn spawn_phpvms_position_worker(
         // schon mal 10s dauern. 15s ist grosszuegig genug, ohne den Tick
         // bei toter Verbindung minutenlang zu blockieren.
         const BATCH_TIMEOUT: Duration = Duration::from_secs(15);
-        const TICK: Duration = Duration::from_secs(3);
+        // TICK ist die Loop-Frequenz (Stop-Check + Outbox-Probe). Die
+        // ECHTE POST-Cadence kommt aus position_interval(phase) und kann
+        // bis 30s im Cruise sein — wir tracken last_post_at und posten
+        // nur wenn das Phase-Intervall verstrichen ist. Kurzer TICK
+        // braucht damit der stop-Check responsive bleibt + Backoff bei
+        // Failure prazise zaehlt.
+        const TICK: Duration = Duration::from_secs(1);
         const MAX_BATCH: usize = 50;
         // Exponentiel-Backoff bei consecutive failures: 3s, 6s, 12s,
         // 24s, 48s, gecapped bei 60s. Reset bei erstem Erfolg.
         let mut consecutive_failures: u32 = 0;
+        // v0.6.1 — last successful POST timestamp fuer phase-aware
+        // throttle (siehe position_interval). None = noch nie gepostet
+        // (initial Position raus so schnell wie moeglich).
+        let mut last_post_at: Option<std::time::Instant> = None;
+        // Backoff-deadline: bei consecutive failures wird hier ein
+        // future timestamp gesetzt; loop continuiert bis Instant::now()
+        // den ueberschreitet. Verhindert dass wir bei toter Verbindung
+        // jede TICK gegen die Wand laufen.
+        let mut backoff_until: Option<std::time::Instant> = None;
         tracing::info!(pirep_id = %flight.pirep_id, "phpvms-position-worker started");
         // Initial: alte persistente Queue laden falls vorhanden.
         // Errors NICHT mehr silent swallowen — wenn die Datei korrupt
@@ -6661,12 +6721,32 @@ fn spawn_phpvms_position_worker(
                 tracing::info!(pirep_id = %flight.pirep_id, "phpvms-position-worker stopped");
                 break;
             }
-            // Phase wird nur fuer Logs verwendet — die echte Cadence-
-            // Limitierung sitzt im TICK + im Backoff-Counter.
+            // Backoff-Check: bei consecutive failures haben wir ein
+            // backoff_until in der Zukunft gesetzt — diese Loop-Iter
+            // skipped bis der Zeitpunkt erreicht ist.
+            if let Some(until) = backoff_until {
+                if std::time::Instant::now() < until {
+                    continue;
+                }
+                backoff_until = None;
+            }
+            // Aktuelle Phase fuer phase-aware Cadence ziehen.
             let phase = {
                 let stats = flight.stats.lock().expect("flight stats");
                 stats.phase
             };
+            let interval = position_interval(phase);
+            // Phase-aware Throttle: nur posten wenn `interval` seit
+            // letztem ERFOLG verstrichen ist. Im Cruise = 30s, im
+            // Pushback = 4s, im Approach = 8s (siehe position_interval).
+            // None = noch nie erfolgreich gepostet -> sofort versuchen.
+            let due = match last_post_at {
+                None => true,
+                Some(t) => t.elapsed() >= interval,
+            };
+            if !due {
+                continue;
+            }
             // Bis MAX_BATCH Items aus der Outbox ziehen — std::sync::Mutex,
             // synchroner Block, kein await innen.
             let batch: Vec<api_client::PositionEntry> = {
@@ -6682,6 +6762,7 @@ fn spawn_phpvms_position_worker(
                 pirep_id = %flight.pirep_id,
                 batch_size = batch.len(),
                 phase = ?phase,
+                interval_secs = interval.as_secs(),
                 "phpvms-worker batch POST"
             );
             // ECHT BATCHED POST: ein HTTP-Call mit allen N positionen
@@ -6692,16 +6773,16 @@ fn spawn_phpvms_position_worker(
             let post_fut = client.post_positions(&flight.pirep_id, &batch);
             match tokio::time::timeout(BATCH_TIMEOUT, post_fut).await {
                 Ok(Ok(())) => {
-                    // Success: stats updaten, backoff reset.
+                    // Success: stats updaten, backoff reset, last_post_at gesetzt.
                     {
                         let mut stats = flight.stats.lock().expect("flight stats");
                         stats.last_position_at = Some(Utc::now());
-                        // queued_count = was noch in der outbox steht
                         let outbox_len = flight.position_outbox.lock()
                             .expect("position_outbox lock").len();
                         stats.queued_position_count = outbox_len as u32;
                     }
                     consecutive_failures = 0;
+                    last_post_at = Some(std::time::Instant::now());
                 }
                 Ok(Err(ApiError::NotFound)) => {
                     // PIREP serverseitig geloescht — terminiert sauber.
@@ -6745,17 +6826,20 @@ fn spawn_phpvms_position_worker(
                 persist_outbox(&app, &flight);
             }
             // Exponentieller Backoff bei consecutive failures (3s, 6s,
-            // 12s, 24s, 48s, gecapped 60s). Verhindert dass wir bei
-            // tote Verbindung jede 3s gegen die Wand laufen.
+            // 12s, 24s, 48s, gecapped 60s). Statt blocking sleep setzen
+            // wir backoff_until und der naechste Loop-Top-Check skipped
+            // bis dahin — so bleibt der stop-Check responsive (1s Tick).
             if consecutive_failures > 0 {
-                let extra_sleep = (3u64 << (consecutive_failures - 1).min(5)).min(60);
+                let extra_secs = (3u64 << (consecutive_failures - 1).min(5)).min(60);
+                backoff_until = Some(
+                    std::time::Instant::now() + Duration::from_secs(extra_secs)
+                );
                 tracing::debug!(
                     pirep_id = %flight.pirep_id,
                     consecutive_failures,
-                    extra_sleep_secs = extra_sleep,
+                    extra_sleep_secs = extra_secs,
                     "phpvms-worker backoff after failures"
                 );
-                tokio::time::sleep(Duration::from_secs(extra_sleep)).await;
             }
         }
     });
