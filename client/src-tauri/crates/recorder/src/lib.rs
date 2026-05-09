@@ -106,6 +106,33 @@ pub enum FlightLogEvent {
         timestamp: DateTime<Utc>,
         payload: serde_json::Value,
     },
+    /// v0.5.39: hi-res 50 Hz Sample-Buffer um den Touchdown-Moment.
+    ///
+    /// Die normale `Position`-Cadence im Streamer-Tick reicht von 500 ms
+    /// (AGL <100 ft) bis 30 s (Cruise). Selbst die schnellste 500-ms-Rate
+    /// kann den exakten Touchdown-Frame verpassen — und Netzwerk-Latenz
+    /// vom phpVMS-POST in der gleichen Schleife strecht den Tick noch
+    /// weiter (typisch 1.5–2 s Loch genau im TD-Moment, siehe Volanta-
+    /// Vergleichs-Issue 2026-05-09).
+    ///
+    /// `spawn_touchdown_sampler` läuft separat bei 50 Hz (20 ms) und
+    /// puffert die letzten 5 s im RAM. Bei TD-Edge-Detection sammelt
+    /// er weiter für 5 s post-TD und dumpt das gesamte 10-s-Fenster
+    /// als ein einzelnes Event in die JSONL — ~500 Samples × ~80 B =
+    /// ~40 KB pro Landung. Genug Auflösung um:
+    ///   - exakten on_ground-Edge zwischen 2 Samples zu interpolieren
+    ///   - VS in mehreren Fenster-Größen zu vergleichen (Volanta vs
+    ///     Instantaneous vs DLHv-Style)
+    ///   - Peak-G im 500 ms post-TD-Fenster zu finden (Gear-Compression)
+    ///   - Bounce-Profile mit Höhe + Dauer pro Excursion zu rekonstruieren
+    ///
+    /// `samples` ist chronologisch geordnet, dichteste Samples möglich.
+    TouchdownWindow {
+        timestamp: DateTime<Utc>,
+        /// Zeitpunkt des on_ground-Edge (Referenz für relative Berechnungen).
+        edge_at: DateTime<Utc>,
+        samples: Vec<TouchdownWindowSample>,
+    },
     /// PIREP filed (clean or manual) or cancelled. Closes the log.
     FlightEnded {
         timestamp: DateTime<Utc>,
@@ -132,6 +159,25 @@ pub enum FlightLogEvent {
         timestamp: DateTime<Utc>,
         payload: serde_json::Value,
     },
+}
+
+/// Eine einzelne 50-Hz-Probe aus dem Touchdown-Window-Buffer. Felder
+/// matchen die wichtigsten `SimSnapshot`-Werte für Touchdown-Forensik.
+/// `Copy + Clone` damit der Sampler den Buffer billig dupliziert.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct TouchdownWindowSample {
+    pub at: DateTime<Utc>,
+    pub vs_fpm: f32,
+    pub g_force: f32,
+    pub on_ground: bool,
+    pub agl_ft: f32,
+    pub heading_true_deg: f32,
+    pub groundspeed_kt: f32,
+    pub indicated_airspeed_kt: f32,
+    pub lat: f64,
+    pub lon: f64,
+    pub pitch_deg: f32,
+    pub bank_deg: f32,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

@@ -22,7 +22,7 @@ use api_client::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use metar::{MetarError, MetarSnapshot};
-use recorder::{FlightLogEvent, FlightOutcome, FlightRecorder};
+use recorder::{FlightLogEvent, FlightOutcome, FlightRecorder, TouchdownWindowSample};
 use storage::{
     ApproachSample, LandingProfilePoint, LandingRecord, LandingRunwayMatch, LandingStore,
     PositionQueue, QueuedPosition,
@@ -1057,6 +1057,31 @@ struct TelemetrySample {
 /// flare.
 const TOUCHDOWN_BUFFER_SECS: i64 = 5;
 
+/// v0.5.39: Wie lange nach dem TD-Edge wir post-TD weiter sampeln + die
+/// Streamer-Network-IO pausiert lassen. 10 s deckt typische Rollout-
+/// Phase + erste Reverse/Brake-Action ab. Pre-TD-Buffer (5 s) + dies
+/// ergibt einen TouchdownWindow von ~15 s, gedumpt als ein Event.
+const TOUCHDOWN_POST_WINDOW_MS: i64 = 10_000;
+
+impl From<TelemetrySample> for TouchdownWindowSample {
+    fn from(s: TelemetrySample) -> Self {
+        Self {
+            at: s.at,
+            vs_fpm: s.vs_fpm,
+            g_force: s.g_force,
+            on_ground: s.on_ground,
+            agl_ft: s.agl_ft,
+            heading_true_deg: s.heading_true_deg,
+            groundspeed_kt: s.groundspeed_kt,
+            indicated_airspeed_kt: s.indicated_airspeed_kt,
+            lat: s.lat,
+            lon: s.lon,
+            pitch_deg: s.pitch_deg,
+            bank_deg: s.bank_deg,
+        }
+    }
+}
+
 /// One frozen subsample around the touchdown moment, surfaced in the
 /// PIREP notes block as a tiny V/S / G curve. Modelled after
 /// BeatMyLanding's `LandingTouchdownProfilePoint`. Times are in ms
@@ -1626,6 +1651,30 @@ struct FlightStats {
     /// V/S / G that the aircraft actually saw — independent of the
     /// snapshot rate or SimConnect's PLANE TOUCHDOWN * latching.
     snapshot_buffer: std::collections::VecDeque<TelemetrySample>,
+
+    /// v0.5.39: post-touchdown sample collection. Wenn der Sampler den
+    /// on_ground-Edge erkennt, sammelt er Samples in diesem Buffer
+    /// für TOUCHDOWN_POST_WINDOW_SECS sec. Sobald gefüllt → wird
+    /// zusammen mit `snapshot_buffer` als `TouchdownWindow`-Event
+    /// gedumpt und beide Buffer geleert (= ready für ggf. zweite
+    /// Landung im Touch-and-Go-Pattern).
+    post_touchdown_buffer: std::collections::VecDeque<TelemetrySample>,
+
+    /// v0.5.39: Marker das Streamer-Tick + Sampler im "Landing-Critical-
+    /// Window" sind. Während dieser Zeit pausiert der Streamer-Tick alle
+    /// Netzwerk-IO (phpVMS-POST, Queue-Drain) damit keine Verzögerung den
+    /// nächsten Sampler-Tick blockt. JSONL + MQTT-Publish (non-blocking)
+    /// laufen weiter. Wird gesetzt bei AGL <300 ft im Approach/Final/Landing
+    /// und 10 s nach TD-Edge wieder aufgehoben. Positions werden während
+    /// der Pause direkt in die Offline-Queue geschoben und beim nächsten
+    /// Streamer-Tick außerhalb des Window's an phpVMS gesendet.
+    landing_critical_until: Option<DateTime<Utc>>,
+
+    /// v0.5.39: Wann der TouchdownWindow-Buffer-Dump in die JSONL geflusht
+    /// wurde. Verhindert Re-Dump im weiteren Sampler-Loop (Rollout/Taxi-In).
+    /// Bleibt bis Flight-Ende bzw. zweiter TD im Touch-and-Go-Pattern (dann
+    /// reset durch sampler_touchdown_at).
+    touchdown_window_dumped_at: Option<DateTime<Utc>>,
 
     /// True once the "Aircraft: {title}" banner has been emitted to
     /// the activity log for this flight. Persisted across resumes
@@ -7393,6 +7442,24 @@ fn spawn_flight_log_upload(app: &AppHandle, pirep_id: String) {
     });
 }
 
+/// v0.5.39: Beim TD-Edge — Pre-TD-Buffer (snapshot_buffer, ~5 s @ 50 Hz)
+/// in den post_touchdown_buffer kopieren und das Landing-Critical-Window
+/// öffnen. Der Sampler füllt den Buffer in den nächsten Iterationen mit
+/// Post-TD-Samples weiter und dumpt ihn nach TOUCHDOWN_POST_WINDOW_MS.
+fn open_touchdown_capture_window(stats: &mut FlightStats, now: DateTime<Utc>) {
+    stats.landing_critical_until = Some(
+        now + chrono::Duration::milliseconds(TOUCHDOWN_POST_WINDOW_MS),
+    );
+    stats.post_touchdown_buffer.clear();
+    for s in &stats.snapshot_buffer {
+        stats.post_touchdown_buffer.push_back(*s);
+    }
+    // Touch-and-Go: erlaubt nicht ein zweites Dump-Event (TD-Capture
+    // bleibt einmalig per sampler_touchdown_at-Guard), aber wenn diese
+    // Funktion aus irgendeinem Grund doch zweimal liefe → Reset clean.
+    stats.touchdown_window_dumped_at = None;
+}
+
 fn spawn_touchdown_sampler(app: AppHandle, flight: Arc<ActiveFlight>) {
     tauri::async_runtime::spawn(async move {
         tracing::info!(pirep_id = %flight.pirep_id, "touchdown sampler started");
@@ -7520,6 +7587,7 @@ fn spawn_touchdown_sampler(app: AppHandle, flight: Arc<ActiveFlight>) {
                     stats.sampler_touchdown_at = Some(now);
                     stats.sampler_touchdown_vs_fpm = Some(td.captured_vs_fpm);
                     stats.sampler_touchdown_g_force = Some(td.captured_g_normal);
+                    open_touchdown_capture_window(&mut stats, now);
                     tracing::info!(
                         pirep_id = %flight.pirep_id,
                         captured_vs_fpm = td.captured_vs_fpm,
@@ -7612,6 +7680,7 @@ fn spawn_touchdown_sampler(app: AppHandle, flight: Arc<ActiveFlight>) {
                 stats.sampler_touchdown_at = Some(now);
                 stats.sampler_touchdown_vs_fpm = Some(captured_vs);
                 stats.sampler_touchdown_g_force = Some(captured_g);
+                open_touchdown_capture_window(&mut stats, now);
                 tracing::info!(
                     pirep_id = %flight.pirep_id,
                     captured_vs_fpm = captured_vs,
@@ -7624,6 +7693,56 @@ fn spawn_touchdown_sampler(app: AppHandle, flight: Arc<ActiveFlight>) {
             }
             prev_in_air = Some(in_air_now);
 
+            // v0.5.39: Continuous Post-TD-Capture + Dump.
+            //
+            // Solange Touchdown detektiert ist und wir noch nicht gedumpt
+            // haben, sammelt jeder Sampler-Tick den aktuellen Snapshot ins
+            // post_touchdown_buffer (= Pre-TD-Buffer wurde von
+            // open_touchdown_capture_window initial reinkopiert). Nach
+            // TOUCHDOWN_POST_WINDOW_MS wird der gesamte Buffer als ein
+            // TouchdownWindow-Event in die JSONL geflusht — das schließt
+            // das ~15-s-Loch (5 s pre + 10 s post @ 50 Hz ≈ 750 Samples)
+            // das im Streamer-Tick wegen phpVMS-Latenz entstand.
+            let dump_payload: Option<(DateTime<Utc>, Vec<TouchdownWindowSample>)> = {
+                let td_at = stats.sampler_touchdown_at;
+                let already_dumped = stats.touchdown_window_dumped_at.is_some();
+                if let (Some(td_at), false) = (td_at, already_dumped) {
+                    // Letzten Snapshot ins post-Buffer (snapshot_buffer.back()
+                    // wurde in dieser Iteration oben push_back). Dedup gegen
+                    // letzten Eintrag falls open_touchdown_capture_window den
+                    // gleichen Snapshot grade reinkopiert hat.
+                    if let Some(latest) = stats.snapshot_buffer.back().copied() {
+                        let same_as_back = stats
+                            .post_touchdown_buffer
+                            .back()
+                            .map(|s| s.at == latest.at)
+                            .unwrap_or(false);
+                        if !same_as_back {
+                            stats.post_touchdown_buffer.push_back(latest);
+                        }
+                    }
+                    let elapsed_ms = (now - td_at).num_milliseconds();
+                    if elapsed_ms >= TOUCHDOWN_POST_WINDOW_MS {
+                        let samples: Vec<TouchdownWindowSample> = stats
+                            .post_touchdown_buffer
+                            .drain(..)
+                            .map(TouchdownWindowSample::from)
+                            .collect();
+                        stats.touchdown_window_dumped_at = Some(now);
+                        // landing_critical_until ist bereits durch den
+                        // open_touchdown_capture_window-Setter abgelaufen
+                        // (es war td + TOUCHDOWN_POST_WINDOW_MS) — Streamer-
+                        // Tick sieht beim nächsten Loop wieder normales
+                        // Verhalten und drained die Queue.
+                        Some((td_at, samples))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            };
+
             let cutoff = now - chrono::Duration::seconds(TOUCHDOWN_BUFFER_SECS);
             while stats
                 .snapshot_buffer
@@ -7631,6 +7750,29 @@ fn spawn_touchdown_sampler(app: AppHandle, flight: Arc<ActiveFlight>) {
                 .is_some_and(|s| s.at < cutoff)
             {
                 stats.snapshot_buffer.pop_front();
+            }
+
+            // Dump-IO außerhalb des Lock-Holds — record_event macht
+            // synchroness File-Append (~1-10 ms auf NTFS), das wollen wir
+            // nicht das stats-Lock blockieren lassen.
+            drop(stats);
+            if let Some((edge_at, samples)) = dump_payload {
+                let count = samples.len();
+                record_event(
+                    &app,
+                    &flight.pirep_id,
+                    &FlightLogEvent::TouchdownWindow {
+                        timestamp: now,
+                        edge_at,
+                        samples,
+                    },
+                );
+                tracing::info!(
+                    pirep_id = %flight.pirep_id,
+                    sample_count = count,
+                    window_ms = TOUCHDOWN_POST_WINDOW_MS,
+                    "touchdown window buffer flushed to flight log"
+                );
             }
         }
         tracing::info!(pirep_id = %flight.pirep_id, "touchdown sampler stopped");
@@ -8192,12 +8334,62 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                 }
             }
 
+            // v0.5.39: Landing-Critical-Window-Detection.
+            //
+            // Wenn der Flieger gerade landet (= AGL <300 ft + Approach/
+            // Final/Landing-Phase) ODER der Sampler grade ein TD-Edge
+            // detektiert hat (in dem Fall hat der Sampler selber das
+            // Window für TOUCHDOWN_POST_WINDOW_MS gesetzt), pausiert der
+            // Streamer-Tick alle blockierenden Netzwerk-IO. Grund:
+            // phpVMS-POST kann 200-1500 ms dauern, was den Sampler-
+            // Zeit verstreicht ohne dass eine neue Position rausgeht.
+            // Genau im TD-Moment fehlen dann wertvolle Frames.
+            //
+            // Während dem Window:
+            //   - Queue-Drain übersprungen (eine Charge älterer Positions
+            //     POSTet sonst BLOCKIEREND vor jedem Tick)
+            //   - Position-POST übersprungen, stattdessen direkt in die
+            //     Offline-Queue (= geht raus auf den nächsten Tick AUSSERHALB
+            //     des Windows in einer Batch-Drain).
+            //   - JSONL-Append + MQTT-Publish (try_send, non-blocking) laufen
+            //     weiter — das sind die Datenquellen, keine Blocker.
+            //
+            // Window wird hier proaktiv refreshed; der Sampler refresht es
+            // beim TD-Edge selbst, was effektiv 10 s post-TD garantiert.
+            let in_critical_window = {
+                let mut stats = flight.stats.lock().expect("flight stats");
+                let agl_low = snap.altitude_agl_ft < 300.0
+                    && !snap.on_ground
+                    && matches!(
+                        current_phase,
+                        FlightPhase::Approach
+                            | FlightPhase::Final
+                            | FlightPhase::Landing
+                    );
+                if agl_low {
+                    let extend_until = Utc::now() + chrono::Duration::seconds(60);
+                    let cur = stats.landing_critical_until;
+                    if cur.map(|t| t < extend_until).unwrap_or(true) {
+                        stats.landing_critical_until = Some(extend_until);
+                    }
+                }
+                stats
+                    .landing_critical_until
+                    .map(|until| Utc::now() < until)
+                    .unwrap_or(false)
+            };
+
             // Try to drain any positions we couldn't ship in earlier
             // ticks before sending the new one — keeps phpVMS's row
             // ordering chronological even after a network gap.
+            // Wird im Critical-Window übersprungen damit ein langer
+            // Drain (= mehrere POSTs hintereinander) den nächsten Tick
+            // nicht verzögert.
             let queue = open_position_queue(&app);
             if let Some(q) = &queue {
-                drain_position_queue(q, &client, &flight.pirep_id).await;
+                if !in_critical_window {
+                    drain_position_queue(q, &client, &flight.pirep_id).await;
+                }
             }
 
             // v0.5.11: MQTT live-tracking publish (best-effort,
@@ -8262,7 +8454,26 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                 None => true,
                 Some(t) => t.elapsed() >= position_interval(current_phase),
             };
-            if !should_post_phpvms {
+            // v0.5.39: Im Landing-Critical-Window NICHT POSTen — direkt
+            // in die Queue stecken, beim nächsten Tick außerhalb wird
+            // gedrained. Der Live-Track (MQTT + JSONL) läuft trotzdem
+            // weiter, also keine Auswirkung auf die Live-Karte oder den
+            // Forensik-Log. phpVMS sieht die Punkte ein paar Sekunden
+            // verzögert, was im Approach/Final akzeptabel ist.
+            if in_critical_window && should_post_phpvms {
+                if let Some(q) = &queue {
+                    let queued = QueuedPosition {
+                        pirep_id: flight.pirep_id.clone(),
+                        position: serde_json::to_value(&position).unwrap_or_default(),
+                    };
+                    let _ = q.enqueue(queued);
+                }
+                tracing::debug!(
+                    pirep_id = %flight.pirep_id,
+                    agl_ft = snap.altitude_agl_ft,
+                    "landing-critical: position queued (phpVMS post deferred)"
+                );
+            } else if !should_post_phpvms {
                 // Skip phpVMS this tick — the MQTT publish above
                 // already went out at 3 s cadence; phpVMS will catch
                 // up on the next eligible tick.
