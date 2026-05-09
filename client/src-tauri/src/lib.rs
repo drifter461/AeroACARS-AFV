@@ -679,6 +679,10 @@ struct ActiveFlight {
     /// once even if positions and the heartbeat both get 404s in the
     /// same cycle.
     cancelled_remotely: AtomicBool,
+    /// v0.5.51: Guard für `spawn_position_queue_drain`. Verhindert dass
+    /// mehrere parallele Drains laufen wenn ein Drain länger dauert als
+    /// das Streamer-Tick-Intervall (= 500ms im Final-Approach).
+    queue_drain_in_flight: AtomicBool,
 }
 
 /// On-disk representation of an active flight, used for resume after a client
@@ -4938,6 +4942,7 @@ async fn flight_adopt(
         was_just_resumed: AtomicBool::new(true),
         streamer_spawned: AtomicBool::new(false),
         cancelled_remotely: AtomicBool::new(false),
+        queue_drain_in_flight: AtomicBool::new(false),
     });
 
     save_active_flight(&app, &flight);
@@ -5389,6 +5394,7 @@ async fn flight_start(
         was_just_resumed: AtomicBool::new(false),
         streamer_spawned: AtomicBool::new(false),
         cancelled_remotely: AtomicBool::new(false),
+        queue_drain_in_flight: AtomicBool::new(false),
     });
 
     save_active_flight(&app, &flight);
@@ -5939,6 +5945,7 @@ async fn flight_start_manual(
         was_just_resumed: AtomicBool::new(false),
         streamer_spawned: AtomicBool::new(false),
         cancelled_remotely: AtomicBool::new(false),
+        queue_drain_in_flight: AtomicBool::new(false),
     });
 
     save_active_flight(&app, &flight);
@@ -6571,7 +6578,26 @@ fn record_event(app: &AppHandle, pirep_id: &str, event: &FlightLogEvent) {
 /// remaining rows back to the queue file so the next tick can retry.
 /// Older rows for *other* PIREPs are kept in place (so they replay
 /// once the matching flight resumes); only matching rows are touched.
+///
+/// **v0.5.51 Hotfix — Per-Item-Timeout + Drain-Cap.**
+/// Vorher: `client.post_positions(...).await` ohne Timeout → bei NAT-
+/// Eviction (= Fehler 1236) hing jeder POST bis zum HTTP-Client-Timeout
+/// (10s in v0.5.49+, vorher 20s). Bei 400 gequeueten Items × 10s =
+/// 67 min Drain-Zeit. Während dieser Zeit blockt der Caller (Streamer-
+/// Tick) komplett — kein MQTT-Publish, kein JSONL-Append. Symptom: 5-min-
+/// Stille auf der Live-Map nach Touchdown (Pilot 22 PTO 705 2026-05-09).
+///
+/// Fix:
+/// - Per-Item `tokio::time::timeout(5s)` damit ein hängender POST nicht
+///   den ganzen Drain stalled
+/// - `MAX_DRAIN_PER_TICK` cap — max 50 Items pro Drain-Aufruf, Rest
+///   bleibt für nächsten Tick. Verhindert minutelangen-Drain auch bei
+///   gut funktionierender Verbindung wenn die Queue sehr lang ist
+/// - Spawn-Entkopplung passiert im Caller (Streamer-Tick), siehe
+///   `spawn_position_queue_drain` unten.
 async fn drain_position_queue(queue: &PositionQueue, client: &Client, pirep_id: &str) {
+    const MAX_DRAIN_PER_TICK: usize = 50;
+    const PER_ITEM_TIMEOUT: Duration = Duration::from_secs(5);
     let items = match queue.read_all() {
         Ok(v) if !v.is_empty() => v,
         _ => return,
@@ -6579,30 +6605,41 @@ async fn drain_position_queue(queue: &PositionQueue, client: &Client, pirep_id: 
     let mut still_pending: Vec<QueuedPosition> = Vec::new();
     let mut drained_now: usize = 0;
     let mut hit_failure = false;
+    let mut processed = 0usize;
     for q in items {
-        if hit_failure || q.pirep_id != pirep_id {
+        if hit_failure || q.pirep_id != pirep_id || processed >= MAX_DRAIN_PER_TICK {
             still_pending.push(q);
             continue;
         }
-        // Round-trip through PositionEntry so we use the same client
-        // helper — keeps the wire format identical to fresh posts.
+        processed += 1;
         let position: PositionEntry = match serde_json::from_value(q.position.clone()) {
             Ok(p) => p,
             Err(e) => {
-                // Bad row — drop it so we don't block forever.
                 tracing::warn!(error = %e, "discarding malformed queued position");
                 continue;
             }
         };
-        match client.post_positions(&q.pirep_id, &[position]).await {
-            Ok(()) => {
+        // Slice in eigene Variable damit's nicht als temporary über
+        // das await stirbt (Rust-Borrow-Checker).
+        let positions_slice = vec![position];
+        let post_fut = client.post_positions(&q.pirep_id, &positions_slice);
+        match tokio::time::timeout(PER_ITEM_TIMEOUT, post_fut).await {
+            Ok(Ok(())) => {
                 drained_now += 1;
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 tracing::warn!(
                     error = %e,
                     pending = still_pending.len(),
                     "queue drain failed; will retry next tick"
+                );
+                still_pending.push(q);
+                hit_failure = true;
+            }
+            Err(_timeout) => {
+                tracing::warn!(
+                    pending = still_pending.len(),
+                    "queue drain item TIMED OUT after 5s; will retry next tick"
                 );
                 still_pending.push(q);
                 hit_failure = true;
@@ -6614,6 +6651,46 @@ async fn drain_position_queue(queue: &PositionQueue, client: &Client, pirep_id: 
     } else if drained_now > 0 {
         tracing::info!(drained_now, remaining = still_pending.len(), "drained queued positions");
     }
+}
+
+/// v0.5.51 — Spawn-Wrapper für drain_position_queue.
+///
+/// Ruft den Drain in `tokio::spawn` damit der Streamer-Tick NIE auf den
+/// Drain wartet. Per-Spawn-Guard (AtomicBool im Flight) verhindert dass
+/// mehrere parallele Drains laufen — wenn der vorherige Drain noch nicht
+/// fertig ist, skipt der nächste Tick einfach.
+///
+/// Vorher (v0.5.45..v0.5.50): `drain_position_queue(...).await` direkt
+/// im Streamer-Tick. Bei 400+ Items + langsamer Verbindung blockierte
+/// das den Tick für Minuten. Konsequenz: keine MQTT/JSONL-Updates während
+/// Drain-Dauer → Live-Map-Track endete am Touchdown statt am Gate.
+fn spawn_position_queue_drain(
+    app: AppHandle,
+    flight: Arc<ActiveFlight>,
+    client: Client,
+) {
+    // Per-Flight-Guard damit nicht mehrere Drains parallel laufen
+    if flight.queue_drain_in_flight.swap(true, Ordering::SeqCst) {
+        // Vorheriger Drain läuft noch — skip
+        return;
+    }
+    let pirep_id = flight.pirep_id.clone();
+    tauri::async_runtime::spawn(async move {
+        let queue = match open_position_queue(&app) {
+            Some(q) => q,
+            None => {
+                flight.queue_drain_in_flight.store(false, Ordering::SeqCst);
+                return;
+            }
+        };
+        drain_position_queue(&queue, &client, &pirep_id).await;
+        // Update queued_count im FlightStats damit UI Indikator stimmt
+        if let Ok(len) = queue.len() {
+            let mut stats = flight.stats.lock().expect("flight stats");
+            stats.queued_position_count = len as u32;
+        }
+        flight.queue_drain_in_flight.store(false, Ordering::SeqCst);
+    });
 }
 
 /// `GET /metar/{icao}` — fetch the current METAR for an airport.
@@ -9291,17 +9368,24 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                     .unwrap_or(false)
             };
 
-            // Try to drain any positions we couldn't ship in earlier
-            // ticks before sending the new one — keeps phpVMS's row
-            // ordering chronological even after a network gap.
-            // Wird im Critical-Window übersprungen damit ein langer
-            // Drain (= mehrere POSTs hintereinander) den nächsten Tick
-            // nicht verzögert.
+            // v0.5.51 — Drain entkoppelt vom Streamer-Tick.
+            //
+            // Vorher (v0.5.45-v0.5.50): `drain_position_queue(...).await`
+            // direkt hier. Bei 400+ gequeueten Items × 5-10s Per-POST-
+            // Timeout = bis zu 67 min Drain-Zeit, während der ENTIRE
+            // Streamer-Tick blockiert war (kein MQTT, kein JSONL).
+            // Symptom: 5-min-Stille auf Live-Map nach Touchdown.
+            //
+            // Jetzt: Drain läuft in `tokio::spawn` mit Per-Item-Timeout
+            // + Drain-Cap (50 Items/Tick). Tick-Loop läuft sofort weiter.
+            // Per-Flight-AtomicBool verhindert parallele Drains.
             let queue = open_position_queue(&app);
-            if let Some(q) = &queue {
-                if !in_critical_window {
-                    drain_position_queue(q, &client, &flight.pirep_id).await;
-                }
+            if !in_critical_window {
+                spawn_position_queue_drain(
+                    app.clone(),
+                    Arc::clone(&flight),
+                    client.clone(),
+                );
             }
 
             // v0.5.11: MQTT live-tracking publish (best-effort,
@@ -14574,6 +14658,7 @@ async fn try_resume_flight(
         was_just_resumed: AtomicBool::new(true),
         streamer_spawned: AtomicBool::new(false),
         cancelled_remotely: AtomicBool::new(false),
+        queue_drain_in_flight: AtomicBool::new(false),
     });
 
     {

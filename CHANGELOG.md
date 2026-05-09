@@ -4,6 +4,64 @@ Alle nennenswerten Änderungen an AeroACARS. Format: lose an [Keep a Changelog](
 
 ---
 
+## [v0.5.51] — 2026-05-09
+
+🩹 **Hotfix: Live-Map endete am Touchdown statt am Gate (v0.5.45-Regression).**
+
+### Hintergrund
+
+User-Report: Pilot 22 (Michael, PTO 705 LICR→LICC) — Live-Map zeigte den Track bis zum Touchdown, dann **5-Min-Stille** bis zum Block-On. Im JSONL: 295 Sekunden komplett kein Event (kein MQTT-Publish, kein JSONL-Append, kein Activity-Log). Symptom war reproduzierbar: vor v0.5.45 lief das einwandfrei, ab v0.5.45 brach der Stream nach Touchdown ab.
+
+### Root-Cause
+
+Klassischer **Sequential-Await-Block** im Streamer-Tick:
+
+```rust
+if !in_critical_window {
+    drain_position_queue(q, &client, &flight.pirep_id).await;  // ← BLOCKIERT
+}
+
+// drain_position_queue itself:
+for q in items {
+    client.post_positions(...).await   // ← await pro Item, kein Timeout
+}
+```
+
+**Die v0.5.45-Verkettung:**
+
+1. v0.5.45 erhöhte die Critical-Window-AGL-Schwelle von 300 → **1500 ft** (User-Wunsch: dichtere Sample-Cadence im Final). Plus 60-sec-Extension nach jedem agl_low-Sample.
+2. Während Critical-Window werden Position-POSTs **gequeued** statt gesendet (existiert seit v0.5.39).
+3. Bei adaptive 500-1000 ms Tick + 5+ min Final-Approach sammelten sich **300-600 Items** in der Queue.
+4. Nach Touchdown endet das Critical-Window → Drain feuert sequentiell mit `.await` pro Item.
+5. Bei NAT-Eviction (Fehler 1236) hängt jeder POST bis zum 10s HTTP-Timeout → 400 × 10s = **67 Min Drain-Zeit**.
+6. Während des Drains blockt der **Streamer-Tick komplett** — kein MQTT-Publish, kein JSONL-Append.
+
+In v0.5.49 hatte ich den **POST entkoppelt** (`tokio::spawn` für `post_positions`), aber den **Drain übersehen** — das `drain_position_queue` blieb `await`-blockiert im Tick.
+
+### Fix
+
+**Drain läuft jetzt in `tokio::spawn`**, mit Per-Item-Timeout + Drain-Cap:
+
+- Neue Funktion `spawn_position_queue_drain()` — fire-and-forget aus dem Streamer-Tick
+- `Per-Item tokio::time::timeout(5s)` — ein hängender POST stalled nicht den ganzen Drain
+- `MAX_DRAIN_PER_TICK = 50` Items — Drain dauert nie länger als ~5 Min selbst im Worst-Case
+- `Per-Flight queue_drain_in_flight: AtomicBool` — verhindert parallele Drains
+
+**Streamer-Tick blockiert nie wieder auf phpVMS.** MQTT-Publish + JSONL-Append + Sampler laufen kontinuierlich auch wenn 1000+ Items in der Queue stehen.
+
+### Was Piloten merken
+
+- **Live-Map-Track läuft kontinuierlich bis zum Gate** — keine Stille mehr nach Touchdown
+- **Indikator-Count "X Positionen offline"** geht jetzt langsam runter (bis zu 50 pro 3-sec-Tick = ~1000 Items in 1 Min) statt minutenlangem Drain-Hang
+- **PIREP-Filing** läuft genauso wie vorher (separater Code-Pfad)
+
+### Geänderte Dateien
+
+- `client/src-tauri/src/lib.rs` — `drain_position_queue` mit Per-Item-Timeout + Cap, neue `spawn_position_queue_drain`-Wrapper, Streamer-Tick ruft Spawn statt direktem `.await`, `ActiveFlight.queue_drain_in_flight` AtomicBool
+- Versionen → 0.5.51
+
+---
+
 ## [v0.5.50] — 2026-05-09
 
 🚨 **Hotfix: macOS-Crash beim Startup nach v0.5.49-Update.**
