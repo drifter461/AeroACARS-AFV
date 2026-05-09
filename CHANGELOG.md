@@ -4,6 +4,72 @@ Alle nennenswerten Änderungen an AeroACARS. Format: lose an [Keep a Changelog](
 
 ---
 
+## [v0.5.49] — 2026-05-09
+
+🛡 **„Fehler 1236"-Fix — HTTP-Härtung + entkoppelter Streamer + PIREP-Offline-Queue.**
+
+### Hintergrund
+
+User-Report PTO 705 (PFE-Pilot, EDLN→EDDL): Direkt nach der Landung kam Windows-Socket-Error 1236 (`ERROR_CONNECTION_INVALID`). App erstarrte, kein Position-Update mehr, kein UI-Refresh. Pilot musste die App neu starten und den PIREP manuell einreichen. Im JSONL: Position-Stream endet exakt am Touchdown, dann 2 min 36 sec Stille bis `flight_resumed`. **Nicht der Pilot hat verworfen — die App ist gehängt.**
+
+Root-Cause-Analyse:
+
+- `reqwest`-Client hatte `DEFAULT_TIMEOUT=20s`, KEIN `connect_timeout`, KEIN `tcp_keepalive`. Eine vom Router gekillte TCP-Verbindung (NAT-Eviction, ISP-RST) führte zu 20 sec hängendem `await` im Streamer-Tick
+- Tick-Loop blockiert → keine Snapshots, kein JSONL-Append, kein MQTT-Publish, UI eingefroren
+- Pilot dachte App ist tot, force-close
+
+### 🆕 Fünf zusammenhängige Fixes
+
+**1. HTTP-Client-Hardening** (`api-client/src/lib.rs`)
+- `tcp_keepalive(30s)` — OS schickt regelmäßig Keep-Alive-Pakete, hält NAT-Einträge im Router warm und phpVMS-Server-keep-alive aktiv
+- `connect_timeout(5s)` — TCP-Handshake gibt schnell auf statt 20s zu warten
+- `pool_idle_timeout(60s)` — idle Verbindungen werden vor dem nginx-`keepalive_timeout` gerecycelt
+- `DEFAULT_TIMEOUT 20→10s` — wenn ein Call so lange hängt, ist die Verbindung eh tot
+
+**2. Streamer-Tick komplett vom Position-POST entkoppelt** (`lib.rs:8999`)
+- `client.post_positions().await` läuft jetzt in `tokio::spawn` mit hartem 8s `tokio::timeout`
+- Tick-Loop läuft IMMER weiter — JSONL/MQTT/Sampler werden nie blockiert
+- Bei Timeout/Error: Position landet im persistenten `position_queue` (existierende Logik)
+- Pilot-erkennbarer Effekt: bei Verbindungs-Glitch friert die App nicht mehr ein, Live-Tracking läuft weiter, Recovery beim nächsten erfolgreichen POST
+
+**3. PIREP-File mit Auto-Retry + persistente Queue** (`lib.rs:7030`)
+- Neuer `file_pirep_with_retry()`: 3 Versuche mit 5s/30s exponentiellem Backoff bei TRANSIENTEM Fehler (Netz, Timeout, 5xx, 429, 408)
+- Hard-Fehler (Validation, Auth) brechen sofort ab — Pilot muss korrigieren
+- Bei 3× Fail: PIREP wandert als `<app_data_dir>/pending_pireps/<pirep_id>.json` in den persistenten Queue
+- `record_landing_for_filed_flight` + `clear_persisted_flight` laufen — Pilot kann sofort den nächsten Flug starten
+
+**3b. Background-Worker** (`lib.rs:6238`)
+- Neuer `spawn_pirep_queue_worker`: tickt alle 60 Sekunden
+- Scannt `pending_pireps/`, versucht jeden PIREP einzureichen
+- Bei Erfolg: löschen + `consume_bid_best_effort` + `spawn_flight_log_upload` + Activity-Log „Gequeueter PIREP nachträglich eingereicht"
+- Bei Failure: `attempt_count` + `last_error` werden zurückgeschrieben (Pilot kann im Verzeichnis sehen wie oft retried wurde)
+- Skip nach 50 Versuchen (= circular failure, manuell nötig)
+
+**4. Windows-Socket-Codes übersetzen** (`lib.rs:6280`)
+- Neuer `friendly_net_error()`: mappt `1236` → „Verbindung wurde unterbrochen (Router-NAT-Eviction o.ä.). Wiederversuch automatisch."
+- Plus 10053/10054/10060 (Connection abort/reset/timeout), DNS-Failures, Connect-Failures
+- Pilot sieht im Activity-Log lesbare Texte statt kryptischer Codes
+
+**5. Doppel-Touchdown-Window-Dump-Fix** (`lib.rs:8544`)
+- Aus dem PTO-705-Log: nach `flight_resumed` wurde der TouchdownWindow-Buffer ein zweites Mal gedumpt (~80 KB Overhead)
+- Root-Cause: `touchdown_window_dumped_at` wurde in `stats` gesetzt, aber `save_active_flight` lief erst beim nächsten Periodic-Tick → wenn die App dazwischen quitted, war die Disk-Kopie noch `None`
+- Fix: explizites `save_active_flight(&app, &flight)` direkt nach dem Setzen, vor dem `record_event`
+
+### Was Piloten merken
+
+- **Kein App-Hang mehr bei Netzwerk-Glitches** — Streamer läuft kontinuierlich weiter, UI bleibt responsive
+- **PIREP-Submit nie wieder verloren** — auch wenn das Netz beim End-Flight komplett weg ist, wird der PIREP automatisch eingereicht sobald die Verbindung wieder steht. Pilot kann SOFORT den nächsten Flug starten
+- **Verständliche Fehler-Meldungen** — „Verbindung wurde unterbrochen, Wiederversuch automatisch" statt „Fehler 1236"
+- **Saubere Touchdown-Forensik** — kein doppelter 80-KB-Buffer-Dump mehr nach Resume
+
+### Geänderte Dateien
+
+- `client/src-tauri/crates/api-client/src/lib.rs` — `Client::new()` mit Keep-Alive + connect_timeout + pool-Hardening; `FileBody`/`FareEntry` Deserialize hinzu
+- `client/src-tauri/src/lib.rs` — Streamer-Tick spawnt POST + Timeout, neuer `pirep_queue` Modul, `file_pirep_with_retry`, `spawn_pirep_queue_worker`, `friendly_net_error`, `enqueue_position_offline`, `is_transient_pirep_error`, immediate `save_active_flight` nach TD-Window-Dump
+- Versionen → 0.5.49
+
+---
+
 ## [v0.5.48] — 2026-05-09
 
 🔔 **Update-Banner mit Eskalations-Stufen + 4 h Re-Check während die App läuft.**

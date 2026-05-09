@@ -120,7 +120,29 @@ fn de_int_or_str<'de, D: Deserializer<'de>>(d: D) -> Result<i64, D::Error> {
     d.deserialize_any(V)
 }
 
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20);
+// v0.5.49 — HTTP-Client-Hardening gegen "Fehler 1236" (NAT-Eviction +
+// dead-Socket-Hangs). Vorher: nur DEFAULT_TIMEOUT=20s am total request,
+// kein connect_timeout, kein tcp_keepalive. Eine vom Router/ISP gekillte
+// TCP-Verbindung führte zu 20s blockiertem await — der Streamer-Tick
+// hing 20s je Request, kein UI-Update, kein JSONL-Append, Pilot dachte
+// die App ist tot.
+//
+// Fix-Komponenten:
+// - tcp_keepalive(30s): OS schickt regelmaessig TCP-Keep-Alive-Pakete,
+//   verhindert NAT-Eviction in Consumer-Routern (FritzBox, Speedport)
+//   und haelt phpVMS-Server-side keep-alive warm
+// - connect_timeout(5s): wenn der TCP-Handshake hängt, schnell aufgeben
+//   statt 20s zu warten
+// - pool_idle_timeout(60s): idle Verbindungen aus dem Pool werfen bevor
+//   der Server (typisch nginx keepalive_timeout 60-75s) die Tür zumacht
+// - pool_max_idle_per_host(8): mehr als 8 idle Sockets pro Host sind eh
+//   Verschwendung
+// - DEFAULT_TIMEOUT auf 10s reduziert: 20s war im Pilot-Use-Case immer
+//   zu lang — wenn ein Call so lange braucht ist die Verbindung eh tot
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const TCP_KEEPALIVE: Duration = Duration::from_secs(30);
+const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Error)]
 pub enum ApiError {
@@ -566,7 +588,10 @@ pub struct PositionEntry {
 }
 
 /// Body for `POST /api/pireps/{id}/file` — final flight stats at submission.
-#[derive(Debug, Clone, Serialize, Default)]
+//
+// v0.5.49: Deserialize hinzugefügt damit der PIREP-Queue-Worker das
+// JSON aus der persistenten Queue zurücklesen kann.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FileBody {
     /// Total flight time in minutes (takeoff → landing).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -620,7 +645,7 @@ pub struct FileBody {
 
 /// Minimal fare entry for filing — phpVMS uses `id` to look up the fare class
 /// and `count` for the loaded amount.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FareEntry {
     pub id: i64,
     pub count: i32,
@@ -889,6 +914,13 @@ impl Client {
         let http = HttpClient::builder()
             .user_agent(user_agent)
             .timeout(DEFAULT_TIMEOUT)
+            // v0.5.49 — siehe Konstanten-Block oben für Begründung jedes
+            // einzelnen Settings. tl;dr: gegen NAT-Eviction + tote
+            // TCP-Verbindungen die den Streamer-Tick blockieren.
+            .connect_timeout(CONNECT_TIMEOUT)
+            .tcp_keepalive(TCP_KEEPALIVE)
+            .pool_idle_timeout(POOL_IDLE_TIMEOUT)
+            .pool_max_idle_per_host(8)
             .build()
             .map_err(ApiError::from)?;
         Ok(Self { http, conn })

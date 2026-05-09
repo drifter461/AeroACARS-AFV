@@ -6041,6 +6041,285 @@ fn open_position_queue(app: &AppHandle) -> Option<PositionQueue> {
     PositionQueue::open(dir).ok()
 }
 
+/// v0.5.49 — Helper für Position-POST-Failure aus dem spawnten Task.
+/// Queued die Position in den persistenten File-Queue, updated den
+/// queued_count im FlightStats und loggt eine User-freundliche
+/// Activity-Meldung (DE — wird im Activity-Panel im Cockpit angezeigt).
+fn enqueue_position_offline(
+    app: &AppHandle,
+    flight: &Arc<ActiveFlight>,
+    pirep_id: &str,
+    position: &api_client::PositionEntry,
+    friendly_msg: &str,
+) {
+    let Some(queue) = open_position_queue(app) else {
+        tracing::warn!(pirep_id, "no position-queue available — position lost");
+        return;
+    };
+    let queued = QueuedPosition {
+        pirep_id: pirep_id.to_string(),
+        position: serde_json::to_value(position).unwrap_or_default(),
+    };
+    match queue.enqueue(queued) {
+        Ok(len) => {
+            {
+                let mut stats = flight.stats.lock().expect("flight stats");
+                stats.queued_position_count = len as u32;
+            }
+            log_activity_handle(
+                app,
+                ActivityLevel::Warn,
+                "Position queued (offline)".to_string(),
+                Some(format!("{friendly_msg} · {len} pending")),
+            );
+        }
+        Err(qe) => tracing::warn!(error = ?qe, "could not enqueue position"),
+    }
+}
+
+/// v0.5.49 — Persistenter PIREP-Queue für den Fall dass `client.file_pirep`
+/// dauerhaft scheitert (Netz weg, phpVMS-Server down, …).
+///
+/// **Format:** ein JSON-File pro queued PIREP unter
+/// `<app_data_dir>/pending_pireps/<pirep_id>.json`. Ein File-pro-PIREP
+/// statt eine flache Queue-Datei macht es race-frei (Background-Worker
+/// und neue file_pirep-Calls können sich nicht überschreiben) und
+/// einfach inspizierbar (Pilot kann das Verzeichnis aufmachen).
+///
+/// **Worker:** läuft im Hintergrund alle 60 s, scannt das Verzeichnis,
+/// versucht jeden gequeueten PIREP zu submitten, löscht das File bei
+/// Success.
+mod pirep_queue {
+    use super::*;
+    use std::path::PathBuf;
+
+    pub const DIR_NAME: &str = "pending_pireps";
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct QueuedPirep {
+        pub pirep_id: String,
+        pub bid_id: i64,
+        pub airline_icao: String,
+        pub flight_number: String,
+        pub dpt_airport: String,
+        pub arr_airport: String,
+        pub body: api_client::FileBody,
+        pub queued_at: DateTime<Utc>,
+        pub last_attempt_at: Option<DateTime<Utc>>,
+        pub attempt_count: u32,
+        pub last_error: Option<String>,
+    }
+
+    fn dir(app: &AppHandle) -> Option<PathBuf> {
+        let base = app.path().app_data_dir().ok()?;
+        let d = base.join(DIR_NAME);
+        std::fs::create_dir_all(&d).ok()?;
+        Some(d)
+    }
+
+    fn file_path(app: &AppHandle, pirep_id: &str) -> Option<PathBuf> {
+        // pirep_id ist alphanumerisch in phpVMS — kein Sanitizing nötig,
+        // aber wir bauen den Pfad sicher zusammen.
+        let safe: String = pirep_id.chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .collect();
+        if safe.is_empty() { return None; }
+        Some(dir(app)?.join(format!("{safe}.json")))
+    }
+
+    pub fn enqueue(app: &AppHandle, q: &QueuedPirep) -> Result<(), std::io::Error> {
+        let path = file_path(app, &q.pirep_id)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "no app_data_dir or invalid pirep_id"))?;
+        let json = serde_json::to_string_pretty(q)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        std::fs::write(path, json)
+    }
+
+    pub fn remove(app: &AppHandle, pirep_id: &str) {
+        if let Some(path) = file_path(app, pirep_id) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    pub fn list_all(app: &AppHandle) -> Vec<QueuedPirep> {
+        let Some(d) = dir(app) else { return vec![]; };
+        let Ok(rd) = std::fs::read_dir(&d) else { return vec![]; };
+        let mut out = Vec::new();
+        for entry in rd.flatten() {
+            let p = entry.path();
+            if p.extension().and_then(|s| s.to_str()) != Some("json") { continue; }
+            let Ok(content) = std::fs::read_to_string(&p) else { continue; };
+            if let Ok(q) = serde_json::from_str::<QueuedPirep>(&content) {
+                out.push(q);
+            }
+        }
+        out
+    }
+
+    pub fn count(app: &AppHandle) -> usize {
+        let Some(d) = dir(app) else { return 0; };
+        let Ok(rd) = std::fs::read_dir(&d) else { return 0; };
+        rd.flatten()
+          .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
+          .count()
+    }
+}
+
+/// v0.5.49 — Auto-Retry für PIREP-File mit exponentiellem Backoff.
+///
+/// Versucht `client.file_pirep(pirep_id, body)` bis zu 3× — Initialversuch
+/// + 2 Retries. Backoffs: 5s, 30s. Bei TRANSIENTEM Fehler (Netz weg,
+/// Timeout, 5xx, 408, 429) wird retried. Bei HARD-Fehler (4xx außer
+/// retry-fähig) sofort raus damit der Pilot was machen kann (z.B. 422
+/// validation error — der Pilot muss den PIREP korrigieren).
+///
+/// Wenn auch nach 3× nicht durch: `Err(last_error)`. Der Caller in
+/// `flight_end()` queued dann via `pirep_queue::enqueue` und meldet
+/// Success an die UI (Pilot kann weiter, Worker erledigt's später).
+async fn file_pirep_with_retry(
+    client: &Client,
+    pirep_id: &str,
+    body: &api_client::FileBody,
+) -> Result<(), ApiError> {
+    const ATTEMPTS: u32 = 3;
+    const BACKOFFS_SEC: [u64; 2] = [5, 30]; // wait BEFORE attempt 2 and 3
+    let mut last_err: Option<ApiError> = None;
+    for attempt in 0..ATTEMPTS {
+        if attempt > 0 {
+            let secs = BACKOFFS_SEC[(attempt as usize - 1).min(BACKOFFS_SEC.len() - 1)];
+            tracing::info!(pirep_id, attempt, backoff_sec = secs, "PIREP file retry");
+            tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+        }
+        match client.file_pirep(pirep_id, body).await {
+            Ok(()) => return Ok(()),
+            Err(e) if !is_transient_pirep_error(&e) => return Err(e),
+            Err(e) => {
+                tracing::warn!(pirep_id, attempt, error = %e, "PIREP file attempt failed (transient)");
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err.unwrap_or(ApiError::Network("file_pirep_with_retry: no error captured".into())))
+}
+
+/// True wenn der Fehler nach Backoff retried werden soll (Netz, Timeout, 5xx, 408, 429).
+/// False bei harten 4xx (validation, auth, …) oder 404 (PIREP wurde gecancelt).
+fn is_transient_pirep_error(e: &ApiError) -> bool {
+    match e {
+        // 404 = PIREP wurde gecancelt → kein Retry, Caller muss reagieren
+        ApiError::NotFound => false,
+        // Auth-Fehler → kein Retry, Pilot muss neu einloggen
+        ApiError::Unauthenticated | ApiError::Forbidden => false,
+        // 5xx vom Server, 429 Rate-Limit, 408 Timeout → transient
+        ApiError::Server { status, .. } => *status == 408 || (*status >= 500 && *status < 600),
+        ApiError::RateLimited { .. } => true,
+        // Network = Connect/Timeout/RST/etc. → klassisch transient
+        ApiError::Network(_) => true,
+        // InvalidUrl / BadResponse → wir können's nicht reparieren
+        ApiError::InvalidUrl(_) | ApiError::BadResponse(_) => false,
+    }
+}
+
+/// v0.5.49 — Background-Worker für den persistenten PIREP-Queue.
+///
+/// Spawnt beim App-Start einmal, läuft bis App-Exit. Tickt alle 60 s,
+/// versucht jeden in `pending_pireps/` liegenden PIREP zu file-en, löscht
+/// das File bei Success + bumpt das attempt-count + last_attempt_at bei
+/// Failure damit man Pilot-seitig sehen kann wie oft retried wurde.
+///
+/// Skipt PIREPs mit > 50 Attempts (= circular failure, Pilot muss
+/// manuell). Loggt Success/Failure als Activity-Events damit der Pilot
+/// im Cockpit-Activity-Panel sehen kann was passiert.
+fn spawn_pirep_queue_worker(app: AppHandle) {
+    tokio::spawn(async move {
+        const TICK: std::time::Duration = std::time::Duration::from_secs(60);
+        const MAX_ATTEMPTS: u32 = 50;
+        loop {
+            tokio::time::sleep(TICK).await;
+            let queued = pirep_queue::list_all(&app);
+            if queued.is_empty() { continue; }
+            // Client aus dem AppState holen — könnte fehlen wenn Pilot
+            // nicht eingeloggt ist (= keine Connection). Dann skippen.
+            let state = app.state::<AppState>();
+            let client_opt = state
+                .client
+                .lock()
+                .expect("client lock")
+                .clone();
+            let Some(client) = client_opt else { continue; };
+            tracing::info!(queued_count = queued.len(), "PIREP-queue worker tick");
+            for mut q in queued {
+                if q.attempt_count >= MAX_ATTEMPTS {
+                    tracing::warn!(pirep_id = %q.pirep_id, attempts = q.attempt_count, "skipping queued PIREP (max attempts)");
+                    continue;
+                }
+                q.attempt_count += 1;
+                q.last_attempt_at = Some(Utc::now());
+                match client.file_pirep(&q.pirep_id, &q.body).await {
+                    Ok(()) => {
+                        tracing::info!(pirep_id = %q.pirep_id, "queued PIREP filed successfully by background worker");
+                        pirep_queue::remove(&app, &q.pirep_id);
+                        log_activity_handle(
+                            &app,
+                            ActivityLevel::Info,
+                            format!(
+                                "Gequeueter PIREP nachträglich eingereicht: {} {} → {}",
+                                format_callsign(&q.airline_icao, &q.flight_number),
+                                q.dpt_airport,
+                                q.arr_airport,
+                            ),
+                            Some(format!("Nach {} Versuch(en) — Verbindung war wieder da", q.attempt_count)),
+                        );
+                        // Best-effort Bid-Cleanup
+                        consume_bid_best_effort(&client, q.bid_id).await;
+                        // Best-effort: JSONL-Upload (wenn das Recorder-File noch da ist)
+                        spawn_flight_log_upload(&app, q.pirep_id.clone());
+                    }
+                    Err(e) => {
+                        q.last_error = Some(friendly_net_error(&e));
+                        // Update das File mit dem neuen attempt-count + Error
+                        let _ = pirep_queue::enqueue(&app, &q);
+                        tracing::warn!(
+                            pirep_id = %q.pirep_id,
+                            attempt = q.attempt_count,
+                            error = %e,
+                            "queued PIREP file failed — will retry next tick"
+                        );
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// v0.5.49 — Übersetzt technische Netzwerk-Fehler in für Piloten lesbare
+/// Texte. Hauptzweck: Windows-Socket-Codes wie "1236" oder "10054" sind
+/// für den Pilot kryptisch — wir mappen sie auf "Verbindung verloren"
+/// + erwartete Selbst-Heilung.
+///
+/// Heuristik: wir matchen auf Teilstrings im Display-String von
+/// reqwest::Error, plus die ein Windows-Code-Suffixe wie "(os error 1236)"
+/// die Tokio/Reqwest auf Windows in den Error-Text schreiben.
+fn friendly_net_error(e: &ApiError) -> String {
+    let s = format!("{e}");
+    let s_lower = s.to_lowercase();
+    if s.contains("1236") || s_lower.contains("connection invalid") {
+        "Verbindung wurde unterbrochen (1236 — Router-NAT-Eviction o.ä.). Wiederversuch automatisch.".to_string()
+    } else if s.contains("10053") || s_lower.contains("connection abort") || s_lower.contains("software caused") {
+        "Verbindung lokal abgebrochen (10053). Wiederversuch automatisch.".to_string()
+    } else if s.contains("10054") || s_lower.contains("connection reset") {
+        "Verbindung vom Server beendet (10054). Wiederversuch automatisch.".to_string()
+    } else if s.contains("10060") || s_lower.contains("timed out") || s_lower.contains("timeout") {
+        "Server-Antwort-Timeout. Wiederversuch automatisch.".to_string()
+    } else if s_lower.contains("dns") || s_lower.contains("name resolution") {
+        "DNS-Auflösung fehlgeschlagen. Internet-Verbindung prüfen.".to_string()
+    } else if s_lower.contains("connect") {
+        "Konnte phpVMS-Server nicht erreichen. Wiederversuch automatisch.".to_string()
+    } else {
+        format!("Netzwerk-Fehler: {s}")
+    }
+}
+
 /// Open (or create) the per-flight JSONL recorder. None when we can't
 /// resolve the app data dir — caller treats it as "skip recording for
 /// this tick" rather than failing the streamer.
@@ -6748,7 +7027,14 @@ async fn flight_end(
     );
     // Non-divert path. (Diverts return early above via the dedicated
     // mass-assign-to-PENDING flow; only normal arrivals reach /file.)
-    match client.file_pirep(&flight.pirep_id, &body).await {
+    //
+    // v0.5.49 — file_pirep_with_retry: 3 attempts mit 5s+30s Backoff
+    // bei TRANSIENTEM Fehler (Netz, Timeout, 5xx, 429). Bei 3× Fail
+    // queued der Err-Branch unten den PIREP in den persistenten
+    // pirep_queue/ — Background-Worker reicht ihn ein sobald die
+    // Verbindung wieder steht. Pilot sieht „PIREP queued" statt
+    // „PIREP filed", kann aber sofort den nächsten Flug starten.
+    match file_pirep_with_retry(&client, &flight.pirep_id, &body).await {
         Ok(()) => {
             // Snapshot the landing into the local history file BEFORE
             // we drop the persisted flight — gives the new "Landung"
@@ -6895,18 +7181,84 @@ async fn flight_end(
             Ok(())
         }
         Err(e) => {
-            // File call failed — don't drop the flight on the floor. Put it
-            // back in state so the user can retry instead of orphaning the
-            // PIREP server-side.
-            log_activity(
-                &state,
-                ActivityLevel::Error,
-                "PIREP file failed",
-                Some(format!("{} — flight kept in state for retry", e)),
-            );
-            let mut guard = state.active_flight.lock().expect("active_flight lock");
-            *guard = Some(flight);
-            Err(e.into())
+            // v0.5.49 — Auto-Retry hat schon 3× erfolglos versucht.
+            // Wenn der Fehler TRANSIENT ist (Netz, Timeout) → in den
+            // persistenten Queue schieben, Flight clearen, Pilot kann
+            // weiter. Background-Worker reicht den PIREP ein sobald
+            // die Verbindung wieder steht.
+            // Wenn der Fehler HARD ist (Validation, Auth) → wie bisher
+            // Flight in State halten damit der Pilot was korrigieren
+            // kann.
+            if is_transient_pirep_error(&e) {
+                let queued = pirep_queue::QueuedPirep {
+                    pirep_id: flight.pirep_id.clone(),
+                    bid_id: flight.bid_id,
+                    airline_icao: flight.airline_icao.clone(),
+                    flight_number: flight.flight_number.clone(),
+                    dpt_airport: flight.dpt_airport.clone(),
+                    arr_airport: flight.arr_airport.clone(),
+                    body: body.clone(),
+                    queued_at: Utc::now(),
+                    last_attempt_at: Some(Utc::now()),
+                    attempt_count: 3, // = die 3 retries die wir grade verbraucht haben
+                    last_error: Some(friendly_net_error(&e)),
+                };
+                if let Err(qe) = pirep_queue::enqueue(&app, &queued) {
+                    // Queue selber kaputt — fallback auf altes Verhalten
+                    tracing::error!(error = %qe, "PIREP-Queue enqueue failed — falling back to flight-in-state");
+                    log_activity(
+                        &state,
+                        ActivityLevel::Error,
+                        "PIREP file failed",
+                        Some(format!("{} — Queue ebenfalls kaputt, Flug bleibt aktiv für Retry", e)),
+                    );
+                    let mut guard = state.active_flight.lock().expect("active_flight lock");
+                    *guard = Some(flight);
+                    return Err(e.into());
+                }
+                // Erfolgreich gequeued → Landing-Snapshot, clear, Activity-Log
+                {
+                    let stats = flight.stats.lock().expect("flight stats");
+                    record_landing_for_filed_flight(&app, &flight, &stats);
+                }
+                clear_persisted_flight(&app);
+                log_activity(
+                    &state,
+                    ActivityLevel::Warn,
+                    format!(
+                        "PIREP queued: {} {} → {}",
+                        format_callsign(&flight.airline_icao, &flight.flight_number),
+                        flight.dpt_airport,
+                        flight.arr_airport,
+                    ),
+                    Some(format!(
+                        "{} — wird automatisch eingereicht sobald die Verbindung wieder steht. Du kannst den nächsten Flug starten.",
+                        friendly_net_error(&e)
+                    )),
+                );
+                record_event(
+                    &app,
+                    &flight.pirep_id,
+                    &FlightLogEvent::FlightEnded {
+                        timestamp: Utc::now(),
+                        pirep_id: flight.pirep_id.clone(),
+                        outcome: FlightOutcome::Filed, // queued zählt als „abgeschlossen"
+                    },
+                );
+                Ok(())
+            } else {
+                // Hard-Fail (Validation, Auth, …) — Pilot muss das selber
+                // korrigieren. Flight bleibt in state.
+                log_activity(
+                    &state,
+                    ActivityLevel::Error,
+                    "PIREP file failed",
+                    Some(format!("{} — flight kept in state for retry", e)),
+                );
+                let mut guard = state.active_flight.lock().expect("active_flight lock");
+                *guard = Some(flight);
+                Err(e.into())
+            }
         }
     }
 }
@@ -8191,6 +8543,17 @@ fn spawn_touchdown_sampler(app: AppHandle, flight: Arc<ActiveFlight>) {
             // nicht das stats-Lock blockieren lassen.
             drop(stats);
             if let Some((edge_at, samples, analysis)) = prepared_dump {
+                // v0.5.49 — IMMEDIATE persist nach dem Setzen von
+                // touchdown_window_dumped_at. Vorher wurde der Flag in
+                // stats gesetzt, aber save_active_flight wartete auf den
+                // nächsten STATS_PERSIST_EVERY_TICKS-Tick. Wenn die App
+                // dazwischen quitted (z.B. Pilot schließt sofort nach
+                // Landing), war die persistente Kopie noch dumped_at=None
+                // → nach Resume fired der Dump erneut. Genau das Symptom
+                // aus dem PTO-705-Log (zwei TouchdownWindow-Events,
+                // 18:48:25 und 18:51:16 nach Resume). Ein expliziter
+                // Save direkt nach dem Setzen verhindert das.
+                save_active_flight(&app, &flight);
                 let count = samples.len();
                 record_event(
                     &app,
@@ -9014,74 +9377,102 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                 // already went out at 3 s cadence; phpVMS will catch
                 // up on the next eligible tick.
             } else {
+                // v0.5.49 — Position-POST komplett vom Streamer-Tick
+                // entkoppeln (Fehler-1236-Fix).
+                //
+                // Vorher: `client.post_positions(...).await` blockierte den
+                // Tick-Loop bis zum DEFAULT_TIMEOUT (vorher 20s, jetzt 10s).
+                // Bei toter TCP-Verbindung (NAT-Eviction, ISP-RST, …) hing
+                // der ganze Loop — kein neuer Snapshot, kein JSONL-Append,
+                // kein MQTT-Publish, UI fror ein. Pilot dachte App ist tot
+                // und hat sie force-closed. Genau das Symptom aus dem
+                // PTO-705-Log (2026-05-09).
+                //
+                // Jetzt: tokio::spawn fire-and-forget mit hartem 8s
+                // Timeout. Der Tick-Loop läuft sofort weiter — JSONL +
+                // MQTT + Sampler sind nie blockiert. Der spawnte Task
+                // updated last_position_at / queued_count selbst und
+                // queued bei Failure in den persistenten Position-Queue.
                 last_phpvms_post_at = Some(std::time::Instant::now());
-                match client
-                .post_positions(&flight.pirep_id, &[position.clone()])
-                .await
-            {
-                Ok(()) => {
-                    tracing::info!(
-                        pirep_id = %flight.pirep_id,
-                        lat = snap.lat,
-                        lon = snap.lon,
-                        alt_msl_ft = snap.altitude_msl_ft,
-                        gs_kt = snap.groundspeed_kt,
-                        "position posted"
+                let client_for_post = client.clone();
+                let app_for_post = app.clone();
+                let flight_for_post = Arc::clone(&flight);
+                let pirep_id_for_post = flight.pirep_id.clone();
+                let position_for_post = position.clone();
+                let snap_for_log = snap.clone();
+                tokio::spawn(async move {
+                    // Slice in eigene Variable damit's nicht als
+                    // temporary über das await stirbt.
+                    let positions_slice = vec![position_for_post.clone()];
+                    let post_fut = client_for_post.post_positions(
+                        &pirep_id_for_post,
+                        &positions_slice,
                     );
-                    // Stamp the success time + clear any stale queue
-                    // count so the dashboard's LIVE indicator stays
-                    // green and back-fills the "last send" line.
-                    {
-                        let mut stats = flight.stats.lock().expect("flight stats");
-                        stats.last_position_at = Some(Utc::now());
-                        let queue_len = queue
-                            .as_ref()
-                            .and_then(|q| q.len().ok())
-                            .unwrap_or(0) as u32;
-                        stats.queued_position_count = queue_len;
-                    }
-                    // v0.5.35: JSONL-Append wurde nach oben verschoben
-                    // (vor phpVMS-POST) damit jeder Tick im Log landet,
-                    // nicht nur die phpVMS-Success-Frames.
-                }
-                Err(ApiError::NotFound) => {
-                    // phpVMS soft-deleted the PIREP under us (most likely
-                    // the RemoveExpiredLiveFlights hourly cron). Queueing
-                    // would just spam 404s forever — handle it as a hard
-                    // remote cancellation instead.
-                    handle_remote_cancellation(&app, &flight, "POST positions");
-                    break;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        pirep_id = %flight.pirep_id,
-                        error = %e,
-                        "position post failed; queueing for later replay"
-                    );
-                    if let Some(q) = &queue {
-                        let queued = QueuedPosition {
-                            pirep_id: flight.pirep_id.clone(),
-                            position: serde_json::to_value(&position).unwrap_or_default(),
-                        };
-                        match q.enqueue(queued) {
-                            Ok(len) => {
-                                {
-                                    let mut stats =
-                                        flight.stats.lock().expect("flight stats");
-                                    stats.queued_position_count = len as u32;
-                                }
-                                log_activity_handle(
-                                    &app,
-                                    ActivityLevel::Warn,
-                                    "Position queued (offline)".to_string(),
-                                    Some(format!("{} pending", len)),
-                                );
-                            }
-                            Err(qe) => tracing::warn!(error = ?qe, "could not enqueue position"),
+                    // Hartes 8s-Timeout. DEFAULT_TIMEOUT vom HttpClient
+                    // ist 10s — die zusätzliche tokio-Timeout-Schicht
+                    // schützt gegen den Fall dass reqwest selbst hängt
+                    // (Bugs in der Lib o.ä.).
+                    let result = tokio::time::timeout(
+                        std::time::Duration::from_secs(8),
+                        post_fut,
+                    ).await;
+                    match result {
+                        Ok(Ok(())) => {
+                            tracing::info!(
+                                pirep_id = %pirep_id_for_post,
+                                lat = snap_for_log.lat,
+                                lon = snap_for_log.lon,
+                                alt_msl_ft = snap_for_log.altitude_msl_ft,
+                                gs_kt = snap_for_log.groundspeed_kt,
+                                "position posted (spawned)"
+                            );
+                            let mut stats = flight_for_post.stats.lock().expect("flight stats");
+                            stats.last_position_at = Some(Utc::now());
+                            let queue_len = open_position_queue(&app_for_post)
+                                .and_then(|q| q.len().ok())
+                                .unwrap_or(0) as u32;
+                            stats.queued_position_count = queue_len;
+                        }
+                        Ok(Err(ApiError::NotFound)) => {
+                            // phpVMS soft-deleted the PIREP under us
+                            // (RemoveExpiredLiveFlights cron). Stop the
+                            // whole streamer-loop via stop-flag.
+                            handle_remote_cancellation(
+                                &app_for_post,
+                                &flight_for_post,
+                                "POST positions",
+                            );
+                        }
+                        Ok(Err(e)) => {
+                            // Network/transport failure — queue for replay.
+                            tracing::warn!(
+                                pirep_id = %pirep_id_for_post,
+                                error = %e,
+                                "position post failed (spawned); queueing for replay"
+                            );
+                            enqueue_position_offline(
+                                &app_for_post,
+                                &flight_for_post,
+                                &pirep_id_for_post,
+                                &position_for_post,
+                                &friendly_net_error(&e),
+                            );
+                        }
+                        Err(_timeout) => {
+                            tracing::warn!(
+                                pirep_id = %pirep_id_for_post,
+                                "position post TIMED OUT after 8s (spawned); queueing for replay"
+                            );
+                            enqueue_position_offline(
+                                &app_for_post,
+                                &flight_for_post,
+                                &pirep_id_for_post,
+                                &position_for_post,
+                                "Verbindungs-Timeout (8s). Position in Offline-Queue.",
+                            );
                         }
                     }
-                }
-            }
+                });
             } // end `if should_post_phpvms`
 
             // Periodically flush running stats to disk so a Tauri restart
@@ -15008,6 +15399,12 @@ pub fn run() {
                     init_mqtt_publisher_via_provisioning(app_for_mqtt).await;
                 });
             }
+            // v0.5.49 — Background-Worker für den persistenten PIREP-
+            // Queue. Tickt alle 60s, versucht jeden in pending_pireps/
+            // liegenden PIREP einzureichen sobald die Verbindung wieder
+            // steht. Persistiert Attempt-Count pro PIREP damit nach App-
+            // Restart einfach weiter retried wird.
+            spawn_pirep_queue_worker(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
