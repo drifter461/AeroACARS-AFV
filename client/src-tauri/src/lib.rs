@@ -6111,6 +6111,23 @@ fn build_landing_record(
         runway_match,
         touchdown_profile,
         approach_samples,
+
+        // v0.5.43: Forensik aus dem 50-Hz-Sampler-Buffer (compute_landing_analysis)
+        // wenn der Buffer-Dump erfolgreich war. Sonst alle None.
+        vs_at_edge_fpm: ana_f32(&stats.landing_analysis, "vs_at_edge_fpm"),
+        vs_smoothed_250ms_fpm: ana_f32(&stats.landing_analysis, "vs_smoothed_250ms_fpm"),
+        vs_smoothed_500ms_fpm: ana_f32(&stats.landing_analysis, "vs_smoothed_500ms_fpm"),
+        vs_smoothed_1000ms_fpm: ana_f32(&stats.landing_analysis, "vs_smoothed_1000ms_fpm"),
+        vs_smoothed_1500ms_fpm: ana_f32(&stats.landing_analysis, "vs_smoothed_1500ms_fpm"),
+        peak_g_post_500ms: ana_f32(&stats.landing_analysis, "peak_g_post_500ms"),
+        peak_g_post_1000ms: ana_f32(&stats.landing_analysis, "peak_g_post_1000ms"),
+        peak_vs_pre_flare_fpm: ana_f32(&stats.landing_analysis, "peak_vs_pre_flare_fpm"),
+        vs_at_flare_end_fpm: ana_f32(&stats.landing_analysis, "vs_at_flare_end_fpm"),
+        flare_reduction_fpm: ana_f32(&stats.landing_analysis, "flare_reduction_fpm"),
+        flare_dvs_dt_fpm_per_sec: ana_f32(&stats.landing_analysis, "flare_dvs_dt_fpm_per_sec"),
+        flare_quality_score: ana_i32(&stats.landing_analysis, "flare_quality_score"),
+        flare_detected: ana_bool(&stats.landing_analysis, "flare_detected"),
+        forensic_sample_count: ana_u32(&stats.landing_analysis, "sample_count"),
     })
 }
 

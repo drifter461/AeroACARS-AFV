@@ -5359,6 +5359,96 @@ input:disabled {
   margin-top: 1rem;
 }
 
+/* ---- v0.5.43: Flare-Quality Section ----
+ * Layout: links eine Score-Display-Karte (gross, farbig je band),
+ * rechts die KV-Metriken in der gleichen 2-Spalten-Grid wie der Rest.
+ * Gleicher visueller Sprache wie StabilityIndicator damit's
+ * harmonisch in den Landing-Tab integriert wirkt.
+ */
+.landing-section--flare h3 {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.landing-flare__chip {
+  font-size: 0.7rem;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 600;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+}
+
+.landing-flare__chip--ok {
+  background: rgba(63, 185, 80, 0.15);
+  color: #3fb950;
+  border: 1px solid rgba(63, 185, 80, 0.4);
+}
+
+.landing-flare__chip--warn {
+  background: rgba(210, 153, 34, 0.15);
+  color: #d29922;
+  border: 1px solid rgba(210, 153, 34, 0.4);
+}
+
+.landing-flare {
+  display: grid;
+  grid-template-columns: minmax(180px, 240px) 1fr;
+  gap: 1.5rem;
+  align-items: center;
+}
+
+@media (max-width: 720px) {
+  .landing-flare {
+    grid-template-columns: 1fr;
+  }
+}
+
+.landing-flare__score {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 1.25rem 0.5rem;
+  background: var(--bg-elevated, rgba(255, 255, 255, 0.025));
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.landing-flare__score-num {
+  font-size: 3.5rem;
+  font-weight: 800;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.landing-flare__score-num[data-band="good"] { color: #3fb950; }
+.landing-flare__score-num[data-band="ok"]   { color: #d29922; }
+.landing-flare__score-num[data-band="bad"]  { color: #f85149; }
+
+.landing-flare__score-label {
+  margin-top: 0.4rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+.landing-flare__score-hint {
+  margin-top: 0.45rem;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  line-height: 1.4;
+  max-width: 220px;
+}
+
+.landing-flare__metrics {
+  /* erbt landing-keyvals — keine override-Regeln, nur leichte Anpassung */
+  align-self: start;
+}
+
 /* ---- Personal-best line in the headline ---- */
 
 .landing-headline__pb {

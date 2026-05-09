@@ -271,6 +271,60 @@ pub struct LandingRecord {
     /// tab. Indexed left-to-right oldest-to-newest.
     #[serde(default)]
     pub approach_samples: Vec<ApproachSample>,
+
+    // ─── v0.5.43 50-Hz-TouchdownWindow Forensik ──────────────────────
+    //
+    // Aus dem Sampler-Buffer (5 s pre + 10 s post @ 50 Hz) berechnete
+    // Werte. Werden vom build_landing_record aus stats.landing_analysis
+    // gelesen wenn der Buffer-Dump erfolgreich war (sonst alle None).
+    // Ergaenzen die bestehenden Touchdown-Vitals um die Volanta-/DLHv-
+    // equivalenten Mehrfach-Fenster + Flare-Quality-Metriken.
+    //
+    // Backwards-compatible: alle Felder Optional + serde(default) damit
+    // alte landing_history.json-Eintraege ohne Forensik weiter parsen.
+    /// V/S linear interpoliert auf den exakten on_ground-Edge zwischen
+    /// zwei 20-30 ms Samples. Volanta-equivalent.
+    #[serde(default)]
+    pub vs_at_edge_fpm: Option<f32>,
+    /// Mean V/S ueber 250 ms vor Edge (nur negative Samples).
+    #[serde(default)]
+    pub vs_smoothed_250ms_fpm: Option<f32>,
+    /// Mean V/S ueber 500 ms vor Edge (= Volanta-Display-Wert).
+    #[serde(default)]
+    pub vs_smoothed_500ms_fpm: Option<f32>,
+    /// Mean V/S ueber 1000 ms vor Edge (= DLHv-Display-Wert).
+    #[serde(default)]
+    pub vs_smoothed_1000ms_fpm: Option<f32>,
+    /// Mean V/S ueber 1500 ms vor Edge.
+    #[serde(default)]
+    pub vs_smoothed_1500ms_fpm: Option<f32>,
+    /// Peak G im 500 ms post-Edge — der echte Gear-Compression-Spike.
+    #[serde(default)]
+    pub peak_g_post_500ms: Option<f32>,
+    /// Peak G im 1000 ms post-Edge.
+    #[serde(default)]
+    pub peak_g_post_1000ms: Option<f32>,
+    /// Steepste Sinkrate in [-2000, -100] ms vor Edge.
+    #[serde(default)]
+    pub peak_vs_pre_flare_fpm: Option<f32>,
+    /// V/S unmittelbar vor Edge.
+    #[serde(default)]
+    pub vs_at_flare_end_fpm: Option<f32>,
+    /// Reduktion durch Flare (positiv = Sinkrate verkleinert).
+    #[serde(default)]
+    pub flare_reduction_fpm: Option<f32>,
+    /// dV/S/dt im Flare-Window in fpm/sec.
+    #[serde(default)]
+    pub flare_dvs_dt_fpm_per_sec: Option<f32>,
+    /// Flare-Quality-Score 0..100 (Endpoint + Reduktions-Bonus).
+    #[serde(default)]
+    pub flare_quality_score: Option<i32>,
+    /// True wenn signifikante VS-Reduktion (>50 fpm) im Flare-Window.
+    #[serde(default)]
+    pub flare_detected: Option<bool>,
+    /// Sample-Count im 50-Hz-Buffer (>500 = OK, <100 = ggf. Sample-Loch).
+    #[serde(default)]
+    pub forensic_sample_count: Option<u32>,
 }
 
 /// One (V/S, bank) sample taken during Approach/Final, used by the

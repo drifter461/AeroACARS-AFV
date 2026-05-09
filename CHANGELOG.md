@@ -4,6 +4,41 @@ Alle nennenswerten Änderungen an AeroACARS. Format: lose an [Keep a Changelog](
 
 ---
 
+## [v0.5.43] — 2026-05-09
+
+🎯 **50-Hz-Forensik in der LandingPanel — Pilot sieht alles direkt in der App.**
+
+### Hintergrund
+
+Bisher waren die v0.5.39+ TouchdownWindow-Forensik-Felder (`vs_at_edge`, Multi-Window-VS, Peak-G post-TD, Flare-Quality-Score) nur in der aeroacars-live Webapp sichtbar. Pilot musste nach dem Flug ins Webportal wechseln um den Volanta-/DLHv-Vergleich zu sehen.
+
+### 🆕 Was neu ist
+
+**Touchdown-Section** in der Cockpit-LandingPanel zeigt jetzt direkt:
+- `V/S am Edge` (interpoliert zwischen 30-ms-Samples = Volanta-equivalent)
+- `500-ms-Mean (Volanta)` und `1-s-Mean (DLHv)` als zusätzliche Zeilen
+- `Peak-G nach TD` separat vom `Peak-G` (= echter Gear-Compression-Spike, oft 100-300 ms nach Bodenkontakt)
+
+Alle vier zusätzlichen KV-Zeilen erscheinen nahtlos in der bestehenden 2-Spalten-Grid neben den klassischen Touchdown-Werten — keine Stein-daneben-Optik.
+
+**Flare-Quality** als eigene Section nach Approach-Stability:
+- Großer Score 0..100 (links, farbig je band)
+- KV-Liste rechts (rechts): Pre-Flare-VS, End-of-Flare-VS, Reduktion, dV/S/dt
+- Status-Chip im Header: ✈ FLARE / KEIN FLARE
+- Gleicher visueller Stil wie StabilityIndicator damit's harmonisch in den Tab integriert
+
+**i18n** komplett — DE/EN/IT (23 Keys × 3 Sprachen).
+
+### Backend
+
+`LandingRecord`-Struct in `crates/storage` um 14 optionale Forensik-Felder erweitert (alle `#[serde(default)]` für Backwards-Compat mit alten landing_history.json-Einträgen). `build_landing_record` liest aus `stats.landing_analysis` über die `ana_f32/i32/u32/bool`-Helper.
+
+### Was wenn die Felder None sind?
+
+Pre-v0.5.39 Landungen aus dem History-Store oder Sample-Loch-Fälle: die zusätzlichen KV-Zeilen erscheinen einfach nicht (conditional render). Die Flare-Section erscheint gar nicht. Keine UI-Brüche.
+
+---
+
 ## [v0.5.42] — 2026-05-09
 
 🧹 **Smoothed VS filtert positive Werte raus — reine Sinkrate als Maß.**

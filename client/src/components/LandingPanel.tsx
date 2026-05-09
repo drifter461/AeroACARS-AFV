@@ -81,6 +81,23 @@ export interface LandingRecord {
   runway_match: LandingRunwayMatch | null;
   touchdown_profile: LandingProfilePoint[];
   approach_samples: ApproachSample[];
+
+  // v0.5.43 — 50-Hz-TouchdownWindow Forensik. Optional weil pre-v0.5.39
+  // landing_history.json-Eintraege sie nicht haben.
+  vs_at_edge_fpm?: number | null;
+  vs_smoothed_250ms_fpm?: number | null;
+  vs_smoothed_500ms_fpm?: number | null;
+  vs_smoothed_1000ms_fpm?: number | null;
+  vs_smoothed_1500ms_fpm?: number | null;
+  peak_g_post_500ms?: number | null;
+  peak_g_post_1000ms?: number | null;
+  peak_vs_pre_flare_fpm?: number | null;
+  vs_at_flare_end_fpm?: number | null;
+  flare_reduction_fpm?: number | null;
+  flare_dvs_dt_fpm_per_sec?: number | null;
+  flare_quality_score?: number | null;
+  flare_detected?: boolean | null;
+  forensic_sample_count?: number | null;
 }
 
 export interface ApproachSample {
@@ -1189,6 +1206,29 @@ function LandingDetail({
               <dt>{t("landing.landing_rate")}</dt>
               <dd>{fmtNumber(record.landing_rate_fpm, 0, "fpm")}</dd>
             </div>
+            {/* v0.5.43: vs_at_edge — der "Volanta-equivalente" Wert direkt
+                neben Sinkrate, weil's der gleiche Begriff aus anderer
+                Mess-Methodik ist (interpoliert vs SimVar/Sampler-Best-Guess).
+                Plus 500-ms- und 1-s-Mean direkt darunter — Pilot sieht alle
+                drei VS-Mess-Methoden im gleichen Block. */}
+            {record.vs_at_edge_fpm != null && (
+              <div title={t("landing.vs_at_edge_hint") ?? undefined}>
+                <dt>{t("landing.vs_at_edge")}</dt>
+                <dd>{fmtNumber(record.vs_at_edge_fpm, 0, "fpm")}</dd>
+              </div>
+            )}
+            {record.vs_smoothed_500ms_fpm != null && (
+              <div title={t("landing.vs_smoothed_500ms_hint") ?? undefined}>
+                <dt>{t("landing.vs_smoothed_500ms")}</dt>
+                <dd>{fmtNumber(record.vs_smoothed_500ms_fpm, 0, "fpm")}</dd>
+              </div>
+            )}
+            {record.vs_smoothed_1000ms_fpm != null && (
+              <div title={t("landing.vs_smoothed_1000ms_hint") ?? undefined}>
+                <dt>{t("landing.vs_smoothed_1000ms")}</dt>
+                <dd>{fmtNumber(record.vs_smoothed_1000ms_fpm, 0, "fpm")}</dd>
+              </div>
+            )}
             <div>
               <dt>{t("landing.peak_vs")}</dt>
               <dd>{fmtNumber(record.landing_peak_vs_fpm, 0, "fpm")}</dd>
@@ -1201,6 +1241,15 @@ function LandingDetail({
               <dt>{t("landing.peak_g")}</dt>
               <dd>{fmtNumber(record.landing_peak_g_force, 2, "G")}</dd>
             </div>
+            {/* v0.5.43: Peak G nach TD = Gear-Compression-Spike, oft 100-300 ms
+                spaeter als der landing_peak_g (= Frame des Bodenkontakts).
+                Als zusaetzliche dl-Zeile damit Pilot beide Werte vergleichen kann. */}
+            {record.peak_g_post_500ms != null && (
+              <div title={t("landing.peak_g_post_500ms_hint") ?? undefined}>
+                <dt>{t("landing.peak_g_post_500ms")}</dt>
+                <dd>{fmtNumber(record.peak_g_post_500ms, 2, "G")}</dd>
+              </div>
+            )}
             <div>
               <dt>{t("landing.pitch")}</dt>
               <dd>{fmtSigned(record.landing_pitch_deg, 1, "°")}</dd>
@@ -1248,6 +1297,70 @@ function LandingDetail({
           </div>
         )}
       </section>
+
+      {/* v0.5.43: Flare-Quality — als eigene Section im gleichen Stil wie
+          Approach-Stability. Nur sichtbar wenn die 50-Hz-Forensik-Felder
+          gefuellt sind (= v0.5.39+ Sampler hat den Buffer-Dump geschafft).
+          Pre-v0.5.39 PIREPs zeigen die Section nicht. */}
+      {record.flare_quality_score != null && (
+        <section className="landing-section landing-section--flare">
+          <h3>
+            {t("landing.flare_section")}
+            {record.flare_detected === true && (
+              <span className="landing-flare__chip landing-flare__chip--ok">
+                ✈ {t("landing.flare_detected")}
+              </span>
+            )}
+            {record.flare_detected === false && (
+              <span className="landing-flare__chip landing-flare__chip--warn">
+                {t("landing.flare_not_detected")}
+              </span>
+            )}
+          </h3>
+          <div className="landing-flare">
+            <div className="landing-flare__score">
+              <div className="landing-flare__score-num" data-band={
+                record.flare_quality_score >= 80 ? "good" :
+                record.flare_quality_score >= 60 ? "ok" : "bad"
+              }>
+                {record.flare_quality_score}
+              </div>
+              <div className="landing-flare__score-label">
+                {t("landing.flare_score")}
+              </div>
+              <div className="landing-flare__score-hint">
+                {t("landing.flare_score_hint")}
+              </div>
+            </div>
+            <dl className="landing-keyvals landing-flare__metrics">
+              {record.peak_vs_pre_flare_fpm != null && (
+                <div title={t("landing.flare_pre_vs_hint") ?? undefined}>
+                  <dt>{t("landing.flare_pre_vs")}</dt>
+                  <dd>{fmtNumber(record.peak_vs_pre_flare_fpm, 0, "fpm")}</dd>
+                </div>
+              )}
+              {record.vs_at_flare_end_fpm != null && (
+                <div title={t("landing.flare_end_vs_hint") ?? undefined}>
+                  <dt>{t("landing.flare_end_vs")}</dt>
+                  <dd>{fmtNumber(record.vs_at_flare_end_fpm, 0, "fpm")}</dd>
+                </div>
+              )}
+              {record.flare_reduction_fpm != null && (
+                <div title={t("landing.flare_reduction_hint") ?? undefined}>
+                  <dt>{t("landing.flare_reduction")}</dt>
+                  <dd>{fmtSigned(record.flare_reduction_fpm, 0, "fpm")}</dd>
+                </div>
+              )}
+              {record.flare_dvs_dt_fpm_per_sec != null && (
+                <div title={t("landing.flare_dvs_dt_hint") ?? undefined}>
+                  <dt>{t("landing.flare_dvs_dt")}</dt>
+                  <dd>{fmtSigned(record.flare_dvs_dt_fpm_per_sec, 0, "fpm/s")}</dd>
+                </div>
+              )}
+            </dl>
+          </div>
+        </section>
+      )}
 
       {/* Runway */}
       {record.runway_match && (
