@@ -5673,7 +5673,11 @@ pub struct ManualFlightPlan {
     pub planned_route: Option<String>,
     /// Optional: Alternate-Airport ICAO.
     pub alt_airport_id: Option<String>,
-    /// Optional: geplantes Zero-Fuel-Weight in kg fuer Loadsheet.
+    /// MUST (v0.5.42+): Geplantes Zero-Fuel-Weight in kg.
+    /// Ohne ZFW können wir keinen Loadsheet-Score und kein Mass-Compare
+    /// gegen Sim-Live-ZFW berechnen — VFR-Mode verliert sonst seinen
+    /// Mehrwert ggü. einem reinen Manual-PIREP. Frontend rendert das
+    /// Feld als required, Backend verifiziert nochmal defensiv.
     pub planned_zfw_kg: Option<f32>,
     /// Optional: geplanter Trip-Burn in kg (= planned_block - reserve - alternate).
     /// Wenn nicht gesetzt, fallback: 90% des block_fuel als Trip-Schaetzung.
@@ -5697,19 +5701,13 @@ async fn flight_start_manual(
     bid_id: i64,
     plan: ManualFlightPlan,
 ) -> Result<ActiveFlightInfo, UiError> {
-    let setup_guard = FlightSetupGuard::try_acquire(&state.flight_setup_in_progress)?;
-
-    {
-        let guard = state.active_flight.lock().expect("active_flight lock");
-        if guard.is_some() {
-            return Err(UiError::new(
-                "flight_already_active",
-                "another flight is already active",
-            ));
-        }
-    }
-
-    // Validierung der Pflicht-Felder
+    // v0.5.42: Validierung der Pflicht-Felder VOR dem try_acquire ziehen.
+    // Vorher passierte das nach dem Lock — Effekt: wenn parallel ein anderer
+    // Flow den Lock hielt (z.B. try_resume_flight beim App-Boot, Auto-Start-
+    // Watcher, StrictMode-Doppelmount), bekam der User die kryptische Meldung
+    // "another flight start or adopt is already in progress" obwohl tatsächlich
+    // nur ein Pflichtfeld fehlte. Validation muss zuerst laufen damit
+    // Form-Fehler immer als Form-Fehler erscheinen.
     if plan.planned_block_fuel_kg <= 0.0 {
         return Err(UiError::new(
             "invalid_block_fuel",
@@ -5721,6 +5719,30 @@ async fn flight_start_manual(
             "invalid_flight_time",
             "Erwartete Flugzeit muss > 0 Minuten sein",
         ));
+    }
+    // ZFW ist ab v0.5.42 Pflicht. Ohne planned_zfw_kg gibt es weder ein
+    // sinnvolles planned_tow noch einen Loadsheet-Score — der Mehrwert
+    // gegenüber einem reinen Manual-PIREP fällt weg.
+    let planned_zfw = match plan.planned_zfw_kg {
+        Some(v) if v > 0.0 => v,
+        _ => {
+            return Err(UiError::new(
+                "invalid_zfw",
+                "ZFW (Zero Fuel Weight) ist Pflicht — bitte den geplanten Leerflug-Wert (Aircraft + Pilot + Pax + Cargo) in kg angeben.",
+            ));
+        }
+    };
+
+    let setup_guard = FlightSetupGuard::try_acquire(&state.flight_setup_in_progress)?;
+
+    {
+        let guard = state.active_flight.lock().expect("active_flight lock");
+        if guard.is_some() {
+            return Err(UiError::new(
+                "flight_already_active",
+                "another flight is already active",
+            ));
+        }
     }
 
     let client = current_client(&state)?;
@@ -5933,8 +5955,9 @@ async fn flight_start_manual(
         // planned_burn = explicit oder 90%-Fallback
         stats.planned_burn_kg = plan.planned_burn_kg
             .or(Some(plan.planned_block_fuel_kg * 0.9));
-        stats.planned_zfw_kg = plan.planned_zfw_kg;
-        stats.planned_tow_kg = match (plan.planned_zfw_kg, Some(plan.planned_block_fuel_kg)) {
+        // v0.5.42: ZFW ist jetzt Pflicht, daher immer Some + planned_tow voll
+        stats.planned_zfw_kg = Some(planned_zfw);
+        stats.planned_tow_kg = match (Some(planned_zfw), Some(plan.planned_block_fuel_kg)) {
             (Some(zfw), Some(fuel)) => Some(zfw + fuel),
             _ => None,
         };

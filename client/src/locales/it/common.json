@@ -834,6 +834,9 @@
       "aircraft_not_available": "Velivolo non disponibile — vedi dettagli sotto. Cause comuni: il velivolo è parcheggiato in un altro aeroporto, è „in uso\" da un PIREP aperto, o il tuo grado non ha accesso. Pulizia tramite admin phpVMS (annulla PIREP orfani + verifica posizione velivolo).",
       "aircraft_mismatch": "Tipo di velivolo non corrispondente — sei nel velivolo sbagliato per questo bid. Carica il tipo corretto nel simulatore o scegli un altro bid.",
       "aircraft_mismatch_warning": "Il tipo di velivolo non corrisponde alla scelta del picker — il sim ha caricato un tipo diverso. In modalità VFR puoi avviare comunque (la tua scelta viene rispettata), ma i limiti di punteggio si applicano al tipo scelto.",
+      "invalid_block_fuel": "Il block fuel deve essere un numero positivo in kg.",
+      "invalid_flight_time": "Il tempo di volo previsto deve essere un numero positivo in minuti.",
+      "invalid_zfw": "Lo ZFW (Zero Fuel Weight) è obbligatorio — inserisci il peso a vuoto pianificato (velivolo + pilota + pax + carico, senza carburante) in kg.",
       "phpvms_error": "phpVMS ha rifiutato il volo — vedi dettagli."
     }
   },
@@ -887,7 +890,7 @@
       "alternate_help": "Aeroporto di riserva.",
       "zfw": "ZFW (Zero Fuel Weight)",
       "zfw_placeholder": "es. 800",
-      "zfw_help": "Velivolo + pilota + pax + carico (senza carburante)."
+      "zfw_help": "Obbligatorio. Velivolo + pilota + pax + carico (senza carburante). Necessario per loadsheet score e confronto ZFW con il sim."
     }
   },
   "bid_card": {

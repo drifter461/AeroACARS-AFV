@@ -144,6 +144,7 @@ export function ManualFlightModal({ bid, simHint, onClose, onFlightStarted }: Pr
     if (!selected) return;
     const blockFuel = parseFloat(blockFuelKg);
     const ftMin = parseInt(flightTimeMin, 10);
+    const zfw = parseFloat(zfwKg);
     if (!Number.isFinite(blockFuel) || blockFuel <= 0) {
       setError("Block-Fuel muss eine positive Zahl sein");
       return;
@@ -152,17 +153,21 @@ export function ManualFlightModal({ bid, simHint, onClose, onFlightStarted }: Pr
       setError("Erwartete Flugzeit muss eine positive Zahl sein");
       return;
     }
+    // v0.5.42: ZFW ist jetzt Pflicht (analog Backend-Validation).
+    if (!Number.isFinite(zfw) || zfw <= 0) {
+      setError("ZFW (Zero Fuel Weight) ist Pflicht — bitte das geplante Gewicht ohne Treibstoff in kg eintragen.");
+      return;
+    }
     const plan: ManualFlightPlan = {
       aircraft_id: selected.id,
       planned_block_fuel_kg: blockFuel,
       planned_flight_time_min: ftMin,
+      planned_zfw_kg: zfw,
     };
     const cl = parseInt(cruiseLevel, 10);
     if (Number.isFinite(cl) && cl > 0) plan.cruise_level_ft = cl;
     if (route.trim().length > 0) plan.planned_route = route.trim();
     if (altAirport.trim().length > 0) plan.alt_airport_id = altAirport.trim().toUpperCase();
-    const zfw = parseFloat(zfwKg);
-    if (Number.isFinite(zfw) && zfw > 0) plan.planned_zfw_kg = zfw;
     if (acknowledgeAircraftMismatch) plan.acknowledge_aircraft_mismatch = true;
 
     setStage("submitting");
@@ -196,6 +201,10 @@ export function ManualFlightModal({ bid, simHint, onClose, onFlightStarted }: Pr
         "bid_not_found",
         "aircraft_not_available",
         "aircraft_mismatch",
+        // v0.5.42: explicit Validation-Codes vom Backend
+        "invalid_block_fuel",
+        "invalid_flight_time",
+        "invalid_zfw",
         "phpvms_error",
       ];
       const msg = knownCodes.includes(ui.code)
@@ -413,12 +422,15 @@ export function ManualFlightModal({ bid, simHint, onClose, onFlightStarted }: Pr
               </label>
 
               <label>
-                <span>{t("manual_flight.form.zfw")} <span style={{ color: "var(--fg-dim)" }}>{t("manual_flight.optional")}</span></span>
+                {/* v0.5.42: ZFW ist Pflicht — gleicher Required-Stern wie
+                    Block-Fuel + Flugzeit. Ohne ZFW kein Loadsheet-Score. */}
+                <span>{t("manual_flight.form.zfw")} <span style={{ color: "var(--err)" }}>*</span></span>
                 <div className="manual-modal__input-with-unit">
                   <input
                     type="number"
                     min="0"
                     step="10"
+                    required
                     value={zfwKg}
                     onChange={(e) => setZfwKg(e.target.value)}
                     placeholder={t("manual_flight.form.zfw_placeholder")}
@@ -449,26 +461,44 @@ export function ManualFlightModal({ bid, simHint, onClose, onFlightStarted }: Pr
               >
                 {t("manual_flight.back")}
               </button>
-              {warning ? (
-                <button
-                  type="button"
-                  className="button button--primary"
-                  onClick={() => void submit(true)}
-                  disabled={stage === "submitting"}
-                  style={{ background: "#fbbf24", borderColor: "#fbbf24", color: "#1f1f1f" }}
-                >
-                  {stage === "submitting" ? t("manual_flight.submitting") : t("manual_flight.start_anyway")}
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  className="button button--primary"
-                  onClick={() => void submit(false)}
-                  disabled={stage === "submitting"}
-                >
-                  {stage === "submitting" ? t("manual_flight.submitting") : t("manual_flight.submit")}
-                </button>
-              )}
+              {(() => {
+                // v0.5.42: Submit deaktivieren wenn eines der Pflichtfelder
+                // leer/ungültig ist — Block-Fuel, Flugzeit, ZFW. Verhindert
+                // dass der User mit leerer Form klickt und einen Backend-
+                // Validation-Roundtrip provoziert (der vorher als Lock-
+                // Konflikt verkleidet zurückkam).
+                const bf = parseFloat(blockFuelKg);
+                const ft = parseInt(flightTimeMin, 10);
+                const z = parseFloat(zfwKg);
+                const formInvalid =
+                  !Number.isFinite(bf) || bf <= 0 ||
+                  !Number.isFinite(ft) || ft <= 0 ||
+                  !Number.isFinite(z) || z <= 0;
+                const isSubmitting = stage === "submitting";
+                if (warning) {
+                  return (
+                    <button
+                      type="button"
+                      className="button button--primary"
+                      onClick={() => void submit(true)}
+                      disabled={isSubmitting || formInvalid}
+                      style={{ background: "#fbbf24", borderColor: "#fbbf24", color: "#1f1f1f" }}
+                    >
+                      {isSubmitting ? t("manual_flight.submitting") : t("manual_flight.start_anyway")}
+                    </button>
+                  );
+                }
+                return (
+                  <button
+                    type="button"
+                    className="button button--primary"
+                    onClick={() => void submit(false)}
+                    disabled={isSubmitting || formInvalid}
+                  >
+                    {isSubmitting ? t("manual_flight.submitting") : t("manual_flight.submit")}
+                  </button>
+                );
+              })()}
             </div>
           </div>
         )}

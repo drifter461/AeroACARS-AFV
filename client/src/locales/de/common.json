@@ -833,6 +833,9 @@
       "aircraft_not_available": "Flugzeug nicht verfügbar — Details siehe unten. Häufige Ursachen: das Flugzeug steht an einem anderen Flughafen, ist gerade „in use“ durch einen offenen PIREP, oder Ihr Rang hat keinen Zugriff. Aufräumen via phpVMS-Admin (PIREPs canceln + Aircraft-Standort prüfen).",
       "aircraft_mismatch": "Flugzeug-Typ passt nicht — Sie sitzen im falschen Flugzeug für diese Bid. Laden Sie den richtigen Typ im Simulator oder wählen Sie eine andere Bid.",
       "aircraft_mismatch_warning": "Flugzeug-Typ passt nicht zur Picker-Wahl — Sim hat einen anderen Typ geladen. Im VFR-Mode kannst du trotzdem starten (deine Wahl wird respektiert), aber Score-Limits gelten weiterhin für den gewählten Typ.",
+      "invalid_block_fuel": "Block-Fuel muss eine positive Zahl in kg sein.",
+      "invalid_flight_time": "Erwartete Flugzeit muss eine positive Zahl in Minuten sein.",
+      "invalid_zfw": "ZFW (Zero Fuel Weight) ist Pflicht — bitte den geplanten Leerflug-Wert (Aircraft + Pilot + Pax + Cargo, ohne Sprit) in kg eintragen.",
       "phpvms_error": "phpVMS hat den Flug abgelehnt — siehe Details."
     }
   },
@@ -886,7 +889,7 @@
       "alternate_help": "Ausweich-Flughafen.",
       "zfw": "ZFW (Zero Fuel Weight)",
       "zfw_placeholder": "z.B. 800",
-      "zfw_help": "Flugzeug + Pilot + Pax + Cargo (ohne Sprit)."
+      "zfw_help": "Pflicht. Flugzeug + Pilot + Pax + Cargo (ohne Sprit). Nötig für Loadsheet-Score und ZFW-Vergleich gegen Sim."
     }
   },
   "bid_card": {
