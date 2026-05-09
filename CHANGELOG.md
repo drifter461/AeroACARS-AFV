@@ -4,6 +4,68 @@ Alle nennenswerten Änderungen an AeroACARS. Format: lose an [Keep a Changelog](
 
 ---
 
+## [v0.5.41] — 2026-05-09
+
+🎯 **Touchdown-Score nutzt jetzt 50-Hz `vs_at_edge` (= Volanta-equivalent), nicht mehr MSFS-SimVar.**
+
+### Hintergrund
+
+Vergleichs-Test mit DLH 1404 EDDF→LDZA (Fenix A320 SL, MSFS 2024):
+
+| Tool | VS |
+|---|---|
+| Volanta | 66 fpm |
+| DLHv-Tool | 62 fpm |
+| AeroACARS v0.5.40 (msfs_simvar_latched) | **-101 fpm** ❌ |
+| AeroACARS v0.5.41 `vs_at_edge` | **-66 fpm** ✅ exakt Volanta |
+
+Der MSFS-SimVar `TOUCHDOWN_VELOCITY` liefert beim Fenix A320 SL deutlich pessimistischere Werte als die echte (smoothed) Sinkrate beim Bodenkontakt. Volanta und DLHv messen smoothed über 250–500 ms — exakt was unser v0.5.39-Patch im 50-Hz-Buffer berechnet (`vs_at_edge_fpm` = linear interpoliert auf den exakten on_ground-Edge zwischen zwei 30-ms-Samples).
+
+### Fix: Score-Recompute aus dem Buffer
+
+Nach dem 10-s-Sampler-Dump wird der Score mit den high-res-Werten neu berechnet:
+- `landing_peak_vs_fpm` ← `vs_at_edge_fpm` aus dem 50-Hz-Buffer
+- `landing_peak_g_force` ← `peak_g_post_500ms` (echter Gear-Compression-Spike, oft 50–100 ms NACH TD-Edge — der bisherige Wert traf den Free-Float-Frame VOR dem Spike)
+- `LandingScore::classify()` neu mit den Werten
+
+### Touchdown-MQTT-Event jetzt verzögert (10 s post-TD)
+
+`announce_landing_score` blockiert die Touchdown-Emission bis der Sampler fertig ist (`landing_score_finalized=true`). Vorher hätte der Live-Monitor den überholten msfs_simvar_latched-Wert gesehen, dann 10 s später müsste man das nochmal korrigieren — was Duplikate erzeugt. Jetzt: ein Touchdown-Event, mit den finalen Werten.
+
+**Fallback-Timeout: 12 s** — wenn der Sampler-Dump aus irgendeinem Grund nicht durchgeht (Sample-Loch, Sampler-Crash), wird der Touchdown trotzdem mit den vorhandenen Werten emittiert. Verhindert dass Touchdowns bei Buffer-Path-Fehlern nie gemeldet werden.
+
+### Flare-Score-Skala neu balanciert
+
+Vorherige Skala bestrafte Piloten die mit bereits niedriger VS reinkamen (= eigentlich gute Approaches) zu hart. „Reduktion >0 fpm" gab pauschal nur 20 Punkte.
+
+**Neu:** Endpoint-Score dominiert (= was kommt am TD raus, der eigentliche Touchdown-Indikator), Reduktion gibt Bonus-Punkte (= Flare hat eine harte Landung gerettet wenn aus hohem VS reduziert wurde):
+
+| `vs_at_flare_end` | Endpoint |
+|---|---|
+| > -75 fpm | 100 (butter) |
+| > -150 fpm | 80 (smooth) |
+| > -300 fpm | 60 (acceptable) |
+| > -500 fpm | 40 (firm) |
+| sonst | 20 |
+
+| `flare_reduction` | Bonus |
+|---|---|
+| > 400 fpm | +20 |
+| > 200 fpm | +15 |
+| > 100 fpm | +10 |
+| > 50 fpm | +5 |
+| sonst | 0 |
+
+Endpoint + Bonus, gecappt [0..100].
+
+**Beispiele:**
+- DLH 1404 (Peter, vs_end=-61, red=59): 100 + 5 = **100** ✓ (vorher 20)
+- B738 hypothetisch (vs_end=-100, red=600): 80 + 20 = **100** ✓
+- URO 913 (vs_end=-606 estimated, red=315): 20 + 15 = **35**
+- Bad Pilot (vs_end=-800, red=0): 20 + 0 = **20**
+
+---
+
 ## [v0.5.40] — 2026-05-09
 
 🐞 **Fix: Phase-FSM hing 9 h in Pushback** bei Aerosoft A340-600 Pro (URO 913 ZWWW→EHBK).

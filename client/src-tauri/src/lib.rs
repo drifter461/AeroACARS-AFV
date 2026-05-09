@@ -1698,6 +1698,17 @@ struct FlightStats {
     /// wurde. Sonst Fall-back auf old-school engines+gs Heuristik.
     saw_pushback_state_active: bool,
 
+    /// v0.5.41: True sobald die Score-Berechnung mit den high-res-50-Hz-
+    /// Daten aus dem Sampler-Buffer abgeschlossen ist (oder per Fallback-
+    /// Timeout 12 s post-TD ohne Buffer abgeschlossen wurde). Vorher
+    /// blockiert announce_landing_score die Touchdown-MQTT-Emission, damit
+    /// der Live-Monitor nicht den ueberholten msfs_simvar_latched-Wert
+    /// sieht der bei Fenix A320 oft 30-50% pessimistischer ist als die
+    /// physikalisch repraesentative vs_at_edge_fpm (Volanta-equivalent).
+    /// Beispiel DLH-1404 EDDF->LDZA Fenix A320 SL: msfs_simvar_latched
+    /// -101 fpm, vs_at_edge -66 fpm = exakt Volanta.
+    landing_score_finalized: bool,
+
     /// v0.5.39: Berechnete Forensik-Analyse aus dem TouchdownWindow-Buffer.
     /// Sampler schreibt sie hier rein wenn der Buffer 10s post-TD gedumpt
     /// wird; der Touchdown-Payload-Builder liest sie aus und packt sie ins
@@ -7632,32 +7643,53 @@ fn compute_landing_analysis(
         _ => None,
     };
 
-    // Score: 0..100 basierend auf Reduktion + finalem VS-Wert
-    // - 100: Reduktion >400 fpm UND finaler VS >-150 fpm (großer Flare, sanft)
-    // -  80: Reduktion >300 fpm
-    // -  60: Reduktion >200 fpm
-    // -  40: Reduktion >100 fpm
-    // -  20: Reduktion >0 fpm
-    // -   0: keine Reduktion oder Sinkrate stieg sogar (= keine Flare)
-    let (flare_score, flare_detected) = match flare_reduction {
-        Some(red) => {
+    // v0.5.41: rebalanced — Endpoint-Score dominiert (was kommt am TD raus),
+    // Reduktion gibt Bonus-Punkte (= rettete eine harte Landung wenn aus
+    // hohem VS reduziert wurde). Vorherige Skala bestrafte Piloten die
+    // schon mit niedriger VS reinkamen (= eigentlich gute Approaches) zu
+    // hart, weil "Reduktion >0 fpm" pauschal nur 20 Punkte gab.
+    //
+    // Endpoint-Score (= VS unmittelbar vor TD, der eigentliche Touchdown-
+    // Indikator):
+    //   > -75 fpm:       100 (butter)
+    //   > -150 fpm:       80 (smooth)
+    //   > -300 fpm:       60 (acceptable)
+    //   > -500 fpm:       40 (firm)
+    //   sonst:            20 (hard/severe)
+    //
+    // Reduktions-Bonus (= Flare-Manöver hat eine harte Landung gerettet,
+    // der Pilot hat gepulled):
+    //   > 400 fpm:       +20
+    //   > 200 fpm:       +15
+    //   > 100 fpm:       +10
+    //   >  50 fpm:        +5
+    //   sonst:             0
+    //
+    // Endpoint + Bonus, gecappt [0..100].
+    //
+    // Beispiele:
+    //   - DLH 1404 (Peter, Fenix A320 SL): vs_end=-61, red=59 → 100+5 = 100 ✓
+    //   - Hypothetisch B738 perfect: vs_end=-100, red=600 → 80+20 = 100 ✓
+    //   - URO 913 (Aerosoft A346): vs_end=-606 (estimated), red=315 → 20+15 = 35
+    //   - Bad Pilot: vs_end=-800, red=0 → 20+0 = 20
+    let (flare_score, flare_detected) = match (flare_reduction, vs_at_flare_end) {
+        (Some(red), Some(final_vs)) => {
             let red = red as f64;
-            let final_vs = vs_at_flare_end.unwrap_or(0.0) as f64;
-            let base: f64 = if red > 400.0 { 100.0 }
-                else if red > 300.0 { 80.0 }
-                else if red > 200.0 { 60.0 }
-                else if red > 100.0 { 40.0 }
-                else if red > 0.0 { 20.0 }
+            let final_vs = final_vs as f64;
+            let endpoint: f64 = if final_vs > -75.0 { 100.0 }
+                else if final_vs > -150.0 { 80.0 }
+                else if final_vs > -300.0 { 60.0 }
+                else if final_vs > -500.0 { 40.0 }
+                else { 20.0 };
+            let bonus: f64 = if red > 400.0 { 20.0 }
+                else if red > 200.0 { 15.0 }
+                else if red > 100.0 { 10.0 }
+                else if red > 50.0 { 5.0 }
                 else { 0.0 };
-            // Bonus für sanften Final-VS, Malus für noch steile Sinkrate am Ende
-            let adj: f64 = if final_vs > -150.0 { 0.0 }
-                else if final_vs > -300.0 { -10.0 }
-                else if final_vs > -500.0 { -20.0 }
-                else { -30.0 };
-            let score = (base + adj).max(0.0).min(100.0) as i32;
+            let score = (endpoint + bonus).max(0.0).min(100.0) as i32;
             (Some(score), Some(red > 50.0))
         }
-        None => (None, None),
+        _ => (None, None),
     };
 
     // --- Bounce-Profile ---
@@ -8060,6 +8092,42 @@ fn spawn_touchdown_sampler(app: AppHandle, flight: Arc<ActiveFlight>) {
                         analysis: analysis.clone(),
                     },
                 );
+
+                // v0.5.41: Score mit den high-res Werten neu berechnen.
+                // vs_at_edge (linear interpoliert auf den exakten on_ground-
+                // Edge zwischen zwei 20-30 ms Samples) ist physikalisch
+                // repraesentativer als der MSFS-SimVar-Latched-Wert. Beim
+                // DLH-1404-Test: SimVar -101 fpm, vs_at_edge -66 fpm =
+                // exakt der Volanta-Wert. Der Score wird dann durch die
+                // Standard-Klassifizierung neu bestimmt + announce_landing_
+                // score laesst den Streamer-Tick die touchdown_complete-
+                // Emission durchstellen.
+                let vs_edge = analysis.get("vs_at_edge_fpm").and_then(|v| v.as_f64()).map(|x| x as f32);
+                let pg_500 = analysis.get("peak_g_post_500ms").and_then(|v| v.as_f64()).map(|x| x as f32);
+                {
+                    let mut s = flight.stats.lock().expect("flight stats");
+                    if let Some(v) = vs_edge {
+                        s.landing_peak_vs_fpm = Some(v);
+                        s.landing_rate_fpm = Some(v);
+                    }
+                    if let Some(g) = pg_500 {
+                        // Nur ueberschreiben wenn der Buffer-Peak hoeher ist als
+                        // der bisher gemessene (= echter Gear-Compression-Spike).
+                        let cur = s.landing_peak_g_force.unwrap_or(0.0);
+                        if g > cur { s.landing_peak_g_force = Some(g); }
+                    }
+                    // Re-Klassifizierung mit den neuen Werten
+                    let peak_vs = s.landing_peak_vs_fpm.unwrap_or(0.0);
+                    let peak_g = s.landing_peak_g_force.unwrap_or(0.0);
+                    let new_score = LandingScore::classify(peak_vs, peak_g, s.bounce_count);
+                    s.landing_score = Some(new_score);
+                    s.landing_score_finalized = true;
+                    // Reset announcement-flag damit announce_landing_score den
+                    // Block jetzt durchstellt — vorher hat es wegen
+                    // landing_score_finalized=false zurueckgehalten.
+                    s.landing_score_announced = false;
+                }
+
                 let flare_score = analysis.get("flare_quality_score")
                     .and_then(|v| v.as_i64()).unwrap_or(-1);
                 let smooth_500 = analysis.get("vs_smoothed_500ms_fpm")
@@ -8070,7 +8138,9 @@ fn spawn_touchdown_sampler(app: AppHandle, flight: Arc<ActiveFlight>) {
                     window_ms = TOUCHDOWN_POST_WINDOW_MS,
                     flare_score = flare_score,
                     smooth_500ms_fpm = smooth_500,
-                    "touchdown window + analysis flushed"
+                    vs_at_edge_fpm = vs_edge,
+                    peak_g_post_500ms = pg_500,
+                    "touchdown window + analysis flushed; score recomputed from buffer"
                 );
             }
         }
@@ -11971,11 +12041,37 @@ enum MetarKind {
 /// the touchdown summary into `POST /pireps/{id}/acars/logs` for the
 /// PIREP detail page. Subsequent ticks return None.
 fn announce_landing_score(app: &AppHandle, flight: &ActiveFlight) -> Option<String> {
-    let stats = flight.stats.lock().expect("flight stats");
+    let mut stats = flight.stats.lock().expect("flight stats");
     if stats.landing_score_announced {
         return None;
     }
     let score = stats.landing_score?;
+
+    // v0.5.41: Auf Sampler-Finalisierung warten (= Buffer wurde 10 s post-TD
+    // gedumpt + Score mit vs_at_edge neu berechnet). Verhindert dass der
+    // Live-Monitor den ueberholten msfs_simvar_latched-Wert sieht.
+    // Fallback-Timeout: 12 s post-TD ohne Finalisierung → trotzdem
+    // emitten mit den vorhandenen Werten (= Buffer war evtl. leer wegen
+    // Sample-Luecke, oder sampler ist abgestuerzt). Verhindert dass der
+    // Touchdown bei einem fehlerhaften Buffer-Path nie gemeldet wird.
+    if !stats.landing_score_finalized {
+        if let Some(td_at) = stats.sampler_touchdown_at {
+            let elapsed_ms = (Utc::now() - td_at).num_milliseconds();
+            const FINALIZATION_TIMEOUT_MS: i64 = 12_000;
+            if elapsed_ms < FINALIZATION_TIMEOUT_MS {
+                return None; // weiter warten
+            }
+            // Timeout — trotzdem freigeben, mit Hinweis im Trace
+            tracing::warn!(
+                pirep_id = %flight.pirep_id,
+                elapsed_ms,
+                "score finalization timeout — emitting with sampler-only values (buffer dump may have failed)"
+            );
+            stats.landing_score_finalized = true;
+        }
+        // Wenn sampler_touchdown_at None ist (= Sampler hat keinen Edge
+        // detektiert, FSM-Pfad scored stattdessen) → sofort freigeben.
+    }
     let peak_vs = stats.landing_peak_vs_fpm.unwrap_or(0.0);
     let peak_g = stats.landing_peak_g_force.unwrap_or(0.0);
     let bounces = stats.bounce_count;
