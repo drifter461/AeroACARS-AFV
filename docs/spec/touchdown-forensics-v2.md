@@ -1,11 +1,19 @@
 # Touchdown-Forensik v2 — Architektur-Spec für v0.7.0
 
-**Status:** Draft v2.2 (post zweitem VA-Owner Review) — to be approved before implementation
+**Status:** Draft v2.3 (post drittem VA-Owner Review — fast approved) — final review pending
 **Cutoff:** Forward-only — gilt für Flüge mit `forensics_version: 2` Marker (rolled out ab dem v0.7.0-Release).
 
 ---
 
-## Changelog v2.0 → v2.1 → v2.2
+## Changelog v2.0 → v2.1 → v2.2 → v2.3
+
+### v2.3 (3 P2/P3 Konsistenz-Korrekturen aus drittem Review)
+
+| # | Issue | Fix | Sektion |
+|---|---|---|---|
+| **P2.3-A** | PTO 705 Beispiel sagte „B1+B2+B3+B4 all pass", aber B2 verlangt ≥500ms und 307ms ist FAIL. Validator-Implementierer würde verwirrt | PTO 705 Beispiel zeigt jetzt explizit B2=FAIL, andere PASS, 3/4 → VALIDATED via Voting. Confidence auf Medium statt High | 6.3 |
+| **P2.3-B** | load_peak_window war [contact, contact+500ms], aber DAH-Beispiel nannte 1635kN @ 5.7s nach contact (= ausserhalb window) | Trennung: `initial_load_peak` (im 500ms window) + `episode_load_peak` (ganze Episode). DAH-Beispiel zeigt beide klar | 5.1, 6.4 |
+| **P3.3** | `partial_cmp(...).unwrap()` Pseudocode kann bei NaN paniken | NaN-safe via `is_finite()` filter + `total_cmp()` statt `partial_cmp().unwrap()` | 5.2 |
 
 ### v2.2 (3 P1/P2 Punkte aus zweitem Review + Nebenpunkte)
 
@@ -304,17 +312,24 @@ Beispiel CFG 785:
 
 ## 5. Layer 3: VS-Calculation am IMPACT-Frame
 
-### 5.1 Drei separate Frames im Window nach contact
+### 5.1 Frames im Window nach contact (klare Trennung)
 
 ```
-contact_frame:    erste Force-Threshold-Überschreitung (X-Plane)
-                  ODER  erste on_ground=True die A1 (oder B-Voting) bestanden hat
-impact_frame:     min(vs_fpm) im Zeit-Window [contact_at - 250ms, contact_at + 100ms]
-                  → das ist die echte „raw härteste Sink-Rate beim Aufsetzen"
-load_peak_frame:  max(gear_force_n bei X-Plane, g_force bei MSFS) im Window
-                  [contact_at, contact_at + 500ms]
-                  → nur für G-Forensik & Bounce-Detection, NICHT für VS
+contact_frame:        erste Force-Threshold-Überschreitung (X-Plane)
+                      ODER  erste on_ground=True die A1 (oder B-Voting) bestanden hat
+impact_frame:         min(vs_fpm) im Zeit-Window [contact_at - 250ms, contact_at + 100ms]
+                      → das ist die echte „raw härteste Sink-Rate beim Aufsetzen"
+initial_load_peak:    max(gear_force_n bei X-Plane, g_force bei MSFS) im engen Window
+                      [contact_at, contact_at + 500ms]
+                      → initial impact strength (= Energie-Übertragung beim Aufprall)
+episode_load_peak:    max(gear_force_n bei X-Plane, g_force bei MSFS) ueber die GANZE
+                      Episode (incl. rollout, brake-application)
+                      → nur Forensik. Bei DAH 3181 = 1635 kN bei 07:54:08
+                        (= 5.7 sec NACH contact, im rollout)
 ```
+
+**Score-Klassifizierung** nutzt `peak_g` aus `initial_load_peak` (= initial impact),
+nicht episode_load_peak (= mass-settle / brake-application).
 
 **Klarstellung Frame-Semantik (DAH 3181 als Beispiel):**
 
@@ -335,12 +350,13 @@ fn compute_landing_vs(
     samples: &[Sample],
 ) -> Result<LandingRateResult, RejectionReason> {
     // impact_frame = min vs im Time-Window
+    // NaN-sicher: nur finite vs_fpm Samples + total_cmp als fallback
     let impact_frame = samples.iter()
         .filter(|s| {
             let dt_ms = (s.at - contact_at).num_milliseconds();
-            dt_ms >= -250 && dt_ms <= 100
+            dt_ms >= -250 && dt_ms <= 100 && s.vs_fpm.is_finite()
         })
-        .min_by(|a, b| a.vs_fpm.partial_cmp(&b.vs_fpm).unwrap())
+        .min_by(|a, b| a.vs_fpm.total_cmp(&b.vs_fpm))
         .ok_or(RejectionReason::EmptyWindow)?;
 
     let vs_at_impact = impact_frame.vs_fpm;
@@ -482,18 +498,26 @@ Eine Episode wird `EpisodeClass::FinalLanding` wenn:
 
 ```
 Episode 0:
-  aircraft_state_at_contact: { total_weight=...bullet... , sim=Msfs2024 }
-  false_edges: []  (erster on_ground edge war direkt valid)
+  aircraft_state_at_contact: { total_weight=..., sim=Msfs2024 }
+  false_edges: []  (erster on_ground edge war direkt validated)
   contact: 07:54:30.020
     - vs_at_impact = -182 fpm
-    - sustained ground 307ms
-    - confidence: High (B1+B2+B3+B4 all pass)
+    - sustained ground 307ms (= UNTER B2-Threshold von 500ms!)
+    - validation:
+        B1 (g_force-spike) PASS    (peak g = 1.254 > 1.05)
+        B2 (sustained >=500ms) FAIL (307ms)
+        B3 (agl<5ft >=1000ms) PASS
+        B4 (vs negative at impact) PASS  (-182 < -10)
+        → 3/4 PASS → VALIDATED via Voting-Modell
+    - confidence: Medium (B2 fail = nicht-sustained, deutet auf
+      T&G/Bounce hin, was ja auch der Fall ist)
   low_level_touches: [
     { at: 07:54:32.631, vs_at_impact = -61 fpm, sustained 339ms, agl_max=2.97 }
     // (Pilot hat zweiten leichten Touch im Float bevor Climb-out)
   ]
   settle: None  (aircraft hob danach wieder ab)
-  load_peak: ...
+  initial_load_peak (im 500ms window): siehe Forensik
+  episode_load_peak: max(gear_force) ueber ganze Episode (X-Plane only)
   hardest_impact_vs_fpm: -182  (contact härter als low_level_touch)
   classification: TouchAndGo  (climb-out auf 1560ft AGL nach 30s+)
 
@@ -527,7 +551,11 @@ Episode 0:
     { at: 07:54:04.098, vs_at_impact ≈ -49 fpm, sustained 200ms+ }
   ]
   settle: 07:54:30+, rollout
-  load_peak: 1635171 N @ 07:54:08
+  initial_load_peak (im 500ms window nach contact):
+    ~ 800-1200 kN (geschätzt — Streamer-stream nur 3s cadence,
+    erster Sample mit gear_force = 827171 N bei 07:54:02.402)
+  episode_load_peak: 1635171 N @ 07:54:08
+    (= 5.7 sec NACH contact, im rollout — Forensik-only)
   hardest_impact_vs_fpm: -414  (contact härter als low_level_touch)
   classification: FinalLanding
 
@@ -763,4 +791,4 @@ JSONL hat trotzdem alle Samples für spätere Forensik.
 
 ---
 
-**Ende Spec v2.2.** Bitte freigeben oder weitere Einwände nennen.
+**Ende Spec v2.3.** Status: fast approved (drittes Review hat keine Architekturblocker mehr gefunden, nur 3 Konsistenz-Korrekturen die jetzt eingearbeitet sind). Bitte finaler Approve.
