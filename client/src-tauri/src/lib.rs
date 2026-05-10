@@ -6545,6 +6545,71 @@ pub fn should_reset_holding_pending(
     next_phase != prev_phase && next_phase != FlightPhase::Holding
 }
 
+// ─── v0.7.6 P1-3: Runway-Geometry-Trust ───────────────────────────────
+//
+// Spec docs/spec/v0.7.6-landing-payload-consistency.md §3 P1-3.
+//
+// Real-Beleg fuer den Bug: GSG303 v0.7.5 (ldoGzaxbb9aNYE9n)
+//   - arr_airport=OR66 aber runway_match_icao=K5S9 (3.5 km daneben)
+//   - landing_float_distance_m=-613 (Touchdown 613 m vor Threshold)
+//   - Score behandelt das trotzdem als "TD Zone 1, excellent stop"
+//
+// Trust-Check: ICAO muss matchen, Centerline-Offset darf max 200 m sein,
+// Float-Distance darf max -100 m sein. Werte sind hardcoded (v1.2).
+
+/// Maximale Centerline-Distanz (m) vom Touchdown-Punkt zur erkannten
+/// Runway-Mittellinie. Daruber: vermutlich falscher Runway-Match.
+pub const RUNWAY_TRUST_MAX_CENTERLINE_OFFSET_M: f32 = 200.0;
+
+/// Minimum-Float-Distance (m). Werte unter -100 m bedeuten der
+/// Touchdown war so weit vor der Threshold dass die Runway-Geometrie
+/// nicht mehr stimmen kann. Liegt typische TDZ-Marker-Versetzungen
+/// (e.g. EDDM 26L) komfortabel im trusted-Bereich.
+pub const RUNWAY_TRUST_MIN_FLOAT_DISTANCE_M: f32 = -100.0;
+
+/// v0.7.6 P1-3: Pure-function Trust-Check ohne FlightStats-Abhaengigkeit
+/// damit die Logik 1:1 testbar ist. Returns (trusted, reason).
+///
+/// Reasons (in Pruefungs-Reihenfolge):
+///   "icao_mismatch"             — Match-ICAO != arr/divert
+///   "centerline_offset_too_large" — > 200 m
+///   "negative_float_distance"   — < -100 m
+///   None                         — alle Checks pass
+pub fn runway_geometry_trust_check(
+    matched_icao: Option<&str>,
+    arr_airport: &str,
+    divert_to: Option<&str>,
+    centerline_offset_m: Option<f32>,
+    float_distance_m: Option<f32>,
+) -> (bool, Option<&'static str>) {
+    // ICAO-Match: Match-Airport muss arr_airport sein ODER divert_to sein
+    let icao_ok = match matched_icao {
+        Some(matched) => {
+            !matched.is_empty()
+                && (matched == arr_airport || Some(matched) == divert_to)
+        }
+        None => false,
+    };
+    if !icao_ok {
+        return (false, Some("icao_mismatch"));
+    }
+    // Centerline-Offset (None ist OK — bedeutet "kein Wert verfuegbar",
+    // nicht "Wert zu gross"; wir bestrafen nicht das Fehlen einer
+    // optionalen Diagnostik).
+    if let Some(offset) = centerline_offset_m {
+        if offset.abs() > RUNWAY_TRUST_MAX_CENTERLINE_OFFSET_M {
+            return (false, Some("centerline_offset_too_large"));
+        }
+    }
+    // Float-Distance (None ist OK — siehe Centerline-Begruendung)
+    if let Some(float) = float_distance_m {
+        if float < RUNWAY_TRUST_MIN_FLOAT_DISTANCE_M {
+            return (false, Some("negative_float_distance"));
+        }
+    }
+    (true, None)
+}
+
 /// v0.7.1 Helper: actual_trip_burn = takeoff_fuel - landing_fuel
 /// (1:1 wie in build_landing_record line 6527-6530). Damit sub_scores
 /// + aggregate_master_score den gleichen Wert nutzen.
@@ -8084,6 +8149,14 @@ async fn flight_end(
                             block_fuel_kg: stats.block_fuel_kg,
                             takeoff_fuel_kg: stats.takeoff_fuel_kg,
                             landing_fuel_kg: stats.landing_fuel_kg,
+                            // v0.7.6 P1-1: Trip-Burn als SSoT fuer OFP-Vergleich.
+                            // `actual_burn` ist bereits oben (~Zeile 8045) via
+                            // actual_burn_for_record(&stats) berechnet =
+                            // takeoff_fuel_kg - landing_fuel_kg, mit Plausibilitaets-
+                            // Filtern. Web/Monitor/Discord lesen ab v0.7.6
+                            // bevorzugt dieses Feld; Fallback auf takeoff-landing
+                            // im Web fuer alte v0.7.5-PIREPs ohne dieses Feld.
+                            actual_trip_burn_kg: actual_burn,
                             takeoff_weight_kg: stats.takeoff_weight_kg.map(|w| w as f32),
                             landing_weight_kg: stats.landing_weight_kg.map(|w| w as f32),
                             planned_tow_kg: stats.planned_tow_kg,
@@ -8148,6 +8221,37 @@ async fn flight_end(
                             // P1.5 + Phase 2 (F1/F2/F3) + P1.3-Fix:
                             // bereits oben berechnet, hier nur durchreichen.
                             sub_scores: payload_sub_scores,
+                            // v0.7.6 P1-3: Runway-Geometry-Trust. Pure-
+                            // function Check + reason-string ins Payload.
+                            // Web/Monitor blendet TD-Zone und Float-
+                            // Distance bei trusted=false aus. Spec docs/
+                            // spec/v0.7.6-landing-payload-consistency.md.
+                            runway_geometry_trusted: {
+                                let (trusted, _) = runway_geometry_trust_check(
+                                    stats.runway_match.as_ref()
+                                        .map(|m| m.airport_ident.as_str()),
+                                    &flight.arr_airport,
+                                    stats.divert_hint.as_ref()
+                                        .and_then(|h| h.actual_icao.as_deref()),
+                                    stats.runway_match.as_ref()
+                                        .map(|m| m.centerline_distance_m as f32),
+                                    stats.landing_float_distance_m,
+                                );
+                                Some(trusted)
+                            },
+                            runway_geometry_reason: {
+                                let (_, reason) = runway_geometry_trust_check(
+                                    stats.runway_match.as_ref()
+                                        .map(|m| m.airport_ident.as_str()),
+                                    &flight.arr_airport,
+                                    stats.divert_hint.as_ref()
+                                        .and_then(|h| h.actual_icao.as_deref()),
+                                    stats.runway_match.as_ref()
+                                        .map(|m| m.centerline_distance_m as f32),
+                                    stats.landing_float_distance_m,
+                                );
+                                reason.map(String::from)
+                            },
                         }
                     };
                     // v0.5.34: PIREP-Forensik ins JSONL — Block/Flight-Time,
@@ -9167,7 +9271,14 @@ fn compute_landing_analysis(
 
     // --- Bounce-Profile ---
     // Post-TD: zähle on_ground=False Excursionen mit AGL-Höhe.
-    let mut bounces = 0_u32;
+    //
+    // v0.7.6 P1-2: Zwei Counts werden parallel gefuehrt damit Forensik
+    // (kleine Hopser sichtbar) und Score (nur "echte" Bounces bestraft)
+    // dieselbe AGL-Datenbasis aber unterschiedliche Schwellen nutzen.
+    // Konstanten in `touchdown_v2.rs`. Spec docs/spec/v0.7.6-landing-
+    // payload-consistency.md §3 P1-2.
+    let mut forensic_bounces = 0_u32;
+    let mut scored_bounces = 0_u32;
     let mut bounce_max_agl: f32 = 0.0;
     let mut in_bounce = false;
     let mut current_bounce_max: f32 = 0.0;
@@ -9182,13 +9293,14 @@ fn compute_landing_analysis(
                 current_bounce_max = s.agl_ft;
             }
         } else if in_bounce {
-            // Nur als Bounce zählen wenn die Excursion >5 ft AGL erreichte
-            // (sonst Mikro-Hüpfer durch Sim-Float-Noise)
-            if current_bounce_max >= 5.0 {
-                bounces += 1;
+            if current_bounce_max >= touchdown_v2::BOUNCE_FORENSIC_MIN_AGL_FT {
+                forensic_bounces += 1;
                 if current_bounce_max > bounce_max_agl {
                     bounce_max_agl = current_bounce_max;
                 }
+            }
+            if current_bounce_max >= touchdown_v2::BOUNCE_SCORED_MIN_AGL_FT {
+                scored_bounces += 1;
             }
             in_bounce = false;
             current_bounce_max = 0.0;
@@ -9212,7 +9324,12 @@ fn compute_landing_analysis(
         "flare_dvs_dt_fpm_per_sec": flare_dvs_dt,
         "flare_quality_score": flare_score,
         "flare_detected": flare_detected,
-        "bounce_count": bounces,
+        // v0.7.6 P1-2: bounce_count BLEIBT auf forensic count fuer
+        // Backward-Compat (alte Reader/Replays). Neuer Konsument soll
+        // explizit forensic_bounce_count oder scored_bounce_count lesen.
+        "bounce_count": forensic_bounces,
+        "forensic_bounce_count": forensic_bounces,
+        "scored_bounce_count": scored_bounces,
         "bounce_max_agl_ft": if bounce_max_agl > 0.0 { Some(bounce_max_agl) } else { None },
         "sample_count": samples.len(),
         "pre_edge_sample_count": pre_count,
@@ -9866,13 +9983,32 @@ fn spawn_touchdown_sampler(app: AppHandle, flight: Arc<ActiveFlight>) {
                     // Re-Klassifizierung mit den neuen Werten
                     // BUG #6 fix: bounce_count from analysis (50Hz Sampler-Wahrheit),
                     // nicht vom Streamer-side s.bounce_count counter.
-                    let analysis_bounce: u8 = analysis.get("bounce_count")
+                    //
+                    // v0.7.6 P1-2: `scored_bounce_count` aus dem Analysis-JSON
+                    // ist die SSoT fuer den Sub-Score (filtert auf
+                    // BOUNCE_SCORED_MIN_AGL_FT = 15 ft). Vorher hat das hier
+                    // nur die Legacy-Klassifikation (LandingScore::classify)
+                    // mit dem 5-ft-Forensic-Count gefuettert UND `s.bounce_count`
+                    // wurde nicht zurueckgeschrieben → der spaetere PIREP-Build
+                    // las den Streamer-Count (oft 0 weil der erst >35 ft armed)
+                    // und der Score-Crate-Sub-Score `bounces` zeigte 100 obwohl
+                    // die Forensik einen Hopser gesehen hatte (SAS9987 v0.7.5).
+                    // Fix: scored_bounce_count zurueck in s.bounce_count damit
+                    // das Sub-Score-Aggregat konsistent ist mit der Forensik.
+                    // Spec docs/spec/v0.7.6-landing-payload-consistency.md §3 P1-2.
+                    let scored_bounce: u8 = analysis.get("scored_bounce_count")
                         .and_then(|v| v.as_u64())
                         .map(|n| n.min(u8::MAX as u64) as u8)
+                        // Fallback fuer alte Analysis-JSONs ohne neues Feld
+                        // (Replays, JSONL-Recovery): Legacy bounce_count.
+                        .or_else(|| analysis.get("bounce_count")
+                            .and_then(|v| v.as_u64())
+                            .map(|n| n.min(u8::MAX as u64) as u8))
                         .unwrap_or(s.bounce_count);
+                    s.bounce_count = scored_bounce;
                     let peak_vs = s.landing_peak_vs_fpm.unwrap_or(0.0);
                     let peak_g = s.landing_peak_g_force.unwrap_or(0.0);
-                    let new_score = LandingScore::classify(peak_vs, peak_g, analysis_bounce);
+                    let new_score = LandingScore::classify(peak_vs, peak_g, scored_bounce);
                     s.landing_score = Some(new_score);
                     s.landing_score_finalized = true;
                     // Reset announcement-flag damit announce_landing_score den
@@ -10366,8 +10502,27 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                             approach_used_hat: Some(stats.approach_used_hat),
                             // v0.5.26
                             landing_wing_strike_severity_pct: stats.landing_wing_strike_severity_pct,
+                            // v0.7.6 P1-3: Raw-Wert bleibt im Payload
+                            // (interne Diagnostik), Web blendet bei
+                            // runway_geometry_trusted=false aus.
                             landing_float_distance_m: stats.landing_float_distance_m,
-                            landing_touchdown_zone: stats.landing_touchdown_zone,
+                            // v0.7.6 P1-3: Bei untrusted Runway-Geometrie
+                            // auf None setzen (kein "TD Zone 1" auf Basis
+                            // einer falschen Runway-Geometrie wie GSG303
+                            // v0.7.5: K5S9 statt OR66, 3.5 km Centerline-
+                            // Offset). Spec docs/spec/v0.7.6-landing-
+                            // payload-consistency.md §3 P1-3.
+                            landing_touchdown_zone: {
+                                let (trusted, _) = runway_geometry_trust_check(
+                                    rwy_match.map(|m| m.airport_ident.as_str()),
+                                    &flight.arr_airport,
+                                    stats.divert_hint.as_ref()
+                                        .and_then(|h| h.actual_icao.as_deref()),
+                                    rwy_match.map(|m| m.centerline_distance_m as f32),
+                                    stats.landing_float_distance_m,
+                                );
+                                if trusted { stats.landing_touchdown_zone } else { None }
+                            },
                             landing_vref_deviation_kt: stats.landing_vref_deviation_kt,
                             landing_vref_source: stats.landing_vref_source.map(|s| s.to_string()),
                             approach_stable_at_da: stats.approach_stable_at_da,
@@ -10383,6 +10538,21 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                             // planned_burn × 100. Mirrors the client's
                             // `LandingRecord.fuel_efficiency_pct`.
                             // actual_burn = block_fuel − landing_fuel.
+                            //
+                            // **@deprecated since v0.7.6** — Spec docs/spec/
+                            // v0.7.6-landing-payload-consistency.md §4 P2-3.
+                            // Berechnungs-Basis weicht ab vom v0.7.1
+                            // Sub-Score (`actual_trip_burn = takeoff -
+                            // landing`, ohne Taxi-Out). Resultat: zwei
+                            // verschiedene Prozent-Werte fuers gleiche
+                            // Konzept im selben Payload (SAS9987 v0.7.5:
+                            // -2.28% hier, -5.0% im sub_scores).
+                            // Single Source of Truth ist `sub_scores[].fuel`.
+                            // Web rendert `fuel_efficiency_pct` ab v0.7.6
+                            // nicht mehr. Feld bleibt im Payload fuer
+                            // Backward-Compat (externe Discord-Embeds /
+                            // Custom-Dashboards), Entfernung in spaeterer
+                            // Major-Version.
                             fuel_efficiency_pct: match (
                                 stats.block_fuel_kg,
                                 stats.landing_fuel_kg,
@@ -10417,6 +10587,34 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                             flare_detected: ana_bool(&stats.landing_analysis, "flare_detected"),
                             bounce_max_agl_ft: ana_f32(&stats.landing_analysis, "bounce_max_agl_ft"),
                             forensic_sample_count: ana_u32(&stats.landing_analysis, "sample_count"),
+                            // v0.7.6 P1-3: Trust-Status auch in den
+                            // touchdown_complete-Payload damit aeroacars-
+                            // live (Touchdown-Tab) und ggf. Pilot-Client-
+                            // Replay-View den Hinweis-Pill rendern koennen.
+                            // Pure-function Check, gleiche Inputs wie bei
+                            // landing_touchdown_zone (siehe oben).
+                            runway_geometry_trusted: {
+                                let (trusted, _) = runway_geometry_trust_check(
+                                    rwy_match.map(|m| m.airport_ident.as_str()),
+                                    &flight.arr_airport,
+                                    stats.divert_hint.as_ref()
+                                        .and_then(|h| h.actual_icao.as_deref()),
+                                    rwy_match.map(|m| m.centerline_distance_m as f32),
+                                    stats.landing_float_distance_m,
+                                );
+                                Some(trusted)
+                            },
+                            runway_geometry_reason: {
+                                let (_, reason) = runway_geometry_trust_check(
+                                    rwy_match.map(|m| m.airport_ident.as_str()),
+                                    &flight.arr_airport,
+                                    stats.divert_hint.as_ref()
+                                        .and_then(|h| h.actual_icao.as_deref()),
+                                    rwy_match.map(|m| m.centerline_distance_m as f32),
+                                    stats.landing_float_distance_m,
+                                );
+                                reason.map(String::from)
+                            },
                         }
                     })
                 };
@@ -17326,6 +17524,220 @@ mod aircraft_alias_tests {
         // Sanity: was matchen soll, matched weiter
         assert!(aircraft_types_match("A359", "A350-900"));
         assert!(aircraft_types_match("A35K", "A350-1000"));
+    }
+}
+
+// ─── v0.7.6 Landing Payload Consistency — Unit-Tests ─────────────────────
+//
+// Spec: docs/spec/v0.7.6-landing-payload-consistency.md
+//
+// Drei Themen:
+//   1. Runway-Geometry-Trust-Check (pure function)
+//   2. Bounce-Threshold-Konstanten (touchdown_v2)
+//   3. Sanity-Check dass die Konstanten nicht versehentlich vertauscht werden
+
+#[cfg(test)]
+mod v0_7_6_payload_consistency_tests {
+    use super::*;
+
+    // ─── Runway-Geometry-Trust ──────────────────────────────────────────
+
+    #[test]
+    fn runway_trust_passes_for_clean_match() {
+        // ENSB Match wie in SAS9987 v0.7.5: matched_icao=arr, kleine
+        // Centerline-Distanz, Float-Distanz im normalen Bereich.
+        let (trusted, reason) = runway_geometry_trust_check(
+            Some("ENSB"),
+            "ENSB",
+            None,
+            Some(2.0),    // 2 m centerline offset
+            Some(320.0),  // 320 m past threshold
+        );
+        assert!(trusted);
+        assert!(reason.is_none());
+    }
+
+    #[test]
+    fn runway_trust_blocks_on_icao_mismatch() {
+        // GSG303-Klasse: arr=OR66 aber Match war K5S9 (3.5 km daneben)
+        let (trusted, reason) = runway_geometry_trust_check(
+            Some("K5S9"),
+            "OR66",
+            None,
+            Some(3464.0),
+            Some(-613.0),
+        );
+        assert!(!trusted);
+        // ICAO-Check kommt zuerst
+        assert_eq!(reason, Some("icao_mismatch"));
+    }
+
+    #[test]
+    fn runway_trust_accepts_divert_icao() {
+        // Divert-Szenario: arr war LFPG, divert nach EDDM, Match=EDDM.
+        // Match darf entweder arr ODER divert_to sein.
+        let (trusted, reason) = runway_geometry_trust_check(
+            Some("EDDM"),
+            "LFPG",
+            Some("EDDM"),
+            Some(15.0),
+            Some(450.0),
+        );
+        assert!(trusted);
+        assert!(reason.is_none());
+    }
+
+    #[test]
+    fn runway_trust_blocks_on_centerline_offset_too_large() {
+        // ICAO matched aber Centerline-Offset > 200 m → vermutlich
+        // falsche Runway-Auswahl auf demselben Flughafen (z.B. parallel
+        // runway 26L statt 26R, 200m Achsen-Abstand).
+        let (trusted, reason) = runway_geometry_trust_check(
+            Some("EDDM"),
+            "EDDM",
+            None,
+            Some(250.0), // > 200 m
+            Some(400.0),
+        );
+        assert!(!trusted);
+        assert_eq!(reason, Some("centerline_offset_too_large"));
+    }
+
+    #[test]
+    fn runway_trust_at_centerline_threshold_boundary() {
+        // 200.0 m exakt: <= MAX → trusted
+        let (trusted, _) = runway_geometry_trust_check(
+            Some("EDDM"),
+            "EDDM",
+            None,
+            Some(200.0),
+            Some(400.0),
+        );
+        assert!(trusted, "200 m exakt darf noch trusted sein");
+
+        // 200.01 m: > MAX → not trusted
+        let (trusted, reason) = runway_geometry_trust_check(
+            Some("EDDM"),
+            "EDDM",
+            None,
+            Some(200.01),
+            Some(400.0),
+        );
+        assert!(!trusted);
+        assert_eq!(reason, Some("centerline_offset_too_large"));
+    }
+
+    #[test]
+    fn runway_trust_blocks_on_negative_float_distance() {
+        // GSG303: float_distance = -613 m (Touchdown weit vor Threshold).
+        let (trusted, reason) = runway_geometry_trust_check(
+            Some("OR66"),
+            "OR66",
+            None,
+            Some(50.0),
+            Some(-613.0),
+        );
+        assert!(!trusted);
+        assert_eq!(reason, Some("negative_float_distance"));
+    }
+
+    #[test]
+    fn runway_trust_at_float_threshold_boundary() {
+        // -100.0 m exakt: >= MIN → trusted (legitim wenn Runway-DB
+        // TDZ-Marker statt Threshold nutzt).
+        let (trusted, _) = runway_geometry_trust_check(
+            Some("EDDM"),
+            "EDDM",
+            None,
+            Some(50.0),
+            Some(-100.0),
+        );
+        assert!(trusted, "-100 m exakt darf noch trusted sein");
+
+        // -100.01 m: < MIN → not trusted
+        let (trusted, reason) = runway_geometry_trust_check(
+            Some("EDDM"),
+            "EDDM",
+            None,
+            Some(50.0),
+            Some(-100.01),
+        );
+        assert!(!trusted);
+        assert_eq!(reason, Some("negative_float_distance"));
+    }
+
+    #[test]
+    fn runway_trust_blocks_on_missing_icao() {
+        // Kein Match gefunden → nicht trusted (vorsorglich, weil sonst
+        // die Geometry-Felder mit Default-Werten ueberschrieben werden
+        // koennten).
+        let (trusted, reason) = runway_geometry_trust_check(
+            None,
+            "EDDM",
+            None,
+            Some(50.0),
+            Some(400.0),
+        );
+        assert!(!trusted);
+        assert_eq!(reason, Some("icao_mismatch"));
+    }
+
+    #[test]
+    fn runway_trust_handles_missing_offsets_gracefully() {
+        // Diagnostische Felder fehlen aber ICAO matcht → trusted
+        // (wir bestrafen nicht das Fehlen einer optionalen Diagnostik).
+        let (trusted, reason) = runway_geometry_trust_check(
+            Some("EDDM"),
+            "EDDM",
+            None,
+            None,
+            None,
+        );
+        assert!(trusted);
+        assert!(reason.is_none());
+    }
+
+    #[test]
+    fn runway_trust_thresholds_are_pinned_to_spec() {
+        // Spec docs/spec/v0.7.6-landing-payload-consistency.md §3 P1-3
+        // pinned die Werte explizit. Aenderung der Konstanten ist eine
+        // Spec-Aenderung — dieser Test schlaegt fehl wenn jemand die
+        // Werte still-und-leise verschiebt.
+        assert_eq!(RUNWAY_TRUST_MAX_CENTERLINE_OFFSET_M, 200.0);
+        assert_eq!(RUNWAY_TRUST_MIN_FLOAT_DISTANCE_M, -100.0);
+    }
+
+    // ─── Bounce-Threshold-Konstanten (touchdown_v2) ─────────────────────
+
+    #[test]
+    fn bounce_thresholds_are_pinned_to_spec() {
+        // Spec §3 P1-2: 5 ft forensic, 15 ft scored. Aenderung der Werte
+        // ist eine Spec-Aenderung — dieser Test schlaegt fehl wenn jemand
+        // die Werte still-und-leise verschiebt.
+        assert_eq!(touchdown_v2::BOUNCE_FORENSIC_MIN_AGL_FT, 5.0);
+        assert_eq!(touchdown_v2::BOUNCE_SCORED_MIN_AGL_FT, 15.0);
+    }
+
+    #[test]
+    fn bounce_scored_strictly_greater_than_forensic() {
+        // Sanity: scored MUSS strikt groesser sein als forensic, sonst
+        // ist der ganze "kleine Hopser sichtbar, nicht bestraft"-Trick
+        // sinnlos.
+        assert!(
+            touchdown_v2::BOUNCE_SCORED_MIN_AGL_FT
+                > touchdown_v2::BOUNCE_FORENSIC_MIN_AGL_FT
+        );
+    }
+
+    #[test]
+    fn sas9987_bounce_class_passes_forensic_fails_scored() {
+        // SAS9987 v0.7.5 Real-Beleg: bounce_max_agl_ft = 13.57.
+        // Mit den v0.7.6-Schwellen muss das gelten:
+        //   - >= BOUNCE_FORENSIC_MIN_AGL_FT (5 ft)   → forensisch zaehlt
+        //   - <  BOUNCE_SCORED_MIN_AGL_FT (15 ft)    → score-frei
+        let bounce_height = 13.57_f32;
+        assert!(bounce_height >= touchdown_v2::BOUNCE_FORENSIC_MIN_AGL_FT);
+        assert!(bounce_height < touchdown_v2::BOUNCE_SCORED_MIN_AGL_FT);
     }
 }
 

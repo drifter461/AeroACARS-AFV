@@ -286,6 +286,17 @@ pub struct TouchdownPayload {
     /// computation as `LandingRecord.fuel_efficiency_pct` in the client
     /// — drives the "Spritverbrauch" sub-score. None when the bid had
     /// no SimBrief OFP attached (planned-burn unavailable).
+    ///
+    /// **@deprecated since v0.7.6** — Berechnungsbasis (`block_fuel -
+    /// landing_fuel`, inkl. Taxi-Out) weicht vom v0.7.1 Sub-Score ab,
+    /// der `actual_trip_burn = takeoff - landing` nutzt. Resultat:
+    /// zwei Prozent-Werte fuers gleiche Konzept im selben Payload
+    /// (SAS9987 v0.7.5: -2.28% hier, -5.0% in `sub_scores[fuel].value`).
+    /// Single Source of Truth ist `sub_scores[fuel]`. Web rendert das
+    /// Feld ab v0.7.6 nicht mehr; Feld bleibt fuer Backward-Compat
+    /// (externe Discord-Embeds, Custom-Dashboards) und wird in einer
+    /// spaeteren Major-Version entfernt. Spec docs/spec/v0.7.6-landing-
+    /// payload-consistency.md §4 P2-3.
     pub fuel_efficiency_pct: Option<f32>,
     // ─── v0.5.23 Touchdown-Forensik ──────────────────────────────────
     //
@@ -467,6 +478,20 @@ pub struct TouchdownPayload {
     /// Anzahl Samples im 50-Hz-Buffer (5 s pre + 10 s post). >500 = OK.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub forensic_sample_count: Option<u32>,
+
+    // ─── v0.7.6 P1-3: Runway-Geometry-Trust ──────────────────────────
+    // Spec docs/spec/v0.7.6-landing-payload-consistency.md §3 P1-3.
+    // Bei trusted=false setzt der Tauri-Client `landing_touchdown_zone`
+    // auf None, behaelt aber `landing_float_distance_m` als Raw-Wert
+    // im Payload (interne Diagnostik). Web blendet beide Felder im
+    // UI aus und zeigt einen Hinweis-Pill mit `runway_geometry_reason`.
+    /// Ist die Runway-Geometrie plausibel? Siehe `PirepPayload` fuer
+    /// die ausfuehrliche Definition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runway_geometry_trusted: Option<bool>,
+    /// "icao_mismatch" / "centerline_offset_too_large" / "negative_float_distance"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runway_geometry_reason: Option<String>,
 }
 
 fn is_false(b: &bool) -> bool { !*b }
@@ -496,11 +521,28 @@ pub struct PirepPayload {
     pub block_time_min: Option<i32>,
     pub flight_time_min: Option<i32>,
     pub distance_nm: Option<f32>,
+    /// **Raw** Sim-Cumulative-Counter aus dem Sim-Telemetry-Feed.
+    ///
+    /// **NICHT** als OFP-Vergleich nutzen! Bei MSFS ist das oft ein
+    /// Cumulative-Wert seit Sim-Start (siehe SAS9987 v0.7.5: 19984 kg
+    /// gemeldet bei tatsaechlich 8762 kg Trip-Burn → +117% Phantom-
+    /// Abweichung). Spec docs/spec/v0.7.6-landing-payload-consistency.md.
+    ///
+    /// Fuer OFP-Vergleich: `actual_trip_burn_kg` benutzen, oder als
+    /// Fallback `takeoff_fuel_kg - landing_fuel_kg` rechnen.
     pub fuel_used_kg: Option<f32>,
     pub planned_burn_kg: Option<f32>,
     pub block_fuel_kg: Option<f32>,
     pub takeoff_fuel_kg: Option<f32>,
     pub landing_fuel_kg: Option<f32>,
+    /// v0.7.6: Trip-Burn = `takeoff_fuel_kg - landing_fuel_kg`.
+    /// **Single Source of Truth fuer OFP-Vergleich** zwischen Pilot-
+    /// Client, Web-Dashboard, Discord-Embed und phpVMS-Module.
+    /// Replacement fuer den Raw-`fuel_used_kg`-Wert in allen Anzeigen
+    /// die "Plan vs Actual"-Vergleiche zeigen.
+    /// Spec docs/spec/v0.7.6-landing-payload-consistency.md §3 P1-1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_trip_burn_kg: Option<f32>,
     pub takeoff_weight_kg: Option<f32>,
     pub landing_weight_kg: Option<f32>,
     pub planned_tow_kg: Option<f32>,
@@ -584,6 +626,32 @@ pub struct PirepPayload {
     /// dann LegacyPirepNotice statt Breakdown.
     #[serde(default)]
     pub sub_scores: Vec<landing_scoring::SubScoreEntry>,
+
+    // ─── v0.7.6 P1-3: Runway-Geometry-Trust ──────────────────────────
+    // Spec docs/spec/v0.7.6-landing-payload-consistency.md §3 P1-3.
+    //
+    // Web/Monitor/Discord blendet Touchdown-Zone und Float-Distance
+    // bei `trusted=false` aus (kein Raw-Display, weil Pilot sonst mit
+    // kaputter Geometrie konfrontiert wird). Rollout-Sub-Score bleibt
+    // valide (kommt aus GPS-Track, nicht aus Runway-DB).
+
+    /// Ist die Runway-Geometrie (Match-ICAO + Centerline-Offset +
+    /// Float-Distance) plausibel genug um TD-Zone + Float-Distance
+    /// im UI zu zeigen?
+    /// - `Some(true)` — alle Checks pass (200 m Centerline-Toleranz,
+    ///   -100 m Float-Toleranz, ICAO matcht arr/divert)
+    /// - `Some(false)` — mindestens ein Check failed, siehe `reason`
+    /// - `None` — Feld fehlt (alte v0.7.5-PIREPs); UI behandelt das
+    ///   wie `Some(true)` fuer Backward-Compat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runway_geometry_trusted: Option<bool>,
+
+    /// Grund warum `runway_geometry_trusted=false`:
+    /// - "icao_mismatch"             — Match-ICAO != arr/divert
+    /// - "centerline_offset_too_large" — > 200 m
+    /// - "negative_float_distance"   — < -100 m
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runway_geometry_reason: Option<String>,
 }
 
 /// Default fuer pre-v0.7.0 PIREPs ohne den marker. Wird von serde

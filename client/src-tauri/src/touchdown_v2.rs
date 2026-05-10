@@ -23,6 +23,36 @@ use crate::SimKind;
 /// Auswertungs-Logik zu verwenden ist.
 pub const FORENSICS_VERSION: u8 = 2;
 
+// ─── v0.7.6 P1-2: Bounce-Threshold-Konstanten ─────────────────────────────
+//
+// Spec docs/spec/v0.7.6-landing-payload-consistency.md §3 P1-2.
+//
+// Trennung zwischen "forensisch sichtbar" und "scoring-relevant" damit Pilot
+// kleine Federwerk-Hopser im Replay sehen kann ohne dass jeder Mikro-Hopser
+// ihn im Score bestraft. Real-Beleg: SAS9987 (v0.7.5 PW68L0QGJkq0D63J) hatte
+// bounce_max_agl_ft=13.6 → forensisch ein Hopser, scoring-irrelevant.
+//
+// Beide Konstanten leben hier (touchdown_v2 = Forensik-Schicht), NICHT in
+// der landing-scoring-Crate, weil nur die Forensik AGL-Verlauf + Hopser-
+// Hoehen kennt. Die landing-scoring-Crate vertraut dem Caller und bekommt
+// nur den finalen scored_bounce_count als Input.
+
+/// Mindestens 5 ft AGL-Excursion damit ein Wiederabheben **forensisch**
+/// gezaehlt wird. Filtert Sim-Float-Noise (typisch 1-2 ft) und sanftes
+/// Federwerk-Oszillieren raus, laesst aber sichtbare Hopser im Replay-
+/// Tab durch. Erscheint im PIREP als `forensic_bounce_count`.
+pub const BOUNCE_FORENSIC_MIN_AGL_FT: f32 = 5.0;
+
+/// Mindestens 15 ft AGL-Excursion damit ein Wiederabheben im Sub-Score
+/// **bestraft** wird. Hoch genug dass ein "echter" Bounce (Pitch-Up nach
+/// harter Landung) erfasst wird, aber nicht jeder Federwerk-Hopser den
+/// Pilot bestraft. Erscheint im PIREP als `scored_bounce_count` und
+/// landet im `landing-scoring::sub_bounces`-Sub-Score.
+///
+/// Falls Real-Daten nach v0.7.6-Rollout zeigen dass ~13 ft schon
+/// scoring-relevant sein soll: Patch in v0.7.7 auf 10.0.
+pub const BOUNCE_SCORED_MIN_AGL_FT: f32 = 15.0;
+
 // ─── Layer 1: TD-Candidate Detection ──────────────────────────────────────
 
 /// Ein Sample-Pair fuer Edge-Detection (prev → current).
