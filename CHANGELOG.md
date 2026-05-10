@@ -4,6 +4,130 @@ Alle nennenswerten Änderungen an AeroACARS. Format: lose an [Keep a Changelog](
 
 ---
 
+## [v0.7.1] — 2026-05-10
+
+🎯 **Landing UX & Fairness — Score wird verstaendlich, fair und konsistent ueberall.**
+
+### Warum
+
+v0.7.0 hat die Landerate-Messung strukturell saniert (Touchdown-Forensik v2). Pilot-Feedback zeigte aber: Pilot versteht den Score noch nicht gut, VFR-Modus wird vom Modal blockiert, sparsame Piloten werden bestraft, App und phpVMS zeigen unterschiedliche Zahlen, der Anflug-Chart erklaert nicht was bewertet wird.
+
+v0.7.1 schliesst diese UX-Luecke ohne den Touchdown-Core anzufassen.
+
+### Was sich aendert
+
+**Spec:** [docs/spec/v0.7.1-landing-ux-fairness.md](docs/spec/v0.7.1-landing-ux-fairness.md) (v1.6 approved nach 5 Review-Runden + 3 Score-Contract-Patches)
+
+**Neue Crate:** `client/src-tauri/crates/landing-scoring/` (~700 Zeilen, 38 Tests)
+- Single-Source-of-Truth fuer alle Sub-Score-Algorithmen
+- Backend, Frontend, Webapp, Monitor + phpVMS sehen IDENTISCHE Werte fuer denselben PIREP
+- Spec §3.1 SSoT — KEIN Recompute in irgendeinem Konsumenten
+
+**Sub-Scores im PIREP-Payload + landing_history.json:** Voll ausgebautes `SubScoreEntry`-Wire-Format mit `score`, `points`, `band`, `label_key`, `value`, `rationale_key`, `tip_key`, `skipped`, `reason`, `warning`. UI rendert direkt aus diesen Felder ohne nachzurechnen.
+
+**Master-Score = gewichteter Aggregate aus allen Sub-Scores** (vorher: Touchdown-Klassifikation aus VS+G+Bounces only). Fuel/Loadsheet/Stability/Rollout fliessen jetzt sichtbar in den Hauptscore. Gewichte 1:1 aus v0.7.0: landing_rate=3, g_force=3, bounces=2, stability=2, rollout=1, fuel=1, loadsheet=1 (NEU).
+
+### Sichtbare Fairness-Aenderungen
+
+**F1 — VFR/Manual-Mode: Start ohne ZFW funktioniert jetzt wirklich.** Modal-ZFW-Feld ist optional, leer = "VFR ohne Loadsheet-Wertung". Backend-Gate gelockert. Loadsheet-Sub-Score wird sauber als "nicht bewertet" markiert (kein 0-Penalty). Bild2-Bug fuer VFR-Piloten geloest.
+
+**F2 — Fuel-Score nur bei echtem `planned_burn`.** Backend-Fallback `planned_block_fuel * 0.9` entfernt. Pilot wird nicht mehr fuer eine Annahme bewertet die er nie selbst geplant hat. Ohne OFP-Trip-Burn → Sub-Score skipped.
+
+**F3 — Asymmetrie: Minderverbrauch wird nicht mehr bestraft.** Bisher zaehlte `-5%` genauso schlecht wie `+5%`. Jetzt:
+- Mehrverbrauch (>0%): score-relevant wie v0.7.0 (off_plan=55, very_off=25, way_off=5)
+- Minderverbrauch (-5..-15%): Score 95 "Effizient" — KEIN Penalty
+- Starker Minderverbrauch (>15% under): Score 85 mit Warning "planned_burn_may_be_off"
+
+Label-Wechsel: "Spritverbrauch" → **"OFP-Treue"** / "OFP compliance" / "Aderenza OFP" (DE/EN/IT).
+
+### Sichtbare Forensik-Anschluesse
+
+**F4 — Forensik-Badge mit Confidence-Pill** im LandingPanel: gruen (High) / blau (Medium) / orange (Low) / rot (VeryLow). Zeigt Pilot wie sicher die Touchdown-Messung war. Source-Tooltip ("Impact Frame", "Smoothed 500ms" etc.) erklaert woher der Wert kommt. Bedingung: `ux_version >= 1 && forensics_version >= 2` (v0.7.0-PIREPs bekommen kein Badge weil keine Confidence-Daten vorhanden).
+
+**F5 — ApproachChart Vorlauf/Gate/Flare-Zonen.** Chart hat jetzt drei farbige Hintergrund-Bands:
+- Grau = Vorlauf (>1000 ft AGL — nicht bewertet)
+- Blau = Bewertetes Gate (0-1000 ft AGL minus letzte 3 Sekunden vor TD)
+- Gelb = Flare-Zone (letzte 3 Sekunden vor TD — separat bewertet)
+
+Plus Legende + Tooltip "Bewertet werden Anflug-Samples zwischen 0 und 1000 ft AGL. Die letzten 3 Sekunden vor Touchdown (Flare-Manoever) sind ausgeschlossen — der Flare wird im separaten Flare-Block bewertet." Adrian-Punkt aus Pilot-Feedback geloest.
+
+**F6 — Flare als eigene Zone** (war schon ab v0.5.43 als post-flight-Block da, jetzt explizit zeitbasiert vom Stability-Gate getrennt).
+
+**F7 — Stability-v2-Felder im PIREP** (in dieser Release nur in PirepPayload exponiert, UI-Detail-Panel kommt v0.7.2): `approach_vs_jerk_fpm` mean, `approach_ias_stddev_kt`, `approach_stable_config: bool`, `approach_excessive_sink: bool`. Webapp/Monitor koennen die Werte ab jetzt lesen.
+
+**F8 — i18n-Audit (DE/EN/IT):**
+- "Spritverbrauch" → "OFP-Treue"
+- "stability" → "Anflug-Stabilitaet"
+- "Loadsheet" + "Flare" als neue Sub-Score-Labels
+- Neue Rationales: `efficient`, `very_efficient`, `loadsheet_present`
+- Neue Skip-Reason-Strings: `landing.skipped_reason.*` mit "(kein Penalty)"-Hinweis
+- Forensik-Block + Confidence-Labels
+
+**F9 — Web/Monitor-Parity:** webapp + monitor lesen jetzt `sub_scores` direkt aus dem PIREP-Payload. Identische Pills (mit deutschen Labels statt rohen Keys), identische Score-Werte. App, Web, Monitor und phpVMS zeigen fuer denselben PIREP IDENTISCHE Zahlen.
+
+### Score-Contract einheitlich (nach 3 Review-Runden)
+
+| Pfad | Score-Wert |
+|---|---|
+| `body.score` (phpVMS native /file) | Aggregate-Master |
+| `build_pirep_fields` "Landing Score" | Aggregate-Master |
+| `PirepPayload.landing_score` (MQTT) | Aggregate-Master |
+| `LandingRecord.score_numeric` (UI) | Aggregate-Master |
+| `LandingRecord.score_label` (UI) | Aggregate-Label (smooth/firm/...) |
+| Discord-Embed PIREP-Filed | Aggregate-Master |
+| Discord-Embed Divert | Aggregate-Master |
+| Activity-Log Title | Touchdown-Klasse (bewusst, mit Label) |
+| Activity-Log Detail | "Master 77/100" |
+
+### Skipped Sub-Scores sichtbar
+
+VFR/Manual-Pilot ohne ZFW + Trip-Burn-Plan: Sub-Scores "Loadsheet" und "OFP-Treue" werden als graue dashed-Pills mit Tooltip ("Kein OFP-Trip-Burn — nicht bewertet, kein Penalty") angezeigt — vorher verschwanden sie einfach. Pilot sieht jetzt warum keine Wertung erfolgt. Auch in webapp + monitor.
+
+### Backward-Compat (Spec §3.5 Legacy-Schutz)
+
+Pre-v0.7.1-PIREPs (`ux_version < 1`) zeigen den alten Master-Score wie zum Aufzeichnungszeitpunkt — **keine Re-Score-Verwirrung**. UI rechnet alte Records nicht mit neuer Logik nach. Marker-System: `forensics_version: 2` (aus v0.7.0) + `ux_version: 1` (NEU v0.7.1).
+
+### Score-Drift-Tabelle (Phase-2 erwartete Aenderungen)
+
+| Flug | v0.7.0 | v0.7.1 | Grund |
+|---|---|---|---|
+| PTO 105 GA (smooth) | 95 | 95 | unveraendert |
+| DLH 304 (-3.5% Fuel) | 74 | 77 | F3: Minderverbrauch nicht bestraft |
+| CFG 785 (smooth) | 94 | 95 | loadsheet=100 mit drin |
+| DAH 3181 (firm + Mehrverbrauch) | 65 | 68 | Mehrverbrauch unveraendert, loadsheet=100 |
+
+### Neue Datenfelder
+
+**Storage (`LandingRecord` + `ApproachSample` Erweiterung):**
+- `ux_version`, `forensics_version`, `landing_confidence`, `landing_source`
+- `approach_vs_jerk_fpm`, `approach_ias_stddev_kt`, `approach_stable_config`, `approach_excessive_sink`
+- `gate_window` (start/end ms + heights + count)
+- `sub_scores: Vec<SubScoreEntry>`
+- `ApproachSample.t_ms`, `agl_ft`, `is_scored_gate`, `is_flare`
+
+Alle neuen Felder mit `#[serde(default)]` — alte `landing_history.json`-Dateien lesen weiter ohne Crash.
+
+**MQTT (`PirepPayload`):** identische Erweiterung. v0.7.1+ Web/Monitor sehen die neuen Felder, alte VPS-Versionen ignorieren sie.
+
+### Was NICHT in v0.7.1
+
+- F7-B `sub_stability` 4-Faktor-Voting (bleibt 2-Faktor wie v0.7.0 fuer Backward-Compat — die neuen Felder sind in PirepPayload aber Score-Algorithmus unveraendert)
+- StabilityDetailPanel + FlareDetailPanel UI (Felder durchgereicht, dedizierte UI kommt v0.7.2)
+- Re-Score historischer PIREPs (forward-only)
+- Mobile Frontend
+- WASM-Live-Score-Vorschau
+
+### Tests
+
+- `cargo test --lib`: 44/44 GREEN (v0.7.0 Backbone unangetastet)
+- `cargo test -p landing-scoring`: 30 unit + 8 goldenset = 38/38 GREEN
+- `cargo test --test touchdown_v2_replay`: 8/8 GREEN
+- `tsc --noEmit` (client + webapp + monitor): clean
+
+**Gesamt 90/90 Tests grün** ueber alle Crates und Frontends.
+
+---
+
 ## [v0.7.0] — 2026-05-10
 
 🏗 **Touchdown-Forensik v2 — strukturelles Redesign der Landerate-Berechnung.**
