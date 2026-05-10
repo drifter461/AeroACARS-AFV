@@ -712,7 +712,20 @@ struct ActiveFlight {
     /// streamer_spawned). Wird im worker-loop selbst gesetzt damit
     /// nicht mehrere parallele Worker laufen.
     phpvms_worker_spawned: AtomicBool,
+    /// v0.6.2 — Connection-Health-State zum phpVMS-Server. Vom phpVMS-
+    /// Worker gesetzt nach jedem POST:
+    ///   - 0 = Live (letzter POST war Erfolg)
+    ///   - 1 = Failing (letzter POST hat geschlagen / timeout)
+    /// Frontend nutzt das zusammen mit `queued_position_count` für eine
+    /// klare 3-Status-Indikator-Anzeige (Live / Sync / Offline) — vor
+    /// v0.6.2 zeigte der Indikator „queued offline" für jeden Backlog,
+    /// auch ohne echten Connection-Loss → Pilot-Verwirrung.
+    connection_state: std::sync::atomic::AtomicU8,
 }
+
+/// Connection-State-Konstanten für ActiveFlight.connection_state.
+const CONN_STATE_LIVE: u8 = 0;
+const CONN_STATE_FAILING: u8 = 1;
 
 /// On-disk representation of an active flight, used for resume after a client
 /// crash. Not the same as `ActiveFlight` because we only persist serializable,
@@ -2261,6 +2274,13 @@ pub struct ActiveFlightInfo {
     /// means the streamer hit a network failure recently and the
     /// dashboard should warn the pilot.
     queued_position_count: u32,
+    /// v0.6.2 — Connection-Health zum phpVMS-Server.
+    /// Werte: "live" (letzter POST OK) / "failing" (letzter POST scheiterte).
+    /// Frontend nutzt das + queued_position_count für 3 Status-Anzeige:
+    ///   - live + queued=0  → "Live" (gruen)
+    ///   - live + queued>0  → "Sync" (blau, normaler Backlog)
+    ///   - failing          → "Offline" (rot, echte Verbindung weg)
+    connection_state: String,
     /// v0.4.1: ISO-8601 UTC timestamp wann der Streamer den Sim-
     /// Disconnect detektiert und den Flug pausiert hat. None = Flug
     /// läuft normal. Some(...) = Cockpit-Tab zeigt Resume-Banner.
@@ -4655,6 +4675,10 @@ fn flight_info(flight: &ActiveFlight) -> ActiveFlightInfo {
         last_position_at: stats.last_position_at.map(|t| t.to_rfc3339()),
         last_heartbeat_at: stats.last_heartbeat_at.map(|t| t.to_rfc3339()),
         queued_position_count: stats.queued_position_count,
+        connection_state: match flight.connection_state.load(Ordering::Relaxed) {
+            CONN_STATE_FAILING => "failing".to_string(),
+            _ => "live".to_string(),
+        },
         paused_since: stats.paused_since.map(|t| t.to_rfc3339()),
         paused_last_known: stats.paused_last_known.clone(),
         divert_hint: stats.divert_hint.clone(),
@@ -4972,6 +4996,7 @@ async fn flight_adopt(
         cancelled_remotely: AtomicBool::new(false),
         position_outbox: Mutex::new(std::collections::VecDeque::new()),
         phpvms_worker_spawned: AtomicBool::new(false),
+        connection_state: std::sync::atomic::AtomicU8::new(CONN_STATE_LIVE),
     });
 
     save_active_flight(&app, &flight);
@@ -5425,6 +5450,7 @@ async fn flight_start(
         cancelled_remotely: AtomicBool::new(false),
         position_outbox: Mutex::new(std::collections::VecDeque::new()),
         phpvms_worker_spawned: AtomicBool::new(false),
+        connection_state: std::sync::atomic::AtomicU8::new(CONN_STATE_LIVE),
     });
 
     save_active_flight(&app, &flight);
@@ -5986,6 +6012,7 @@ async fn flight_start_manual(
         cancelled_remotely: AtomicBool::new(false),
         position_outbox: Mutex::new(std::collections::VecDeque::new()),
         phpvms_worker_spawned: AtomicBool::new(false),
+        connection_state: std::sync::atomic::AtomicU8::new(CONN_STATE_LIVE),
     });
 
     save_active_flight(&app, &flight);
@@ -6832,6 +6859,7 @@ fn spawn_phpvms_position_worker(
                     }
                     consecutive_failures = 0;
                     last_post_at = Some(std::time::Instant::now());
+                    flight.connection_state.store(CONN_STATE_LIVE, Ordering::Relaxed);
                 }
                 Ok(Err(ApiError::NotFound)) => {
                     // PIREP serverseitig geloescht — terminiert sauber.
@@ -6861,6 +6889,7 @@ fn spawn_phpvms_position_worker(
                         stats.queued_position_count = outbox_len as u32;
                     }
                     consecutive_failures = consecutive_failures.saturating_add(1);
+                    flight.connection_state.store(CONN_STATE_FAILING, Ordering::Relaxed);
                 }
                 Err(_timeout) => {
                     tracing::warn!(
@@ -6876,6 +6905,7 @@ fn spawn_phpvms_position_worker(
                         stats.queued_position_count = outbox_len as u32;
                     }
                     consecutive_failures = consecutive_failures.saturating_add(1);
+                    flight.connection_state.store(CONN_STATE_FAILING, Ordering::Relaxed);
                 }
             }
             // Outbox-Groesse fuer Persist-Check (kein queued_count-Update mehr
@@ -14889,6 +14919,7 @@ async fn try_resume_flight(
         cancelled_remotely: AtomicBool::new(false),
         position_outbox: Mutex::new(std::collections::VecDeque::new()),
         phpvms_worker_spawned: AtomicBool::new(false),
+        connection_state: std::sync::atomic::AtomicU8::new(CONN_STATE_LIVE),
     });
 
     {

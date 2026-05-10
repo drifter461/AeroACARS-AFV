@@ -423,6 +423,9 @@ function App() {
               lastPositionAt={activeFlight.last_position_at}
               queuedCount={activeFlight.queued_position_count}
               positionCount={activeFlight.position_count}
+              connectionState={
+                activeFlight.connection_state === "failing" ? "failing" : "live"
+              }
             />
           )}
         </div>

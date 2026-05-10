@@ -273,12 +273,19 @@
   "recording": {
     "status": {
       "live": "LIVE",
-      "queued": "OFFLINE",
+      "sync": "SYNC",
+      "offline": "OFFLINE",
       "stale": "ERRORE",
       "idle": "ATTESA"
     },
     "no_post_yet": "non ancora inviato",
     "last_send_secs": "inviato {{secs}}s fa",
+    "sync_pending_one": "{{count}} posizione in sincronia",
+    "sync_pending_other": "{{count}} posizioni in sincronia",
+    "sync_pending": "{{count}} posizioni in sincronia",
+    "offline_pending_one": "Connessione persa — {{count}} posizione in attesa",
+    "offline_pending_other": "Connessione persa — {{count}} posizioni in attesa",
+    "offline_pending": "Connessione persa — {{count}} posizioni in attesa",
     "queued_pending_one": "{{count}} posizione offline",
     "queued_pending_other": "{{count}} posizioni offline",
     "queued_pending": "{{count}} posizioni offline",
@@ -413,6 +420,7 @@
     "muted_stale": "obsoleto",
     "muted_not_yet_sent": "non ancora inviato",
     "muted_pending_offline": "in sospeso (offline)",
+    "muted_pending_sync": "in sincronia",
     "age_seconds": "{{seconds}}s fa",
     "age_minutes": "{{minutes}}m fa",
     "age_minutes_seconds": "{{minutes}}m {{seconds}}s fa",

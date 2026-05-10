@@ -273,12 +273,19 @@
   "recording": {
     "status": {
       "live": "LIVE",
-      "queued": "OFFLINE",
+      "sync": "SYNC",
+      "offline": "OFFLINE",
       "stale": "FEHLER",
       "idle": "WARTET"
     },
     "no_post_yet": "noch nicht gesendet",
     "last_send_secs": "vor {{secs}} s gesendet",
+    "sync_pending_one": "{{count}} Position wird gesendet",
+    "sync_pending_other": "{{count}} Positionen werden gesendet",
+    "sync_pending": "{{count}} Positionen werden gesendet",
+    "offline_pending_one": "Verbindung verloren — {{count}} Position wartet",
+    "offline_pending_other": "Verbindung verloren — {{count}} Positionen warten",
+    "offline_pending": "Verbindung verloren — {{count}} Positionen warten",
     "queued_pending_one": "{{count}} Position offline",
     "queued_pending_other": "{{count}} Positionen offline",
     "queued_pending": "{{count}} Positionen offline",
@@ -413,6 +420,7 @@
     "muted_stale": "stale",
     "muted_not_yet_sent": "noch nicht gesendet",
     "muted_pending_offline": "ausstehend (offline)",
+    "muted_pending_sync": "wird gesendet",
     "age_seconds": "vor {{seconds}}s",
     "age_minutes": "vor {{minutes}}m",
     "age_minutes_seconds": "vor {{minutes}}m {{seconds}}s",

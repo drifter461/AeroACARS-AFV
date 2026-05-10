@@ -374,7 +374,14 @@ function PhpvmsHeartbeatDebug({ activeFlight }: { activeFlight: ActiveFlightInfo
             <dt>{t("phpvms_status.row_position_queue")}</dt>
             <dd>
               {activeFlight.queued_position_count}{" "}
-              <span className="sim-panel__compact-muted">{t("phpvms_status.muted_pending_offline")}</span>
+              {/* v0.6.2 — Label hängt am echten Connection-State, nicht
+                 nur am Backlog. „queued (offline)" für jeden Backlog war
+                 missverständlich (= Pilot dachte Connection weg). */}
+              <span className="sim-panel__compact-muted">
+                {activeFlight.connection_state === "failing"
+                  ? t("phpvms_status.muted_pending_offline")
+                  : t("phpvms_status.muted_pending_sync")}
+              </span>
             </dd>
           </>
         )}

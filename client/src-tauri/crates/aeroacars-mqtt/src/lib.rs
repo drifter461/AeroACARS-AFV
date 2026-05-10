@@ -760,22 +760,26 @@ pub fn start(cfg: MqttConfig) -> Result<Handle> {
             warn!("initial status publish failed: {e}");
         }
 
-        // v0.5.14: Initial phase publish. Without this, a pilot
-        // sitting at the gate (FSM = Preflight, no transition yet)
-        // never publishes a phase → Monitor shows "—". Retained
-        // message means new Monitor subscribers see it on connect.
-        let initial_phase = PhasePayload {
-            ts: chrono::Utc::now().timestamp_millis(),
-            phase: phase_label(FlightPhase::Preflight),
-        };
-        publish_json(
-            &pub_client,
-            &cfg_for_pub.topic("phase"),
-            &initial_phase,
-            QoS::AtLeastOnce,
-            true,
-        )
-        .await;
+        // v0.6.2 — Initial Phase-Publish ENTFERNT. Vorher wurde hier
+        // unconditional `FlightPhase::Preflight` retained gepublisht.
+        // Das überschreibt die echte Phase im Broker beim App-Restart
+        // (Pilot war im CLIMB → quittete → restartete → MQTT-Handle init
+        // sendete PREFLIGHT → Live-Map zeigte für ~5s PREFLIGHT bis der
+        // Streamer den ersten position-payload mit echter Phase sendet).
+        //
+        // Pilot-Report 2026-05-10 (Test-Flight CFG 785 EDDV->EDDB):
+        // Indikator zeigte „PREFLIGHT" auf Live-Map nach Resume bei
+        // 12k ft im Climb.
+        //
+        // Stattdessen: KEIN initial publish. Der Streamer sendet beim
+        // ersten Tick die ECHTE Phase im position-payload (das embed
+        // wurde in v0.5.14 nachgezogen). Wenn kein Flug aktiv → Monitor
+        // zeigt „—" (korrekt, kein Flug = keine Phase).
+        //
+        // Der retained-message vom letzten Flug bleibt im Broker bis
+        // der nächste Streamer-Tick eine neue Phase sendet — das ist
+        // OK weil der Subscriber den position-payload schneller sieht
+        // als ein Monitor connected.
 
         while let Some(cmd) = rx.recv().await {
             match cmd {

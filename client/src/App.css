@@ -721,6 +721,31 @@ button:disabled {
   }
 }
 
+/* v0.6.2 — Sync: blau, weicher Pulse. Backlog wartet auf nächsten POST,
+   alles funktioniert (= normal in Cruise mit 30s POST-Cadence). */
+.live-rec--sync {
+  color: var(--info, #3b82f6);
+  border-color: color-mix(in srgb, var(--info, #3b82f6) 50%, var(--border));
+  background: color-mix(in srgb, var(--info, #3b82f6) 12%, var(--surface-2));
+}
+
+.live-rec--sync .live-rec__dot {
+  animation: rec-pulse 2.4s ease-in-out infinite;
+}
+
+/* v0.6.2 — Offline: rot, kein Pulse. Echter Connection-Loss (POST scheiterte).
+   Pilot soll wissen dass etwas wirklich nicht stimmt — anders als Sync. */
+.live-rec--offline {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 50%, var(--border));
+  background: color-mix(in srgb, var(--danger) 12%, var(--surface-2));
+}
+
+/* Legacy: vor v0.6.2 wurde "queued" für beide Fälle (Sync + Offline) genutzt.
+   Class bleibt für backward-compat falls irgendwo noch eine alte UI-Komponente
+   den Status "queued" rendert (LiveRecordingIndicator macht das nicht mehr —
+   sie nutzt seit v0.6.2 sync/offline). Styling: amber/warning, klar erkennbar
+   anders als die neuen Klassen. */
 .live-rec--queued {
   color: var(--warning, orange);
   border-color: color-mix(in srgb, var(--warning, orange) 50%, var(--border));

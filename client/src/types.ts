@@ -354,9 +354,17 @@ export interface ActiveFlightInfo {
    *  to confirm the keep-alive is firing — without it phpVMS soft-deletes
    *  the in-flight PIREP after `acars.live_time` hours. */
   last_heartbeat_at: string | null;
-  /** Positions sitting in the offline queue waiting to replay.
-   *  0 means we're online and current. */
+  /** Positions sitting in the in-memory outbox waiting for the next POST.
+   *  0 means we're online and current (no backlog). */
   queued_position_count: number;
+  /** v0.6.2 — Connection-Health vom phpVMS-Worker:
+   *  - "live"    → letzter POST war Erfolg (auch wenn queued > 0 = nur Sync-Pause)
+   *  - "failing" → letzter POST scheiterte (echter Connection-Loss)
+   *  - undefined → IPC-Payload von einer pre-v0.6.2 App (= Migration)
+   *  Frontend nutzt das + queued_position_count für die 3 Status-Anzeige
+   *  (Live / Sync / Offline). Optional damit pre-v0.6.2-IPC-Payloads
+   *  noch deserialisieren (z.B. wenn Tauri-IPC-Schema gecached ist). */
+  connection_state?: "live" | "failing";
   /** v0.4.1: ISO-8601 UTC-Timestamp wann der Streamer den Sim-
    *  Disconnect detektiert und den Flug pausiert hat. `null` =
    *  normaler Flug; `string` = Cockpit-Tab zeigt Resume-Banner. */

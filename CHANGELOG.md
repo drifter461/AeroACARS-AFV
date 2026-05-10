@@ -6,7 +6,13 @@ Alle nennenswerten Änderungen an AeroACARS. Format: lose an [Keep a Changelog](
 
 ## [v0.6.2] — 2026-05-10
 
-🩹 **Hotfix v0.6.1 → v0.6.2 — Indikator-Wackler „1 Position offline ↔ live" gefangen.**
+🩹 **Hotfix v0.6.1 → v0.6.2 — drei Bugs aus dem Pilot-Test-Flight CFG 785 EDDV→EDDB gefixt.**
+
+### Test-Flight-Befund
+
+Pilot Test-Flight komplett analysiert (JSONL: 1375 events, 0 unerwartete Lücken, Touchdown-Score 100/100 auf EDDB 06R, 591m past threshold, 2.2m left of centerline). 96-Sekunden Resume-Lücke (= App-Restart-Test) sauber recovered. Aber drei UX/Korrekturheft-Bugs gefunden:
+
+### 🟡 Bug #1 — Indikator-Wackler „1 Position offline ↔ live"
 
 ### Pilot-Report (Test-Flight CFG 785 EDDV→EDDB im Pushback)
 
@@ -43,9 +49,87 @@ Unconditional update raus. queued_position_count wird jetzt **NUR im match-arm**
 
 Damit matcht die Semantik jetzt v0.5.x: field = „stuck items wegen Network-Problem", 0 sonst. UI zeigt durchgehend „live" im normalen Betrieb, „queued" nur bei echten Connection-Issues.
 
+### 🟡 Bug #2 — MQTT-Initial-Phase-Publish überschreibt echte Phase nach Resume
+
+### Pilot-Report
+
+Beim App-Restart mid-flight (CFG 785 im Climb auf 12k ft) zeigte die Live-Map auf live.kant.ovh für ~5 Sekunden „PREFLIGHT" — obwohl die App-State (FlightStats.phase) korrekt CLIMB war.
+
+### Root-Cause
+
+Im `MqttHandle::new()` (Login-Zeit) gab es einen unconditional retained Phase-Publish:
+
+```rust
+// crates/aeroacars-mqtt/src/lib.rs:763
+let initial_phase = PhasePayload {
+    ts: chrono::Utc::now().timestamp_millis(),
+    phase: phase_label(FlightPhase::Preflight),  // ← FALSCH!
+};
+publish_json(..., topic("phase"), &initial_phase, QoS::AtLeastOnce, true).await;
+```
+
+**Sequenz beim Resume:**
+
+1. App startet → MQTT-Handle init → publisht `phase=PREFLIGHT` retained
+2. VPS-Subscriber bekommt PREFLIGHT → DB `current_phase=PREFLIGHT`
+3. Streamer startet später (nach `flight_resume_confirm` button click)
+4. Erste Position-Payload hat `phase=CLIMB` → DB wird korrigiert
+5. Race-Window zwischen 1 und 4 = ~3-5s sichtbar als „PREFLIGHT" auf der Live-Map
+
+### Fix
+
+Initial-Phase-Publish komplett entfernt. Wenn ein Flug aktiv ist, sendet der Streamer beim ersten Tick die echte Phase im position-payload (das embed wurde in v0.5.14 nachgezogen). Wenn kein Flug aktiv → Monitor zeigt „—" (korrekt, kein Flug = keine Phase).
+
+Der retained-message vom letzten Flug bleibt im Broker bis der nächste Streamer-Tick eine neue Phase sendet — das ist OK weil der Subscriber den position-payload schneller sieht als ein Monitor connected.
+
+### 🟡 Bug #3 — Indikator-Status-Semantik „offline" für jeden Backlog (UX-Verwirrung)
+
+### Pilot-Frage
+
+> „Wie wir vorgehen bei der Anzeige offline → das verwirrt den Piloten. Offline heißt offline — aber er ist doch nicht offline oder?"
+
+### Root-Cause
+
+Vor v0.6.2 hatte der Indikator vier Status: `live` / `queued` / `stale` / `idle`. „queued" wurde gerendert mit dem Label „X Positionen offline" — aber das deckte zwei verschiedene Fälle ab:
+
+| Was tatsächlich ist | Was angezeigt wurde | Was Pilot dachte |
+|---|---|---|
+| Cruise, 5 items warten auf nächsten 30s-POST (= NORMAL) | „5 Positionen offline" | „Mist, Connection weg!" |
+| Echte Connection weg, POST scheiterte | „5 Positionen offline" | „Mist, Connection weg!" |
+
+→ Beide Fälle sahen IDENTISCH aus, aber nur einer war ein Problem.
+
+### Fix
+
+Drei klar getrennte Status statt zwei:
+
+| Status | Wann | Farbe | Label DE | Label EN |
+|---|---|---|---|---|
+| **Live** | queued=0, letzter POST ✓ | 🟢 grün, Pulse | „LIVE" | „LIVE" |
+| **Sync** | queued>0, letzter POST ✓ | 🔵 blau, soft Pulse | „SYNC · X Positionen werden gesendet" | „SYNC · X positions syncing" |
+| **Offline** | letzter POST ✗ (echter Connection-Loss) | 🔴 rot, kein Pulse | „OFFLINE · Verbindung verloren — X Positionen warten" | „OFFLINE · Connection lost — X positions waiting" |
+| **Stale** | seit 3 min nichts gepostet | ⚪ grau | „FEHLER" | „STALLED" |
+
+**Implementation:**
+
+- Backend: neues field `ActiveFlight.connection_state: AtomicU8` (0=Live, 1=Failing). Worker setzt es nach jedem POST-Versuch.
+- IPC: `flight_status` exposed das field als `connection_state: "live" | "failing"`.
+- Frontend: `LiveRecordingIndicator` priorisiert Status: Stale > Offline > Sync > Live.
+- i18n: neue keys in DE/EN/IT für `recording.status.sync`, `recording.status.offline`, `recording.sync_pending`, `recording.offline_pending`. Alte „queued" keys bleiben als legacy für Backward-Compat.
+- CSS: neue Klassen `.live-rec--sync` (blau) und `.live-rec--offline` (rot).
+
+Plus `SettingsPanel` updated — Position-Queue-Row zeigt jetzt „X · wird gesendet" oder „X · ausstehend (offline)" je nach connection_state.
+
 ### Geänderte Dateien
 
-- `client/src-tauri/src/lib.rs` — Worker-Loop unconditional queued_count-Update entfernt, success/failure/timeout match-arms setzen field selbst mit korrekter Semantik
+- `client/src-tauri/src/lib.rs` — Worker-Loop unconditional queued_count-Update raus, success/failure match-arms setzen field selbst mit korrekter Semantik. Plus neues `ActiveFlight.connection_state: AtomicU8` field, Worker setzt es bei success/failure. Plus `ActiveFlightInfo.connection_state` für IPC.
+- `client/src-tauri/crates/aeroacars-mqtt/src/lib.rs` — Initial-Phase-Publish entfernt.
+- `client/src/types.ts` — neuer `connection_state: "live" | "failing"` field auf `ActiveFlightInfo`.
+- `client/src/components/LiveRecordingIndicator.tsx` — 3 Status (live/sync/offline) statt 2 (live/queued).
+- `client/src/components/SettingsPanel.tsx` — Position-Queue-Label hängt am `connection_state`.
+- `client/src/App.tsx` — `connectionState` prop an `LiveRecordingIndicator` durchreichen.
+- `client/src/App.css` — neue Klassen `.live-rec--sync` (blau) und `.live-rec--offline` (rot).
+- `client/src/locales/{de,en,it}/common.json` — neue i18n keys.
 - Versionen → 0.6.2
 
 ---
