@@ -474,6 +474,15 @@ fn aircraft_aliases(code: &str) -> &'static [&'static str] {
         "B789" => &["787-9"],
         "B78X" => &["787-10"],
 
+        // ---- McDonnell Douglas ----
+        // MD-11 family (Pax + Frachter — Live-Bug 2026-05-10:
+        // Martinair Cargo MPH62 Bid mit ICAO "MD11" wurde geblockt
+        // weil TFDi Design im Sim "MD-11F" meldet. Cargo-Bids fliegen
+        // legitim auch die F-Variante; "MD11" alias matched daher
+        // sowohl "MD-11" als auch "MD11F"-Substring im Title).
+        "MD11"  => &["MD-11", "MD11"],
+        "MD11F" => &["MD-11F", "MD11F"],
+
         // ---- Embraer ----
         "E170" => &["170"],
         "E175" => &["175"],
@@ -17121,6 +17130,30 @@ mod aircraft_alias_tests {
     fn strict_equality_still_works_for_unaliased() {
         assert!(aircraft_types_match("DH8D", "DH8D"));
         assert!(!aircraft_types_match("DH8D", "DH8C"));
+    }
+
+    /// Live bug 2026-05-10: Martinair Cargo MPH62 (MD11 bid mit
+    /// PH-MCU) wurde geblockt weil TFDi Design im Sim "MD-11F"
+    /// meldet. MD11 + MD11F sind gleiche Familie, Cargo-Bid darf
+    /// die F-Variante fliegen.
+    #[test]
+    fn md11_matches_md_11f_long_form() {
+        // ICAO bid "MD11" sollte sim-side "MD-11F" / "MD11F" akzeptieren
+        assert!(aircraft_types_match("MD11", "MD-11F"));
+        assert!(aircraft_types_match("MD11", "MD11F"));
+        assert!(aircraft_types_match("MD11", "MD-11"));
+        // umgekehrt: ICAO bid "MD11F" sollte sim-side "MD-11F" akzeptieren
+        assert!(aircraft_types_match("MD11F", "MD-11F"));
+        // case-insensitive
+        assert!(aircraft_types_match("md11", "md-11f"));
+    }
+
+    #[test]
+    fn md11_does_not_match_unrelated_widebodies() {
+        // MD11 darf NICHT mit anderen Widebodies matchen
+        assert!(!aircraft_types_match("MD11", "B77W"));
+        assert!(!aircraft_types_match("MD11", "A359"));
+        assert!(!aircraft_types_match("MD11", "B748"));
     }
 }
 

@@ -4,6 +4,53 @@ Alle nennenswerten Änderungen an AeroACARS. Format: lose an [Keep a Changelog](
 
 ---
 
+## [v0.7.2] — 2026-05-10
+
+🔧 **Hotfix: MD-11 / MD-11F Aircraft-Type-Match.**
+
+### Live-Bug
+
+Pilot Sven (German Sky Group) konnte die Martinair-Cargo-Bid **MPH62** (SKBO → TJBQ, MD11/PH-MCU, 78.1 t Cargo) nicht starten. AeroACARS blockierte mit `aircraft_mismatch`:
+
+```
+Aircraft mismatch: bid wants MD11 (PH-MCU), sim has MD11F
+(title "TFDi Design MD-11F PW4462 (Low Poly Cabin)").
+Load the correct aircraft type in the sim or pick a matching bid.
+```
+
+### Ursache
+
+Die `aircraft_aliases`-Tabelle (`lib.rs:408-487`) hatte keinen Eintrag fuer die MD-11-Familie — Vergessen seit Initial-Implementation. Boeing 777F hatte einen Alias, MD-11F nicht. Strict-equality `MD11 != MD11F` blockierte den Cargo-Pilot, obwohl Frachter-Variante derselben Familie.
+
+### Fix
+
+```rust
+// ---- McDonnell Douglas ----
+"MD11"  => &["MD-11", "MD11"],   // matched MD-11 + MD-11F
+"MD11F" => &["MD-11F", "MD11F"], // strikt fuer Frachter-only Bids
+```
+
+Plus 2 Unit-Tests:
+- `md11_matches_md_11f_long_form` — alle MD11/MD11F/MD-11/MD-11F Kombinationen
+- `md11_does_not_match_unrelated_widebodies` — MD11 darf nicht mit B77W/A359/B748 matchen
+
+### Effekt
+
+Cargo-Bid mit MD11-ICAO + Sim mit MD-11F → Start funktioniert. Pure-Frachter-Bid mit MD11F-ICAO bleibt strict (TFDi-Design "MD-11F"-Title matched). Andere Widebodies bleiben blockiert wenn falscher Typ geladen.
+
+### Tests
+
+- 46/46 lib (vorher 44 — 2 neu fuer MD11)
+- 30/30 landing-scoring + 8/8 goldenset
+- 8/8 touchdown_v2_replay
+- **Gesamt 92/92 Tests grün**
+
+### Pilot-Workaround vor v0.7.2
+
+Wer schon v0.7.1 hat: `VFR Start (manuell)` umgeht die Aircraft-Verifikation komplett. Nicht ideal weil Sim-Mismatch dann unbemerkt bleibt — aber funktioniert.
+
+---
+
 ## [v0.7.1] — 2026-05-10
 
 🎯 **Landing UX & Fairness — Score wird verstaendlich, fair und konsistent ueberall.**
