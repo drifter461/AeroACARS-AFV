@@ -7830,7 +7830,14 @@ async fn flight_end(
                 pilot_name,
                 distance_nm: body.distance,
                 flight_time_min: body.flight_time,
-                score: stats_for_post.landing_score.map(|s| s.numeric()),
+                // v0.7.1 Round-3 P2-Fix: Divert-Discord-Embed nutzt jetzt
+                // den GLEICHEN Aggregate-Master-Score wie der normale
+                // PIREP-Discord-Embed (siehe lib.rs ~7945). Vorher zeigte
+                // ein Divert-Embed den alten Touchdown-Klassifikator —
+                // inkonsistent zum "Discord-Embed score = Aggregate"-Vertrag.
+                score: compute_aggregate_master_score(&stats_for_post)
+                    .map(|m| m as i32)
+                    .or_else(|| stats_for_post.landing_score.map(|s| s.numeric())),
                 ..Default::default()
             };
             drop(stats_for_post);
