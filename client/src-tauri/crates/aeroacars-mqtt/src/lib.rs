@@ -501,7 +501,21 @@ pub struct PirepPayload {
     pub divert: Option<bool>,
     pub diverted_to: Option<String>,
     pub notes: Option<String>,
+    /// v0.7.0 — Touchdown-Forensik-Version-Marker.
+    /// 1 = legacy single-shot edge mit vs_at_edge override
+    /// 2 = v0.7.0 pending_td_at + validate_candidate + impact_frame cascade
+    /// MQTT-Consumer + aeroacars-live + zukuenftige Re-Analyzer koennen damit
+    /// klar erkennen welche Auswertungs-Logik fuer den landing_vs_fpm gilt.
+    /// Spec: docs/spec/touchdown-forensics-v2.md.
+    #[serde(default = "default_forensics_version_v1")]
+    pub forensics_version: u8,
 }
+
+/// Default fuer pre-v0.7.0 PIREPs ohne den marker. Wird von serde
+/// genutzt wenn der PIREP-Payload aus alten JSONL-Backups oder
+/// aeroacars-live-Storage deserialisiert wird.
+#[allow(dead_code)]
+fn default_forensics_version_v1() -> u8 { 1 }
 
 enum Cmd {
     Position(Box<PositionPayload>),

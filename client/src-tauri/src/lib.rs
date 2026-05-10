@@ -7667,6 +7667,8 @@ async fn flight_end(
                                 .as_ref()
                                 .and_then(|h| h.actual_icao.clone()),
                             notes: None,
+                            // v0.7.0 — Touchdown-Forensik v2 marker (P2 fix)
+                            forensics_version: touchdown_v2::FORENSICS_VERSION,
                         }
                     };
                     // v0.5.34: PIREP-Forensik ins JSONL — Block/Flight-Time,
@@ -8884,41 +8886,42 @@ fn spawn_touchdown_sampler(app: AppHandle, flight: Arc<ActiveFlight>) {
             //
             // `stats.sampler_touchdown_at.is_none()`-Guard: identisch
             // zur RREF-Edge — nur ein Capture pro Landing.
+            // v0.7.0 — P1 fix: Premium-Touchdown-Pfad (X-Plane-Plugin) geht
+            // jetzt auch ueber pending_td_at + validate_candidate. Vorher
+            // wurde sampler_touchdown_at sofort gesetzt + open_capture_window
+            // aufgerufen, was die touchdown_v2 Validation umging. Wenn das
+            // Plugin einen Float-Streifschuss meldete, wurde der Bug
+            // (DAH 3181-Pattern) reproduziert.
+            //
+            // Jetzt: Premium-event setzt pending_td_at (gleicher Mechanismus
+            // wie der RREF-Edge-Pfad). Im subsequent pending-validation-block
+            // wird validate_candidate aufgerufen. Bei VALIDATED wird die
+            // Premium-VS als override im stats.sampler_touchdown_vs_fpm
+            // verwendet (= "frame-perfect" Wert vom Plugin).
+            //
+            // Effekt: alle Pfade (RREF-edge + Premium-plugin) durchlaufen
+            // identische Validation. False-edges werden konsistent gefiltert.
             if let Some(td) = current_premium_touchdown(&app) {
-                // v0.5.45: Phase-Guard auch hier — wenn das X-Plane-Plugin
-                // ein Touchdown sendet aber wir sind nicht in Landing-Phase,
-                // ignorieren. Sollte selten passieren weil Plugin eigenen
-                // Edge-Detector hat, aber Konsistenz zur RREF-Edge.
                 let in_landing_phase = matches!(
                     stats.phase,
                     FlightPhase::Approach
                         | FlightPhase::Final
                         | FlightPhase::Landing
                 );
-                if stats.sampler_touchdown_at.is_none() && in_landing_phase {
-                    stats.sampler_touchdown_at = Some(now);
-                    stats.sampler_touchdown_vs_fpm = Some(td.captured_vs_fpm);
-                    stats.sampler_touchdown_g_force = Some(td.captured_g_normal);
-                    open_touchdown_capture_window(&mut stats, now);
+                if stats.sampler_touchdown_at.is_none()
+                    && stats.pending_td_at.is_none()
+                    && in_landing_phase
+                {
+                    stats.pending_td_at = Some(now);
+                    // Premium VS/G werden in der pending-validation-Phase als
+                    // Override genutzt, falls VALIDATED. Hier nur loggen:
                     tracing::info!(
                         pirep_id = %flight.pirep_id,
                         captured_vs_fpm = td.captured_vs_fpm,
                         captured_g = td.captured_g_normal,
-                        captured_pitch_deg = td.captured_pitch_deg,
-                        captured_ias_kt = td.captured_ias_kt,
                         source = "x-plane-plugin-premium",
-                        "premium touchdown event captured (frame-perfect)"
+                        "v0.7.0 premium TD candidate detected — pending validation in 1.1s"
                     );
-                    prev_in_air = Some(in_air_now);
-                    let cutoff = now - chrono::Duration::seconds(TOUCHDOWN_BUFFER_SECS);
-                    while stats
-                        .snapshot_buffer
-                        .front()
-                        .is_some_and(|s| s.at < cutoff)
-                    {
-                        stats.snapshot_buffer.pop_front();
-                    }
-                    continue;
                 }
             }
 
@@ -9033,14 +9036,38 @@ fn spawn_touchdown_sampler(app: AppHandle, flight: Arc<ActiveFlight>) {
                                     "v0.7.0 TD candidate VALIDATED — promoting to sampler_touchdown"
                                 );
                                 stats.sampler_touchdown_at = Some(pending_at);
-                                stats.sampler_touchdown_vs_fpm = Some(impact_vs);
+                                // P1: Premium-VS-override falls Plugin den
+                                // candidate ausgeloest hat (frame-perfekter
+                                // Wert vom X-Plane-Plugin)
+                                let premium_vs = current_premium_touchdown(&app)
+                                    .map(|td| td.captured_vs_fpm);
+                                stats.sampler_touchdown_vs_fpm = premium_vs.or(Some(impact_vs));
                                 stats.sampler_touchdown_g_force = Some(result.g_force_peak_in_window);
                                 open_touchdown_capture_window(&mut stats, pending_at);
                                 stats.pending_td_at = None;
-                                // v0.7.0 — emit strukturiertes touchdown_detected event
-                                // Drop stats lock kurz fuer record_event (synchronous JSONL).
+
+                                // v0.7.0 P2 fix — emit TouchdownDetected mit
+                                // den ECHTEN Werten aus compute_landing_rate-
+                                // Cascade (vorher: confidence falsch = sim-string,
+                                // source hardcoded, vs_fpm nur impact_vs ohne
+                                // Cascade-Fallbacks).
+                                let landing_rate = impact_for_validation
+                                    .as_ref()
+                                    .and_then(|ir| touchdown_v2::compute_landing_rate(&v2_samples, ir).ok());
                                 let impact_at_v = impact_for_validation
                                     .as_ref().map(|r| r.impact_at).unwrap_or(pending_at);
+                                let (final_vs, final_src, final_conf) = match &landing_rate {
+                                    Some(lr) => (
+                                        lr.vs_fpm,
+                                        lr.source.clone(),
+                                        format!("{:?}", lr.confidence),
+                                    ),
+                                    None => (
+                                        impact_vs,
+                                        "impact_frame_fallback".to_string(),
+                                        "Unknown".to_string(),
+                                    ),
+                                };
                                 drop(stats);
                                 record_event(
                                     &app,
@@ -9050,9 +9077,9 @@ fn spawn_touchdown_sampler(app: AppHandle, flight: Arc<ActiveFlight>) {
                                         forensics_version: touchdown_v2::FORENSICS_VERSION,
                                         contact_at: pending_at,
                                         impact_at: impact_at_v,
-                                        vs_fpm: impact_vs,
-                                        confidence: format!("{:?}", result.sim),
-                                        source: "vs_at_impact_frame".to_string(),
+                                        vs_fpm: final_vs,
+                                        confidence: final_conf,
+                                        source: final_src,
                                         sim: format!("{:?}", result.sim),
                                     },
                                 );
