@@ -8910,21 +8910,28 @@ fn spawn_touchdown_sampler(app: AppHandle, flight: Arc<ActiveFlight>) {
             // Effekt: alle Pfade (RREF-edge + Premium-plugin) durchlaufen
             // identische Validation. False-edges werden konsistent gefiltert.
             if let Some(td) = current_premium_touchdown(&app) {
+                // ACHTUNG: current_premium_touchdown() ist drain via take().
+                // Das Event ist hier bereits konsumiert — wir muessen es jetzt
+                // *immer* speichern (oder bewusst verwerfen), sonst geht es
+                // still verloren.
                 let in_landing_phase = matches!(
                     stats.phase,
                     FlightPhase::Approach
                         | FlightPhase::Final
                         | FlightPhase::Landing
                 );
-                if stats.sampler_touchdown_at.is_none()
-                    && stats.pending_td_at.is_none()
-                    && in_landing_phase
-                {
+                if !in_landing_phase || stats.sampler_touchdown_at.is_some() {
+                    // Out-of-phase oder TD schon abgeschlossen → bewusst drop.
+                    tracing::debug!(
+                        pirep_id = %flight.pirep_id,
+                        captured_vs_fpm = td.captured_vs_fpm,
+                        in_landing_phase = in_landing_phase,
+                        td_already_captured = stats.sampler_touchdown_at.is_some(),
+                        "premium TD event dropped (out of phase or TD already finalised)"
+                    );
+                } else if stats.pending_td_at.is_none() {
+                    // Premium ist der erste Edge — neuer Candidate.
                     stats.pending_td_at = Some(now);
-                    // Round-3 P2 fix: Premium-Werte direkt im pending-state
-                    // sichern. take_premium_touchdown() ist ein drain — beim
-                    // spaeteren VALIDATED-Block waere current_premium_touchdown()
-                    // schon None, der Override wuerde still ausfallen.
                     stats.pending_td_premium_vs = Some(td.captured_vs_fpm);
                     stats.pending_td_premium_g = Some(td.captured_g_normal);
                     tracing::info!(
@@ -8933,6 +8940,36 @@ fn spawn_touchdown_sampler(app: AppHandle, flight: Arc<ActiveFlight>) {
                         captured_g = td.captured_g_normal,
                         source = "x-plane-plugin-premium",
                         "v0.7.0 premium TD candidate detected — pending validation in 1.1s"
+                    );
+                } else if stats.pending_td_premium_vs.is_none() {
+                    // Round-4 P2 fix: RREF/gear-force hat bereits pending_td_at
+                    // gesetzt, Premium-UDP-Event kommt einen Tick spaeter.
+                    // Vorher (Bug): Event wurde durch den Guard verworfen, der
+                    // Premium-Override fiel beim VALIDATED-Block still weg.
+                    // Jetzt: Premium-Werte werden an den bestehenden Candidate
+                    // angehaengt. pending_td_at bleibt am frueheren RREF-Edge.
+                    let pending_age_ms = stats
+                        .pending_td_at
+                        .map(|t| (now - t).num_milliseconds())
+                        .unwrap_or(0);
+                    stats.pending_td_premium_vs = Some(td.captured_vs_fpm);
+                    stats.pending_td_premium_g = Some(td.captured_g_normal);
+                    tracing::info!(
+                        pirep_id = %flight.pirep_id,
+                        captured_vs_fpm = td.captured_vs_fpm,
+                        captured_g = td.captured_g_normal,
+                        pending_age_ms = pending_age_ms,
+                        source = "x-plane-plugin-premium-late",
+                        "v0.7.0 premium TD attached to existing RREF pending candidate"
+                    );
+                } else {
+                    // Pending hat bereits Premium-Werte — Re-Trigger ignorieren,
+                    // erste Premium-Messung war frame-perfekter.
+                    tracing::debug!(
+                        pirep_id = %flight.pirep_id,
+                        captured_vs_fpm = td.captured_vs_fpm,
+                        existing_premium_vs = stats.pending_td_premium_vs,
+                        "premium TD re-trigger ignored — first premium edge already pending"
                     );
                 }
             }
