@@ -1,0 +1,425 @@
+//! AeroACARS landing-score Single-Source-of-Truth Crate.
+//!
+//! v0.7.1 Phase 0: 1:1-Port von `client/src/lib/landingScoring.ts`.
+//! Per Spec docs/spec/v0.7.1-landing-ux-fairness.md §3.1: alle
+//! Konsumenten (Backend lib.rs, Tauri-Frontend, aeroacars-live
+//! webapp + monitor) nutzen identische Sub-Scores aus dieser
+//! Crate. UI rendert ausschliesslich die hier produzierten
+//! `SubScoreEntry`-Werte aus dem PIREP-Payload — KEIN Recompute.
+//!
+//! Phase 0 portiert die Legacy-Algorithmen 1:1 (Goldenset blockiert
+//! Drift > 0.5 Punkte gegen TS). Phase 2 fuehrt die Asymmetrie und
+//! Skip-Logik ein (F2/F3). Phase 3 baut sub_stability auf 4-Faktor-
+//! Voting um (F7-B).
+
+use serde::{Deserialize, Serialize};
+
+pub mod gate;
+pub mod sub_bounces;
+pub mod sub_fuel;
+pub mod sub_g_force;
+pub mod sub_landing_rate;
+pub mod sub_rollout;
+pub mod sub_stability;
+
+/// Score-Band — 1:1 aus TS `Band`. NICHT umbenennen, bestehende UI
+/// erwartet exakt diese Werte (siehe Spec §5.4 K1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Band {
+    Good,
+    Ok,
+    Bad,
+    Skipped,
+}
+
+impl Band {
+    /// Wire-Format als String fuer JSON/Serde — matched die TS-
+    /// Enum-Werte 1:1 ("good" | "ok" | "bad" | "skipped").
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Band::Good => "good",
+            Band::Ok => "ok",
+            Band::Bad => "bad",
+            Band::Skipped => "skipped",
+        }
+    }
+}
+
+/// Konvertiert Score-Punkte → Band. Identisch zu TS `band(points)`
+/// in landingScoring.ts:138-142.
+pub fn band_from_points(points: u8) -> Band {
+    if points >= 75 {
+        Band::Good
+    } else if points >= 45 {
+        Band::Ok
+    } else {
+        Band::Bad
+    }
+}
+
+/// Sub-Score Wire-Format. Spec §5.4 (P1.5-A): voll ausgebaut auf
+/// alle Render-Felder, damit Web/Monitor ohne Recompute bit-identisch
+/// rendern koennen.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SubScoreEntry {
+    /// Stabile Schluessel — siehe TS-Type SubScore["key"] +
+    /// neue v0.7.1-Schluessel "loadsheet" (F1) + "flare" (F6).
+    pub key: String,
+    /// 0-100, gerundet
+    pub score: u8,
+    /// Alias fuer score — bestehende UI nutzt .points
+    pub points: u8,
+    /// "good" | "ok" | "bad" | "skipped" (siehe Band)
+    pub band: String,
+    /// i18n-Key z.B. "landing.sub.fuel"
+    pub label_key: String,
+    /// formatiert: "-191 fpm", "1.32 g", "+5.2 %"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// i18n-Key z.B. "landing.rat.smooth_touchdown"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rationale_key: Option<String>,
+    /// i18n-Key z.B. "landing.tip.firm_touchdown"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tip_key: Option<String>,
+    /// true wenn Sub-Score nicht bewertet wurde (z.B. VFR ohne ZFW)
+    pub skipped: bool,
+    /// Skip-Reason ("no_planned_burn", "no_actual_burn", ...)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Optionale Warnung (z.B. "planned_burn_may_be_off" bei
+    /// implausibel-hohem Minderverbrauch — Phase 2/F3)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+}
+
+impl SubScoreEntry {
+    /// Hilfs-Konstruktor fuer skipped Sub-Scores.
+    pub fn skipped(key: &str, label_key: &str, reason: &str) -> Self {
+        Self {
+            key: key.to_string(),
+            score: 0,
+            points: 0,
+            band: Band::Skipped.as_str().to_string(),
+            label_key: label_key.to_string(),
+            value: None,
+            rationale_key: None,
+            tip_key: None,
+            skipped: true,
+            reason: Some(reason.to_string()),
+            warning: None,
+        }
+    }
+
+    /// Hilfs-Konstruktor fuer bewertete Sub-Scores. Setzt
+    /// `points = score`, `band` aus `band_from_points`, `tip_key
+    /// = label_key + "tip." + rationale` Konvention.
+    pub fn scored(
+        key: &str,
+        label_key: &str,
+        score: u8,
+        value: String,
+        rationale: &str,
+        band: Band,
+    ) -> Self {
+        Self {
+            key: key.to_string(),
+            score,
+            points: score,
+            band: band.as_str().to_string(),
+            label_key: label_key.to_string(),
+            value: Some(value),
+            rationale_key: Some(format!("landing.rat.{}", rationale)),
+            tip_key: Some(format!("landing.tip.{}", rationale)),
+            skipped: false,
+            reason: None,
+            warning: None,
+        }
+    }
+}
+
+/// Eingabe-Struktur fuer `compute_sub_scores`. Spiegel der TS-Signatur
+/// von `computeSubScores(p)` in landingScoring.ts:218-238 plus die
+/// in Phase 2+ benoetigten Felder fuer F1 (loadsheet) und F6 (flare).
+///
+/// Felder mit `Option<>` werden als "nicht vorhanden" interpretiert
+/// und produzieren entweder den Default-Pfad (z.B. `bounce_count
+/// .unwrap_or(0)`) oder einen skipped Sub-Score (Phase 2: fuel/
+/// loadsheet).
+#[derive(Debug, Clone, Default)]
+pub struct LandingScoringInput {
+    pub vs_fpm: Option<f32>,
+    pub peak_g_load: Option<f32>,
+    pub bounce_count: Option<u32>,
+    pub approach_vs_stddev_fpm: Option<f32>,
+    pub approach_bank_stddev_deg: Option<f32>,
+    pub rollout_distance_m: Option<f32>,
+    pub fuel_efficiency_pct: Option<f32>,
+    // Phase 2 hooks (Felder akzeptieren, Sub-Score-Logik kommt in
+    // Phase 2/F1+F2+F3). Phase 0 ignoriert sie.
+    pub planned_zfw_kg: Option<f32>,
+    pub planned_burn_kg: Option<f32>,
+    pub actual_trip_burn_kg: Option<f32>,
+    // Phase 3 hook (Flare-Sub-Score kommt in Phase 3/F6).
+    pub flare_quality_score: Option<u8>,
+}
+
+/// Berechnet alle Sub-Scores. Phase-0-Verhalten: matched 1:1 die TS-
+/// `computeSubScores`. Phase 2 wird Skip-Logik fuer Fuel/Loadsheet
+/// einfuehren, Phase 3 erweitert subStability auf 4-Faktor-Voting.
+pub fn compute_sub_scores(input: &LandingScoringInput) -> Vec<SubScoreEntry> {
+    let mut out = Vec::with_capacity(8);
+
+    if let Some(vs) = input.vs_fpm {
+        out.push(sub_landing_rate::sub_landing_rate(vs));
+    }
+    if let Some(g) = input.peak_g_load {
+        out.push(sub_g_force::sub_g_force(g));
+    }
+    out.push(sub_bounces::sub_bounces(input.bounce_count.unwrap_or(0)));
+
+    if let Some(stab) = sub_stability::sub_stability_legacy(
+        input.approach_vs_stddev_fpm,
+        input.approach_bank_stddev_deg,
+    ) {
+        out.push(stab);
+    }
+    if let Some(ro) = sub_rollout::sub_rollout(input.rollout_distance_m) {
+        out.push(ro);
+    }
+    if let Some(fu) = sub_fuel::sub_fuel_legacy(input.fuel_efficiency_pct) {
+        out.push(fu);
+    }
+
+    out
+}
+
+/// Master-Score-Aggregation — gewichteter Mittelwert. Spec §5.5
+/// (P1.4-B): bestehende Gewichte beibehalten, skipped Sub-Scores
+/// aus Summe UND Gewichtssumme entfernen.
+///
+/// 1:1-Spiegel von TS `aggregateSubScores` in landingScoring.ts:292-309
+/// plus Phase-1-Erweiterung um neue Sub-Score-Schluessel "loadsheet"
+/// (Gewicht 1) und "flare" (Gewicht 1) — siehe Spec §5.5 Tabelle.
+pub fn aggregate_master_score(subs: &[SubScoreEntry]) -> Option<u8> {
+    if subs.is_empty() {
+        return None;
+    }
+    let mut sum: f32 = 0.0;
+    let mut wsum: f32 = 0.0;
+    for s in subs {
+        if s.skipped {
+            continue; // Skip aus Summe UND Gewichtssumme
+        }
+        let w = match s.key.as_str() {
+            "landing_rate" => 3.0,
+            "g_force" => 3.0,
+            "bounces" => 2.0,
+            "stability" => 2.0,
+            "rollout" => 1.0,
+            "fuel" => 1.0,
+            "loadsheet" => 1.0, // NEU v0.7.1
+            "flare" => 1.0,     // NEU v0.7.1
+            _ => 1.0,           // unbekannt → default 1
+        };
+        sum += s.score as f32 * w;
+        wsum += w;
+    }
+    if wsum > 0.0 {
+        Some((sum / wsum).round() as u8)
+    } else {
+        None
+    }
+}
+
+/// Landing-Kategorie-Klassifikation — Spiegel von TS `classifyLanding`
+/// in landingScoring.ts:280-290. Wird vom Backend lib.rs `LandingScore::
+/// classify` parallel verwendet (siehe lib.rs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LandingCategory {
+    Smooth,
+    Acceptable,
+    Firm,
+    Hard,
+    Severe,
+}
+
+impl LandingCategory {
+    pub fn numeric(self) -> u8 {
+        match self {
+            LandingCategory::Smooth => 100,
+            LandingCategory::Acceptable => 80,
+            LandingCategory::Firm => 60,
+            LandingCategory::Hard => 30,
+            LandingCategory::Severe => 0,
+        }
+    }
+
+    fn order(self) -> u8 {
+        match self {
+            LandingCategory::Smooth => 0,
+            LandingCategory::Acceptable => 1,
+            LandingCategory::Firm => 2,
+            LandingCategory::Hard => 3,
+            LandingCategory::Severe => 4,
+        }
+    }
+
+    fn worse_of(a: LandingCategory, b: LandingCategory) -> LandingCategory {
+        if a.order() >= b.order() {
+            a
+        } else {
+            b
+        }
+    }
+
+    fn bump_up(self) -> LandingCategory {
+        match self {
+            LandingCategory::Smooth => LandingCategory::Acceptable,
+            LandingCategory::Acceptable => LandingCategory::Firm,
+            LandingCategory::Firm => LandingCategory::Hard,
+            LandingCategory::Hard | LandingCategory::Severe => LandingCategory::Severe,
+        }
+    }
+}
+
+fn classify_by_vs(peak_vs_fpm: f32) -> LandingCategory {
+    let vs = peak_vs_fpm.abs();
+    if vs >= sub_landing_rate::T_VS_SEVERE_FPM {
+        LandingCategory::Severe
+    } else if vs >= sub_landing_rate::T_VS_HARD_FPM {
+        LandingCategory::Hard
+    } else if vs >= sub_landing_rate::T_VS_FIRM_FPM {
+        LandingCategory::Firm
+    } else if vs >= sub_landing_rate::T_VS_SMOOTH_FPM {
+        LandingCategory::Acceptable
+    } else {
+        LandingCategory::Smooth
+    }
+}
+
+fn classify_by_g(peak_g: f32) -> LandingCategory {
+    if peak_g >= sub_g_force::T_G_SEVERE {
+        LandingCategory::Severe
+    } else if peak_g >= sub_g_force::T_G_HARD {
+        LandingCategory::Hard
+    } else if peak_g >= sub_g_force::T_G_FIRM {
+        LandingCategory::Firm
+    } else if peak_g >= sub_g_force::T_G_SMOOTH {
+        LandingCategory::Acceptable
+    } else {
+        LandingCategory::Smooth
+    }
+}
+
+pub fn classify_landing(
+    peak_vs_fpm: f32,
+    peak_g: Option<f32>,
+    bounces: u32,
+) -> LandingCategory {
+    let by_vs = classify_by_vs(peak_vs_fpm);
+    let by_g = peak_g.map(classify_by_g).unwrap_or(LandingCategory::Smooth);
+    let mut cat = LandingCategory::worse_of(by_vs, by_g);
+    if bounces > 0 && cat != LandingCategory::Severe {
+        cat = cat.bump_up();
+    }
+    cat
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn band_thresholds_match_ts() {
+        assert_eq!(band_from_points(100), Band::Good);
+        assert_eq!(band_from_points(75), Band::Good);
+        assert_eq!(band_from_points(74), Band::Ok);
+        assert_eq!(band_from_points(45), Band::Ok);
+        assert_eq!(band_from_points(44), Band::Bad);
+        assert_eq!(band_from_points(0), Band::Bad);
+    }
+
+    #[test]
+    fn aggregate_master_uses_weighted_mean() {
+        // landing_rate=100×3 + g_force=80×3 + bounces=70×2 + stability=50×2
+        //   = 300 + 240 + 140 + 100 = 780
+        // wsum = 3+3+2+2 = 10
+        // → 78
+        let subs = vec![
+            SubScoreEntry::scored(
+                "landing_rate",
+                "landing.sub.landing_rate",
+                100,
+                "-50 fpm".into(),
+                "smooth_touchdown",
+                Band::Good,
+            ),
+            SubScoreEntry::scored(
+                "g_force",
+                "landing.sub.g_force",
+                80,
+                "1.30 G".into(),
+                "comfortable_g",
+                Band::Good,
+            ),
+            SubScoreEntry::scored(
+                "bounces",
+                "landing.sub.bounces",
+                70,
+                "1".into(),
+                "one_bounce",
+                Band::Ok,
+            ),
+            SubScoreEntry::scored(
+                "stability",
+                "landing.sub.stability",
+                50,
+                "σ 250 fpm / 4.0°".into(),
+                "average_stability",
+                Band::Ok,
+            ),
+        ];
+        assert_eq!(aggregate_master_score(&subs), Some(78));
+    }
+
+    #[test]
+    fn aggregate_master_skips_skipped_subs() {
+        // Skip senkt nicht den Master-Score
+        let subs = vec![
+            SubScoreEntry::scored(
+                "landing_rate",
+                "landing.sub.landing_rate",
+                100,
+                "-50 fpm".into(),
+                "smooth_touchdown",
+                Band::Good,
+            ),
+            SubScoreEntry::skipped("loadsheet", "landing.sub.loadsheet", "no_planned_zfw"),
+        ];
+        assert_eq!(aggregate_master_score(&subs), Some(100));
+    }
+
+    #[test]
+    fn classify_landing_bumps_for_bounces() {
+        // smooth + 1 bounce → acceptable
+        let cat = classify_landing(-100.0, Some(1.10), 1);
+        assert_eq!(cat, LandingCategory::Acceptable);
+    }
+
+    #[test]
+    fn classify_landing_severe_does_not_bump() {
+        // severe + bounce bleibt severe
+        let cat = classify_landing(-1100.0, None, 1);
+        assert_eq!(cat, LandingCategory::Severe);
+    }
+
+    #[test]
+    fn classify_landing_takes_worst_of_vs_and_g() {
+        // Smooth VS aber severe G
+        let cat = classify_landing(-50.0, Some(2.20), 0);
+        assert_eq!(cat, LandingCategory::Severe);
+    }
+}

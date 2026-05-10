@@ -20,6 +20,7 @@ dependencies = [
  "discord-rich-presence",
  "flate2",
  "geo",
+ "landing-scoring",
  "metar",
  "recorder",
  "regex",
@@ -2310,6 +2311,14 @@ dependencies = [
  "security-framework 3.7.0",
  "windows-sys 0.60.2",
  "zeroize",
+]
+
+[[package]]
+name = "landing-scoring"
+version = "0.7.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
