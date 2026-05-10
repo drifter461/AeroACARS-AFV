@@ -49,7 +49,7 @@ Diese Spec ist die Antwort. Kein neues Verhalten — sondern Dokumentation des S
 | # | Inhalt |
 |---|---|
 | §2 | Aktuelle Architektur (`aircraft_aliases` + `aircraft_types_match` + `title_mentions_icao`) |
-| §3 | Inventur der vorhandenen Aliases (49 Eintraege per v0.7.2) |
+| §3 | Inventur der vorhandenen Aliases (52 Eintraege per v0.7.3 + Polish v0.7.4 Pending) |
 | §4 | Lueckenanalyse: bekannte fehlende Aircraft-Familien |
 | §5 | Test-Matrix pro Aircraft-Familie + Bug-Klasse |
 | §6 | Maintenance-Workflow (was tun wenn ein Live-Bug kommt) |
@@ -283,7 +283,7 @@ Daruebergehend gibt es **Empfehlungen**, je nach Familie sinnvoll oder unnoetig:
 cargo test --lib aircraft_alias_tests
 ```
 
-Aktuell (v0.7.2): 10 Tests fuer 14 Familien — das reicht weil die zwei harten Regeln (Match + Mismatch) erfuellt sind. Mehr Tests sind willkommen, aber kein Release-Blocker.
+Aktuell (v0.7.3 + v0.7.4 Pending): 21 Tests fuer 17 Familien — alle Familien decken die zwei harten Regeln (Match + Mismatch). Mehr Tests sind willkommen, aber kein Release-Blocker.
 
 ### 5.2 Empfohlene Coverage-Erweiterung (Backlog, nicht Pflicht)
 
@@ -374,12 +374,14 @@ Wenn ein Pilot mit `aircraft_mismatch` blockiert wird obwohl er das richtige Flu
 
 **Cargo-Bid + Pax-Sim** (z.B. `MD11F` Bid + `MD-11` Sim-Title — JustFlight Pax-Variante): aktuell **strict** geblockt. Begruendung: Pax-Compartment hat keine Cargo-Lasten-Verteilung, der Pilot wuerde 78t Cargo in einem 290-Sitze-Sim fliegen. Falls in der Praxis das zu hart ist, koennen wir das auf "Warning + Trotzdem-Starten-Button" umstellen (analog `acknowledge_aircraft_mismatch` aus dem Manual-Pfad).
 
-### 7.4 Bekannte Edge-Cases (Stand v0.7.2)
+### 7.4 Bekannte Edge-Cases (Stand v0.7.4 Pending)
 
 | Bid-ICAO | Sim-Title | Match? |
 |---|---|---|
 | `MD11` | "DC-10-30" | ✗ — DC-10 ist Vorlauefer, nicht MD-11 |
-| `B748` | "Boeing 747-8 Freighter (PMDG)" | **derzeit ✓ via Long-Form "747-8" Substring** — Pax-Bid akzeptiert Frachter, gewuenscht (Cargo-Pragmatismus §7.3). Bei B748F-Bid wird gestrickt geblockt sobald wir B748F als eigenen Alias eintragen. |
+| `B748` | "Boeing 747-8 Freighter (PMDG)" | ✓ via Long-Form "747-8" Substring — Pax-Bid akzeptiert Frachter, gewuenscht (Cargo-Pragmatismus §7.3) |
+| `B748F` | "Boeing 747-8" (Pax-Sim) | ✗ strict geblockt seit v0.7.3 — Cargo-Bid akzeptiert KEIN Pax-Sim (Compartment-Unterschied). Test: `cargo_bid_strict_against_pax_sim` |
+| `A359` | "Airbus A350-1000" | ✗ strict geblockt seit v0.7.4 (Polish) — A359-Alias wurde von ["A350-900", "A350"] auf nur ["A350-900"] eingeengt. Test: `a359_does_not_match_a350_1000` |
 
 ---
 

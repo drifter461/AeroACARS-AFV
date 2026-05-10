@@ -427,7 +427,7 @@ fn aircraft_aliases(code: &str) -> &'static [&'static str] {
         "A333" => &["A330-300"],
         "A338" => &["A330-800"],
         "A339" => &["A330-900"],
-        // A330-Frachter — VA-/SimBrief-Alias. Quatar Cargo / Turkish
+        // A330-Frachter — VA-/SimBrief-Alias. Qatar Cargo / Turkish
         // Cargo / Etihad Cargo flogen A330-200F.
         "A332F" => &["A330-200F", "A330-200 FREIGHTER", "A332F"],
         // A340 family
