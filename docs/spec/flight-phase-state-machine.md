@@ -1,6 +1,6 @@
 # Flight-Phase State-Machine — QS-Inventur fuer Bug-Untersuchung
 
-**Status:** v1.1 — **Draft for QS Review** (korrigiert nach VA-Owner Review-Round 1)
+**Status:** v1.2 — **Draft for QS Review** (korrigiert nach VA-Owner Review-Round 2)
 **Zweck:** Vollstaendige Inventur aller Phase-Wechsel + Trigger + Side-Effects + Anti-Flicker-Mechaniken. Damit kann VA-Owner / QS systematisch durchgehen und potenzielle Bug-Klassen finden bevor sie als Live-Bug auftauchen.
 **KEIN Implementierungs-Auftrag** — diese Spec dokumentiert NUR den Status-Quo + markiert Verdachtsstellen.
 
@@ -14,7 +14,25 @@ Die Phase-State-Machine in `step_flight()` (~600 Zeilen in `lib.rs`) ist ueber M
 
 Diese Spec ist die Antwort. Pro Transition: was triggert sie, welche Schwellen, welche Anti-Flicker-Mechaniken sind aktiv, welche Side-Effects passieren. Plus eine Verdachts-Liste (markiert mit **[VERDACHT]**) mit Stellen die im Code-Audit verdaechtig wirkten.
 
-### 0.1 Changelog v1.0 → v1.1
+### 0.1 Changelog v1.1 → v1.2 (Round-2 Korrekturen)
+
+3 P1 + 4 P2 sachliche Fehler aus Review-Round 2. v1.1 beschrieb teils ein "Idealmodell" das nicht zur Code-Realitaet passt — v1.2 zieht das gerade ohne neue Themen aufzumachen.
+
+| # | Fix |
+|---|---|
+| **P1.1** | `landing_at` Authority falsch beschrieben. `finalize_landing_rate()` setzt nur `landing_rate_fpm/peak_vs/confidence/source`, **NICHT** `landing_at`. Sampler setzt `sampler_touchdown_at`, der Streamer-Tick kopiert spaeter nach `landing_at` (lib.rs:11679, 11735, 12767, 12802) |
+| **P1.2** | Final → Landing wird vom **Streamer-Snapshot** getriggert (`!was_on_ground && snap.on_ground`), NICHT vom Sampler. Sampler liefert nur den besseren Timestamp/Rate-Wert, setzt aber keine Phase. Wichtig fuer §3.1 Race-Frage |
+| **P1.3** | Universal Arrived-Fallback-Bedingung praezisiert: Code prueft nur `snap.on_ground && snap.engines_running == 0` (lib.rs:12680), NICHT groundspeed_kt < 1. "Stationary" war falsch — der 30s-Dwell misst tatsaechlich "on ground + engines off", nicht echten Stillstand |
+| **P2.1** | Phase-Enum hat **17** Varianten (inkl. Holding), nicht 16 |
+| **P2.2** | Phase-Diagramm korrigiert: Holding nur `Cruise ↔ Holding` und `Approach ↔ Holding`, nicht aus Climb |
+| **P2.3** | Boarding-Transitions nutzen **`on_surface`** (= `on_ground OR (agl < 5ft && \|VS\| < 50fpm)`) — wichtig fuer Seaplanes |
+| **P2.4** | Invariante I1 (`takeoff_at` "genau einmal") relativiert: Code kann Takeoff in mehreren Sonderpfaden setzen (Boarding direct, TaxiOut direct, TakeoffRoll edge). Korrekte Invariante: "nach erstem Takeoff nicht durch T&G ueberschreiben" |
+
+Plus 4 QS-Test-Verfeinerungen in §14.
+
+---
+
+### 0.2 Changelog v1.0 → v1.1
 
 VA-Owner Review-Round 1 hat 3 P1 + 3 P2 sachliche Fehler aufgedeckt — alle korrigiert:
 
@@ -33,16 +51,16 @@ Plus Authority-Model + Critical-Invariants + Soft/Hard-Phases + 10-Szenarien-Tes
 
 ## 1. Phase-Enum (sim-core)
 
-`crates/sim-core/src/lib.rs::FlightPhase` — 16 Varianten:
+`crates/sim-core/src/lib.rs::FlightPhase` — **17 Varianten** (inkl. Holding):
 
 ```
 Preflight → Boarding → Pushback → TaxiOut → TakeoffRoll → Takeoff
-   → Climb → (Holding) → Cruise → (Holding) → Descent
-   → Approach → (Holding) → Final → Landing
+   → Climb → Cruise (↔ Holding) → Descent
+   → Approach (↔ Holding) → Final → Landing
    → TaxiIn → BlocksOn → Arrived → PirepSubmitted
 ```
 
-`Holding` ist eine echte Phase mit Detection in `check_holding_entry()` + Eintrittspfaden aus Cruise und Approach. Exit-Pfad: zurueck zur vorherigen Phase oder weiter zu Approach falls echter Descent erkannt wird.
+`Holding` ist eine echte Phase mit Detection in `check_holding_entry()`. **Eintrittspfade nur** aus `Cruise` und `Approach` (NICHT aus Climb). Exit-Pfad: zurueck zur vorherigen Phase (Cruise oder Approach) oder weiter zu Approach falls echter Descent waehrend Hold erkannt wird.
 
 ---
 
@@ -62,23 +80,29 @@ Preflight → Boarding → Pushback → TaxiOut → TakeoffRoll → Takeoff
 
 ---
 
-## 3. Authority Model (NEU v1.1)
+## 3. Authority Model (Korrigiert v1.2)
 
-Wer darf was setzen? Klare Trennung wichtig damit nicht 3 Quellen das gleiche Feld konkurrierend schreiben.
+Wer darf was setzen? Klare Trennung wichtig damit nicht mehrere Quellen das gleiche Feld konkurrierend schreiben.
 
 | Komponente | Darf Phase setzen? | Darf Timestamps setzen? | Darf Sub-Score-Felder setzen? |
 |---|---|---|---|
-| **Streamer-Tick** (`step_flight`) | **Ja** (alle Phase-Wechsel) | `block_off_at`, `takeoff_at`, `block_on_at` | `bounce_count`, `landing_score` (klassifiziert) |
-| **Touchdown-Sampler** (50 Hz) | **Nein** | `landing_at` (via `finalize_landing_rate`) | `landing_rate_fpm`, `landing_peak_vs_fpm`, `landing_confidence`, `landing_source` |
-| **Resume/Restore** | **Ja** (1:1 aus persistierter Phase) | Alle persistierten Timestamps | Alle persistierten Score-Felder |
-| **Premium-X-Plane-Plugin** | Nein | `pending_td_premium_*` (intermediate) | Premium-VS/G im pending-state |
+| **Streamer-Tick** (`step_flight`) | **Ja** (alle Phase-Wechsel inkl. Final→Landing) | `block_off_at`, `takeoff_at`, **`landing_at`** (kopiert aus `sampler_touchdown_at`), `block_on_at` | `bounce_count`, `landing_score` (klassifiziert) |
+| **Touchdown-Sampler** (50 Hz) | **Nein** | **`sampler_touchdown_at`** (eigenes Feld!) | `landing_rate_fpm`, `landing_peak_vs_fpm`, `landing_confidence`, `landing_source` (alle via `finalize_landing_rate()`) |
+| **Resume/Restore** | **Ja** (1:1 aus persistierter Phase) | Alle persistierten Timestamps inkl. `landing_at` UND `sampler_touchdown_at` | Alle persistierten Score-Felder |
+| **Premium-X-Plane-Plugin** | Nein | `pending_td_premium_*` (intermediate, im pending-state) | Premium-VS/G im pending-state |
 | **MQTT/Web/Monitor** | Nur **anzeigen**, nie setzen | Nur anzeigen | Nur anzeigen |
 
-### 3.1 [VERDACHT] Sampler vs Streamer Race auf `landing_at`
+### 3.1 [VERDACHT] Sampler vs Streamer Race auf `landing_at` (Praezisiert v1.2)
 
-Streamer-Tick (`step_flight` → Final→Landing-Pfad) und Touchdown-Sampler (50Hz) lesen beide aus `flight.stats.lock()`. Wenn der Sampler ein `landing_at` setzt und der Streamer parallel die Phase auf `Final → Landing` switchen will, koennte der Streamer mit `landing_at = None` checken und seinen eigenen Wert schreiben.
+`finalize_landing_rate()` setzt **NICHT** `landing_at` — es setzt `landing_rate_fpm`, `landing_peak_vs_fpm`, `landing_confidence`, `landing_source`. Der Sampler schreibt seinen TD-Zeitpunkt in `sampler_touchdown_at` (lib.rs:9529).
 
-**Wo nachschauen:** Streamer-Pfad Final→Landing (in `step_flight`) vs `finalize_landing_rate()`-Helper (lib.rs:6470 ungefaehr). Pruefen ob beide den gleichen Wert schreiben oder ob race moeglich ist. Aktueller Schutz: `finalize_landing_rate` ist atomic write, aber der Streamer macht direkten `stats.landing_at = Some(...)`-Write parallel.
+Der Streamer-Tick (`step_flight` Final→Landing-Pfad) liest spaeter `sampler_touchdown_at` und kopiert es nach `stats.landing_at` (lib.rs:11679, 11735, 12767, 12802). 
+
+**Race-Risiko:**
+- Wenn der Sampler `sampler_touchdown_at = T1` setzt, danach der Streamer-Tick laeuft → liest `sampler_touchdown_at = Some(T1)` → schreibt `landing_at = Some(T1)`. ✓
+- Wenn der Streamer den Edge zuerst sieht (`!was_on_ground && on_ground`) und `sampler_touchdown_at` noch `None` ist → Streamer schreibt `landing_at = Some(now)` mit Snapshot-Timestamp. Sampler kommt spaeter mit besserem T1. **Aber landing_at wird nicht ueberschrieben** (lib.rs:12802 nutzt `or_insert`-aequivalent, nicht direkt). Ergebnis: `landing_at` ist Streamer-Snapshot-Zeit, Sampler-Genauigkeit fehlt.
+
+**Wo nachschauen:** sind alle 4 Stellen wo `stats.landing_at = Some(...)` geschrieben wird wirklich idempotent? Aktueller Verdacht: 11679 hat `actual_td_at` als Source-of-Truth, 11735 und 12767 nutzen `sampler_at`, 12802 nutzt `now` als Fallback. Pruefen ob alle drei `if landing_at.is_none()` davor haben.
 
 ---
 
@@ -88,8 +112,8 @@ Was MUSS immer gelten — wenn eine dieser Invarianten gebrochen wird, ist der F
 
 | # | Invariante | Wo gepflegt |
 |---|---|---|
-| **I1** | `takeoff_at` wird genau EINMAL gesetzt (nicht ueberschrieben bei T&G/Restore) | Streamer TakeoffRoll→Takeoff |
-| **I2** | `landing_at` wird vom Sampler atomar mit Confidence/Source gesetzt | `finalize_landing_rate()` |
+| **I1** (P2.4 Korrektur) | Nach **erstem** Takeoff darf `takeoff_at` nicht mehr ueberschrieben werden (z.B. durch T&G die Phase auf Climb revertiert). Code setzt `takeoff_at` in mehreren Sonderpfaden (Boarding-direct, TaxiOut-direct, TakeoffRoll-edge — lib.rs:11192/11337/11397) — der gemeinsame Schutz: einmal gesetzt, T&G-Pfad-Revert beruehrt es nicht | Streamer Takeoff-Sites + T&G-Pfad |
+| **I2** (P1.1 Korrektur) | `landing_at` wird vom **Streamer** geschrieben (kopiert `sampler_touchdown_at` wenn vorhanden, sonst Streamer-Snapshot-Zeit). `finalize_landing_rate` schreibt es **NICHT**. | Streamer Final→Landing + 3 weitere Sites (lib.rs:11679, 11735, 12767, 12802) |
 | **I3** | `block_off_at` < `takeoff_at` < `landing_at` < `block_on_at` (zeitliche Ordnung) | Aktuell **NICHT explizit gepruft** |
 | **I4** | Phase-Wechsel passieren NIE waehrend Pause/Slew | `step_flight` Pause-Freeze (§2 Schritt 7) |
 | **I5** | `was_airborne == true` darf nur nach `block_off_at.is_some() + agl > 50ft + < 30000ft + 2 Ticks Dwell` | `step_flight` was_airborne-Block |
@@ -129,8 +153,8 @@ Pro Phase: aktueller Trigger + Schwellen + bekannte Anti-Flicker. Spalte "Klasse
 | Von | Nach | Trigger | Schwellen | Anti-Flicker | Klasse |
 |---|---|---|---|---|---|
 | Preflight | Boarding | Auto bei flight_start (kein Sim-Check) | — | — | Hard |
-| Boarding | Pushback | `on_ground && groundspeed > 0.5 kt && engines == 0` | 0.5 kt | — | Hard |
-| Boarding | TaxiOut | `on_ground && groundspeed > 0.5 kt && engines > 0` | 0.5 kt | — | Hard |
+| Boarding | Pushback | `on_surface && groundspeed > 0.5 kt && engines == 0` | 0.5 kt | — | Hard |
+| Boarding | TaxiOut | `on_surface && groundspeed > 0.5 kt && engines > 0` | 0.5 kt | — | Hard |
 | Pushback | TaxiOut | `tug_done (pushback_state==3) ODER powered_taxi (engines>0 && gs>3 kt)` nach DWELL | `PUSHBACK_DWELL_SECS=10` | 10 s Dwell | Hard |
 | TaxiOut | TakeoffRoll | `on_ground && gs > 30 kt && engines > 0` | 30 kt | — | Hard |
 | **TakeoffRoll** | **Takeoff** | `was_on_ground && !on_ground` (Edge!) + setzt `takeoff_at` | on_ground-Edge | — | **Hard** |
@@ -144,12 +168,12 @@ Pro Phase: aktueller Trigger + Schwellen + bekannte Anti-Flicker. Spalte "Klasse
 | Approach | Final | `agl < 700 ft` | 700 ft AGL | — | Soft |
 | **Holding** | **Approach/previous** | `bank \|VS\| Bedingungen brechen` ueber `HOLDING_EXIT_DWELL_SECS=30s`; Approach wenn echter Descent erkannt | 30 s Exit-Dwell | 30 s Dwell | Soft |
 | Approach/Final | Climb (Go-Around) | `agl > lowest_seen + 150 ft && VS > 300 fpm` ueber 8s Dwell | `GO_AROUND_AGL_RECOVERY_FT=150`, `GO_AROUND_MIN_VS_FPM=300` | 8 s Dwell, "Lowest-AGL"-Tracker | Hard (T&G/GA) |
-| **Final** | **Landing** | `!was_on_ground && on_ground` (Edge vom 50Hz-Sampler) + setzt `landing_at` via `finalize_landing_rate` | on_ground-Edge | Sampler-Validation (Forensik v2) | **Hard** |
+| **Final** | **Landing** | **Streamer-Tick** detektiert `!was_on_ground && snap.on_ground` (Snapshot-Edge), setzt Phase + `stats.landing_at = Some(actual_td_at)`. Sampler liefert nur den besseren `actual_td_at`-Timestamp (siehe §3.1) | on_ground-Edge | Streamer schreibt direkt; Sampler liefert genauen TD-Zeitpunkt | **Hard** |
 | Landing | Climb (Touch-and-Go) | `agl > 100 ft && !on_ground && engines > 0` fuer 1 s | 100 ft AGL, 1 s Dwell | Reset Landing-Window | Hard |
 | Landing | TaxiIn | `gs < 30 kt && on_ground` | 30 kt | — | Hard |
 | TaxiIn | BlocksOn | `parking_brake && gs < 1 kt && on_ground` | 1 kt | — | Hard |
 | **BlocksOn** | **Arrived** | `engines == 0 && parking_brake && on_ground && (now - block_on) >= 30s` | `ARRIVED_DWELL=30s` | 30 s Dwell | **Hard** |
-| (jede) | Arrived (Universal-Fallback) | `was_airborne && on_ground && engines == 0 && stationary >= 30s` | `ARRIVED_FALLBACK_DWELL=30s` | `was_airborne`-Gate (siehe §7.1) | Hard |
+| (jede) | Arrived (Universal-Fallback) | `was_airborne && on_ground && engines == 0` ueber 30s Dwell. **NICHT** `groundspeed < 1` — der Dwell misst "on ground + engines off", nicht echten Stillstand (siehe §8) | `ARRIVED_FALLBACK_DWELL=30s` | `was_airborne`-Gate | Hard |
 | Arrived | PirepSubmitted | Manuell via `flight_file` Tauri-Command | — | — | Hard |
 
 ### 6.1 Cruise → Holding und Approach → Holding (KORREKTUR v1.1)
@@ -232,28 +256,32 @@ Mitigation in der Praxis: `HOLDING_VS_THRESHOLD_FPM (200 fpm)` fang Pattern-Work
 
 ---
 
-## 8. Universal Arrived-Fallback
+## 8. Universal Arrived-Fallback (KORREKTUR v1.2)
 
 `step_flight` Universal-Branch — Schutzschicht fuer Faelle wo der normale `BlocksOn → Arrived`-Pfad nicht durchlaeuft (z.B. Pilot vergisst Parking-Brake).
 
 ```
-Trigger: was_airborne && on_ground && engines == 0 && stationary_dwell >= 30s
+conditions_basic = snap.on_ground && snap.engines_running == 0
+Trigger: was_airborne && conditions_basic ueber ARRIVED_FALLBACK_DWELL_SECS=30s
        && stats.block_off_at.is_some()
        && pre_block_off == false
        && already_done == false
 ```
+
+**WICHTIG (P1.3 v1.2 Korrektur):** Der Code prueft **NICHT** `groundspeed_kt < 1`. Der 30s-Dwell misst tatsaechlich "on_ground + engines == 0" — also "on ground UND Engines aus". Pilot der mit ausgeschalteten Engines auf der Bahn rollt (sehr ungewoehnlich aber moeglich) wuerde nach 30s als Arrived klassifiziert.
 
 **Lessons Learned:** drei Live-Bugs vor diesem Fallback noetig:
 - PMDG-B738 GSX-Repositioning loeste Arrived bei FL538-Glitch aus — Fix: `agl > 30000 ft` blockt `was_airborne`
 - Pilot mit kurzer Pause vor Block-Off bekam Arrived — Fix: `block_off_at.is_some()` Pflicht
 - Single-Tick-Glitch poisoned `was_airborne` — Fix: 2-Tick-Dwell
 
-### 8.1 [VERDACHT] Fallback-Sicherheit
+### 8.1 [VERDACHT] Fallback-Sicherheit (Praezisiert v1.2)
 
 Fallbacks sind oft die Stellen wo "ploetzlich Flug beendet"-Bugs entstehen. Pruefen ob:
-- Stationary-Dwell wirklich misst (kein gs<1 kt aber Sim-Pause = stationary_dwell waechst falsch)
-- Engines-Check robust (FENIX schaltet APU mal aus, was als engines==0 zaehlen koennte)
-- Near-Arrival-Check: was wenn Pilot 20 km vom Ziel abrollt zum Cargo-Stand?
+
+- **"Engines off while rolling after landing"**: Pilot rollt mit `gs > 0 && engines == 0` (z.B. einer-Engine-Shutdown nach Landing fuer Cargo-Stand-Approach). Nach 30s wird Arrived gefeuert obwohl noch nicht stationary. **Echter Code-Risiko-Punkt.** Empfehlung: `groundspeed_kt < 1` als zusaetzliche Bedingung in `conditions_basic` aufnehmen.
+- Near-Arrival-Check: was wenn Pilot 20 km vom Ziel abrollt zum Cargo-Stand? Der Fallback hat zwei Pfade (near_planned und divert) — pruefen ob beide robust sind.
+- Engines-Check robust: FENIX schaltet APU mal aus, was als `engines_running == 0` zaehlen koennte (separate APU-Signal-Pruefung im Code? — pruefen).
 
 ---
 
@@ -426,7 +454,10 @@ Statt riesiger Test-Liste — diese 10 Szenarien decken die wichtigsten Faelle a
 | **S7** | Go-Around (Airliner Approach 200 ft, dann Vollgas) | go_around_count++, Phase Final → Climb, kein PIREP-Submit |
 | **S8** | Holding (5 Min ueber EDDF VOR) | Phase = Holding, Distance += echte Track (nicht 0), kein Score-Effekt |
 | **S9** | Pause/Resume (Airliner in Cruise → Sim Pause 30 Min → Resume) | Phase bleibt Cruise, kein Phantom-Wechsel beim Resume-Tick |
-| **S10** | Slew/Teleport (Airliner 300 nm slewen) | Phase bleibt, Distance += KEINE 300 nm phantom (siehe §13.3) |
+| **S10** | Slew/Teleport (Airliner 300 nm slewen) | Phase bleibt, **`last_lat/lon` und `distance_nm` werden NICHT von Slew vergiftet** (siehe §13.3 — Slew-Schaden entsteht genau hier) |
+| **S11** (NEU v1.2) | Engines off while rolling (Airliner Landing → engine-out shutdown bei gs=20 kt) | Universal-Arrived-Fallback feuert **NICHT** vor Stillstand (siehe §8.1 Code-Risiko) |
+| **S12** (NEU v1.2) | Final restored, Sim auf anderem Flughafen (App-Restart waehrend Final, Sim laed neuen Flug) | Resume erfordert User-Bestaetigung/Banner — Phase-Wechsel passiert NICHT automatisch beim ersten Tick. Wenn Bestaetigt: erster Snapshot triggert keinen Phantom-Touchdown |
+| **S13** (NEU v1.2) | Holding zwei Faelle: (a) echter 5-Min-Hold ueber VOR, (b) langer ATC-Vector / Orbit-Training | (a) Phase = Holding nach 90s. (b) Bewusst akzeptieren als "false positive" ODER Code-Threshold anpassen — entscheiden in QS-Review |
 
 ### 14.1 Test-Empfehlung
 
@@ -452,4 +483,4 @@ S1, S6, S7, S8, S9, S10 sollten als **Replay-Tests** mit synthetischen Sim-Snaps
 
 ---
 
-**Ende der Spec v1.1 — bitte QS-Review-Round 2. Korrekturen alle eingearbeitet. Naechster Schritt: §13 + §14 systematisch durchgehen, jeden Punkt entweder als "kein Bug, dokumentieren" oder "echter Bug, Hotfix-Spec" klassifizieren.**
+**Ende der Spec v1.2 — bitte QS-Review-Round 3. Korrekturen aus Round 2 alle eingearbeitet. Naechster Schritt: §13 + §14 (jetzt 13 Szenarien) systematisch durchgehen, jeden Punkt klassifizieren.**
