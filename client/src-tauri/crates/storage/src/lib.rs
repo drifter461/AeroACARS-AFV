@@ -325,14 +325,84 @@ pub struct LandingRecord {
     /// Sample-Count im 50-Hz-Buffer (>500 = OK, <100 = ggf. Sample-Loch).
     #[serde(default)]
     pub forensic_sample_count: Option<u32>,
+
+    // ─── v0.7.1 Erweiterung (Spec §5.1 + §5.4) ───────────────────────
+    // Alle Felder mit #[serde(default)] — alte landing_history.json-
+    // Eintraege ohne diese Felder bleiben deserialisierbar.
+
+    /// UX-Cutoff-Marker. 0 = pre-v0.7.1, 1 = v0.7.1+ (sub_scores
+    /// vorhanden, Asymmetrie-Logik aktiv). UI nutzt den Marker fuer
+    /// §3.5 Legacy-Schutz: bei `< 1` wird `LegacyPirepNotice` gezeigt
+    /// statt Sub-Score-Breakdown.
+    #[serde(default)]
+    pub ux_version: u8,
+
+    // F4: Forensik-Sichtbarkeit
+    #[serde(default)]
+    pub landing_confidence: Option<String>,
+    #[serde(default)]
+    pub landing_source: Option<String>,
+
+    // F7: Stability-v2-Felder (P2.1-A: bestehende Backend-Felder
+    // exponieren, keine neue Berechnung)
+    #[serde(default)]
+    pub approach_vs_jerk_fpm: Option<f32>,
+    #[serde(default)]
+    pub approach_ias_stddev_kt: Option<f32>,
+    #[serde(default)]
+    pub approach_stable_config: Option<bool>,
+    #[serde(default)]
+    pub approach_excessive_sink: Option<bool>,
+    /// Stability-Gate-Window-Metadaten (welche Sample-Region wurde
+    /// bewertet). Werte aus landing-scoring/src/gate.rs Konstanten.
+    #[serde(default)]
+    pub gate_window: Option<GateWindow>,
+
+    /// Sub-Score-Breakdown aus der landing-scoring Crate (Spec §3.1
+    /// SSoT). UI liest diese Werte direkt — KEIN Recompute. Bei alten
+    /// PIREPs (ux_version < 1) ist der Vec leer; UI zeigt dann
+    /// LegacyPirepNotice statt Breakdown.
+    #[serde(default)]
+    pub sub_scores: Vec<landing_scoring::SubScoreEntry>,
+}
+
+/// v0.7.1: Stability-Gate-Window-Metadaten (Spec §5.4).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GateWindow {
+    pub start_at_ms: i64,
+    pub end_at_ms: i64,
+    pub start_height_ft: f32,
+    pub end_height_ft: f32,
+    pub sample_count: u32,
 }
 
 /// One (V/S, bank) sample taken during Approach/Final, used by the
 /// approach-stability chart.
+///
+/// v0.7.1 (P1.1-D + P1.3-C): erweitert um Zeit/Hoehe/Flags damit der
+/// Approach-Chart Vorlauf/Gate/Flare-Zonen rendern kann. Alle neuen
+/// Felder optional + #[serde(default)] fuer Backward-Compat: alte
+/// landing_history.json-Eintraege ohne diese Felder lesen sie als None
+/// und der Chart faellt auf den Index-basierten Plot zurueck (kein Crash).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApproachSample {
     pub vs_fpm: f32,
     pub bank_deg: f32,
+    /// ms relativ zum Touchdown (negativ = vor TD)
+    #[serde(default)]
+    pub t_ms: Option<i32>,
+    /// AGL ODER HAT in ft zum Sample-Zeitpunkt
+    #[serde(default)]
+    pub agl_ft: Option<f32>,
+    /// True wenn das Sample im Stability-Gate liegt
+    /// (`MIN_HEIGHT < height <= MAX_HEIGHT` UND nicht in den letzten
+    /// `FLARE_CUTOFF_MS` vor TD).
+    #[serde(default)]
+    pub is_scored_gate: Option<bool>,
+    /// True wenn das Sample in den letzten `FLARE_CUTOFF_MS` vor TD
+    /// liegt (zeitbasiert, Werte aus landing_scoring::gate).
+    #[serde(default)]
+    pub is_flare: Option<bool>,
 }
 
 /// File-backed JSON store of past landings.

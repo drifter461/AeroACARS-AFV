@@ -825,6 +825,15 @@ struct PersistedFlightStats {
     landing_peak_vs_fpm: Option<f32>,
     #[serde(default)]
     landing_peak_g_force: Option<f32>,
+    /// v0.7.1 (Spec F4 + P2.2-D): Confidence + Source werden ATOMAR
+    /// mit landing_rate_fpm via `finalize_landing_rate`-Helper gesetzt.
+    /// Damit koennen sie nicht zum finalen PIREP-Wert auseinanderlaufen.
+    /// "High" | "Medium" | "Low" | "VeryLow"
+    #[serde(default)]
+    landing_confidence: Option<String>,
+    /// "vs_at_impact" | "smoothed_500ms" | "smoothed_1000ms" | "pre_flare_peak"
+    #[serde(default)]
+    landing_source: Option<String>,
     #[serde(default)]
     bounce_count: u8,
     #[serde(default)]
@@ -972,6 +981,10 @@ impl PersistedFlightStats {
             last_lon: stats.last_lon,
             landing_peak_vs_fpm: stats.landing_peak_vs_fpm,
             landing_peak_g_force: stats.landing_peak_g_force,
+            // v0.7.1 (Spec F4 + P2.2-D): Confidence + Source persistieren
+            // damit ein Re-Open des PIREP nach App-Restart konsistent bleibt.
+            landing_confidence: stats.landing_confidence.clone(),
+            landing_source: stats.landing_source.clone(),
             bounce_count: stats.bounce_count,
             landing_score: stats.landing_score,
             landing_score_announced: stats.landing_score_announced,
@@ -1054,6 +1067,8 @@ impl PersistedFlightStats {
         stats.last_lon = self.last_lon;
         stats.landing_peak_vs_fpm = self.landing_peak_vs_fpm;
         stats.landing_peak_g_force = self.landing_peak_g_force;
+        stats.landing_confidence = self.landing_confidence;
+        stats.landing_source = self.landing_source;
         stats.bounce_count = self.bounce_count;
         stats.landing_score = self.landing_score;
         stats.landing_score_announced = self.landing_score_announced;
@@ -1348,6 +1363,13 @@ struct FlightStats {
     landing_peak_vs_fpm: Option<f32>,
     /// Highest G-force observed in the touchdown window.
     landing_peak_g_force: Option<f32>,
+    /// v0.7.1 (Spec F4 + P2.2-D): Confidence + Source. Atomar mit
+    /// `landing_rate_fpm` via `finalize_landing_rate()`-Helper gesetzt
+    /// damit sie zum finalen Wert konsistent bleiben.
+    /// "High" | "Medium" | "Low" | "VeryLow"
+    landing_confidence: Option<String>,
+    /// "vs_at_impact" | "smoothed_500ms" | "smoothed_1000ms" | "pre_flare_peak"
+    landing_source: Option<String>,
     /// How many bounces (on_ground → !on_ground → on_ground) we counted
     /// within the touchdown window. >0 implies the pilot didn't put it
     /// down clean.
@@ -6446,6 +6468,30 @@ fn open_landing_store(app: &AppHandle) -> Option<LandingStore> {
     LandingStore::open(dir).ok()
 }
 
+/// v0.7.1 (Spec F4 + P2.2-D): atomic write of landing rate + confidence
+/// + source.
+///
+/// Realitaet vor v0.7.1: `landing_rate_fpm` wurde an drei Stellen final
+/// gesetzt (lib.rs:9362 touchdown_v2-dump, lib.rs:11532 streamer-tick,
+/// lib.rs:12312 sampler-carry-over). Wenn nur am Edge VALIDATE die
+/// Confidence/Source gespeichert wurden, konnten Werte und Confidence
+/// auseinanderlaufen — z.B. wenn der Streamer einen Smoothed-Fallback
+/// schrieb, Confidence aber noch "High" vom Edge stand.
+///
+/// Loesung: alle 3 Sites rufen diesen Helper. Confidence/Source
+/// IMMER konsistent zum finalen `landing_rate_fpm`.
+fn finalize_landing_rate(
+    stats: &mut FlightStats,
+    vs_fpm: f32,
+    confidence: Option<&str>,
+    source: Option<&str>,
+) {
+    stats.landing_rate_fpm = Some(vs_fpm);
+    stats.landing_peak_vs_fpm = Some(vs_fpm);
+    stats.landing_confidence = confidence.map(|s| s.to_string());
+    stats.landing_source = source.map(|s| s.to_string());
+}
+
 /// Build a `LandingRecord` from the current flight + stats. Returns None
 /// when there's no usable touchdown captured (e.g. PIREP filed before
 /// landing — synthetic / bug). The record is the immutable snapshot we
@@ -6504,12 +6550,43 @@ fn build_landing_record(
         })
         .collect();
 
-    let approach_samples = stats
+    // v0.7.1 Phase 1 (P1.1-D + P1.3-C): erweitert um t_ms, agl_ft,
+    // is_scored_gate, is_flare. Werte aus dem ApproachBufferSample +
+    // landing-scoring Crate Konstanten.
+    //
+    // Phase 1 nutzt agl_ft direkt (nicht HAT) — `arr_elevation_ft` ist
+    // im FlightStats nicht persistiert sondern nur lokal in
+    // compute_approach_stability_v2. Phase 3 kann das praezisieren wenn
+    // noetig; fuer das Chart-Rendering ist agl_ft genau genug.
+    use landing_scoring::gate::{
+        STABILITY_GATE_FLARE_CUTOFF_MS, STABILITY_GATE_MAX_HEIGHT_FT,
+        STABILITY_GATE_MIN_HEIGHT_FT,
+    };
+    let approach_samples: Vec<ApproachSample> = stats
         .approach_buffer
         .iter()
-        .map(|s| ApproachSample {
-            vs_fpm: s.vs_fpm,
-            bank_deg: s.bank_deg,
+        .map(|s| {
+            let height = s.agl_ft;
+            let in_height_band = height > STABILITY_GATE_MIN_HEIGHT_FT
+                && height <= STABILITY_GATE_MAX_HEIGHT_FT;
+            let (t_ms, in_flare) = match stats.landing_at {
+                Some(td_ts) => {
+                    let dt_ms = (s.at - td_ts).num_milliseconds() as i32;
+                    let ms_before_td = -dt_ms as i64;
+                    let in_flare = ms_before_td >= 0
+                        && ms_before_td < STABILITY_GATE_FLARE_CUTOFF_MS;
+                    (Some(dt_ms), in_flare)
+                }
+                None => (None, false),
+            };
+            ApproachSample {
+                vs_fpm: s.vs_fpm,
+                bank_deg: s.bank_deg,
+                t_ms,
+                agl_ft: Some(height),
+                is_scored_gate: Some(in_height_band && !in_flare),
+                is_flare: Some(in_flare),
+            }
         })
         .collect();
 
@@ -6589,6 +6666,40 @@ fn build_landing_record(
         flare_quality_score: ana_i32(&stats.landing_analysis, "flare_quality_score"),
         flare_detected: ana_bool(&stats.landing_analysis, "flare_detected"),
         forensic_sample_count: ana_u32(&stats.landing_analysis, "sample_count"),
+
+        // ─── v0.7.1 Felder (Spec docs/spec/v0.7.1-landing-ux-fairness.md §5) ──
+        // Phase 1 = backbone: Felder durchreichen, kein Pilot-sichtbares
+        // Verhalten geaendert. Phase 2/3 konsumieren sie.
+        ux_version: 1, // v0.7.1+ marker — UI nutzt sub_scores statt LegacyPirepNotice
+        landing_confidence: stats.landing_confidence.clone(),
+        landing_source: stats.landing_source.clone(),
+        // F7 (P2.1-A): bestehende Backend-Felder exponieren — keine
+        // neue Berechnung. Phase 3 wird sub_stability Voting umstellen.
+        approach_vs_jerk_fpm: stats.approach_vs_jerk_fpm,
+        approach_ias_stddev_kt: stats.approach_ias_stddev_kt,
+        approach_stable_config: stats.approach_stable_config,
+        // approach_excessive_sink ist im FlightStats `bool` (nie None),
+        // im Storage-Schema `Option<bool>` fuer backward-compat — wir
+        // wrappen Some() unconditional.
+        approach_excessive_sink: Some(stats.approach_excessive_sink),
+        gate_window: None, // Phase 3: aus stab_v2-Compute befuellen
+        // P1.5: sub_scores aus der landing-scoring Crate. Phase 0
+        // Schatten-Validation hat verifiziert dass Werte bit-identisch
+        // zur TS-Implementation sind. UI kann ab jetzt direkt aus
+        // sub_scores rendern (Spec §3.5 Legacy-Schutz).
+        sub_scores: {
+            let scoring_input = landing_scoring::LandingScoringInput {
+                vs_fpm: stats.landing_peak_vs_fpm.or(stats.landing_rate_fpm),
+                peak_g_load: stats.landing_peak_g_force,
+                bounce_count: Some(stats.bounce_count as u32),
+                approach_vs_stddev_fpm: stats.approach_vs_stddev_fpm,
+                approach_bank_stddev_deg: stats.approach_bank_stddev_deg,
+                rollout_distance_m: stats.rollout_distance_m.map(|m| m as f32),
+                fuel_efficiency_pct: fuel_pct,
+                ..Default::default()
+            };
+            landing_scoring::compute_sub_scores(&scoring_input)
+        },
     })
 }
 
@@ -7677,6 +7788,73 @@ async fn flight_end(
                             notes: None,
                             // v0.7.0 — Touchdown-Forensik v2 marker (P2 fix)
                             forensics_version: touchdown_v2::FORENSICS_VERSION,
+
+                            // ─── v0.7.1 Felder (Spec §5.1) ────────────────
+                            ux_version: 1,
+                            landing_confidence: stats.landing_confidence.clone(),
+                            landing_source: stats.landing_source.clone(),
+                            // F6: Flare-Felder aus dem 50-Hz-Sampler-Buffer
+                            // (landing_analysis ist Option<Value>)
+                            flare_detected: stats
+                                .landing_analysis
+                                .as_ref()
+                                .and_then(|v| v.get("flare_detected"))
+                                .and_then(|v| v.as_bool()),
+                            flare_reduction_fpm: stats
+                                .landing_analysis
+                                .as_ref()
+                                .and_then(|v| v.get("flare_reduction_fpm"))
+                                .and_then(|v| v.as_f64())
+                                .map(|x| x as f32),
+                            flare_quality_score: stats
+                                .landing_analysis
+                                .as_ref()
+                                .and_then(|v| v.get("flare_quality_score"))
+                                .and_then(|v| v.as_i64())
+                                .map(|x| x.clamp(0, 100) as u8),
+                            // F7: Stability-v2-Felder (P2.1-A: bestehende
+                            // Backend-Felder exponieren)
+                            approach_vs_stddev_fpm: stats.approach_vs_stddev_fpm,
+                            approach_bank_stddev_deg: stats.approach_bank_stddev_deg,
+                            approach_vs_jerk_fpm: stats.approach_vs_jerk_fpm,
+                            approach_ias_stddev_kt: stats.approach_ias_stddev_kt,
+                            approach_stable_config: stats.approach_stable_config,
+                            approach_excessive_sink: Some(stats.approach_excessive_sink),
+                            gate_window: None, // Phase 3
+                            // P1.5: Sub-Scores aus der landing-scoring Crate
+                            sub_scores: {
+                                let scoring_input = landing_scoring::LandingScoringInput {
+                                    vs_fpm: stats
+                                        .landing_peak_vs_fpm
+                                        .or(stats.landing_rate_fpm),
+                                    peak_g_load: stats.landing_peak_g_force,
+                                    bounce_count: Some(stats.bounce_count as u32),
+                                    approach_vs_stddev_fpm: stats.approach_vs_stddev_fpm,
+                                    approach_bank_stddev_deg: stats
+                                        .approach_bank_stddev_deg,
+                                    rollout_distance_m: stats
+                                        .rollout_distance_m
+                                        .map(|m| m as f32),
+                                    fuel_efficiency_pct: match (
+                                        stats.takeoff_fuel_kg,
+                                        stats.landing_fuel_kg,
+                                        stats.planned_burn_kg,
+                                    ) {
+                                        (Some(toff), Some(land), Some(plan))
+                                            if toff > land
+                                                && toff > 0.0
+                                                && land >= 0.0
+                                                && plan > 0.0 =>
+                                        {
+                                            let actual = toff - land;
+                                            Some(((actual - plan) / plan) * 100.0)
+                                        }
+                                        _ => None,
+                                    },
+                                    ..Default::default()
+                                };
+                                landing_scoring::compute_sub_scores(&scoring_input)
+                            },
                         }
                     };
                     // v0.5.34: PIREP-Forensik ins JSONL — Block/Flight-Time,
@@ -9358,8 +9536,16 @@ fn spawn_touchdown_sampler(app: AppHandle, flight: Arc<ActiveFlight>) {
                     if let Some(ref v2) = v2_result {
                         // Forensik-v2 hat einen plausiblen VS gewählt
                         // (HARD GUARD strukturell ausgeschlossen positiv)
-                        s.landing_peak_vs_fpm = Some(v2.vs_fpm);
-                        s.landing_rate_fpm = Some(v2.vs_fpm);
+                        // v0.7.1 P2.2-D: atomic write via finalize_landing_rate
+                        // damit confidence/source zum finalen Wert konsistent
+                        // bleiben.
+                        let conf_str = format!("{:?}", v2.confidence);
+                        finalize_landing_rate(
+                            &mut s,
+                            v2.vs_fpm,
+                            Some(&conf_str),
+                            Some(&v2.source),
+                        );
                         tracing::info!(
                             pirep_id = %flight.pirep_id,
                             vs_fpm = v2.vs_fpm,
@@ -11529,8 +11715,20 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
                     }
                 }
 
-                stats.landing_rate_fpm = Some(touchdown_vs);
-                stats.landing_peak_vs_fpm = Some(touchdown_vs);
+                // v0.7.1 P2.2-D: atomic write via finalize_landing_rate.
+                // confidence ist hier nicht direkt vom touchdown_v2-Cascade
+                // verfuegbar (wir sind im legacy-streamer-Pfad), daher None.
+                // Wenn der touchdown_v2-Pfad in Site 1 (lib.rs ~9362) schon
+                // einen Wert mit Confidence gesetzt hat und der Streamer-Tick
+                // hier nochmal feuert, wird Confidence uebergeschrieben — das
+                // ist OK, weil der Streamer-Tick die "endgueltige" Quelle
+                // gegenueber dem Edge-Wert ist (Smoothed-Fallback).
+                finalize_landing_rate(
+                    &mut stats,
+                    touchdown_vs,
+                    None,
+                    Some(vs_source),
+                );
 
                 // G capture: prefer sampler-side (v0.4.4) wenn verfügbar.
                 // Sonst peak G from full buffer (5 s of pre-touchdown
@@ -12308,11 +12506,18 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
                             // these, the dashboard shows "0 fpm / no rating"
                             // for any flight that bypassed Final → Landing.
                             if let Some(vs) = stats.sampler_touchdown_vs_fpm {
+                                // v0.7.1 P2.2-D: nur setzen wenn noch nichts
+                                // gesetzt war (sonst wuerden wir touchdown_v2-
+                                // Werte vom Pfad in Site 1 ueberschreiben).
+                                // Source ist hier "sampler_carry_over" weil
+                                // wir Phase Final → Landing uebersprungen haben.
                                 if stats.landing_rate_fpm.is_none() {
-                                    stats.landing_rate_fpm = Some(vs);
-                                }
-                                if stats.landing_peak_vs_fpm.is_none() {
-                                    stats.landing_peak_vs_fpm = Some(vs);
+                                    finalize_landing_rate(
+                                        &mut stats,
+                                        vs,
+                                        None,
+                                        Some("sampler_carry_over"),
+                                    );
                                 }
                             }
                             if let Some(g) = stats.sampler_touchdown_g_force {

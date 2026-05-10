@@ -52,6 +52,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "flate2",
+ "landing-scoring",
  "reqwest 0.12.28",
  "rumqttc",
  "rustls 0.22.4",
@@ -4399,6 +4400,7 @@ name = "storage"
 version = "0.7.0"
 dependencies = [
  "chrono",
+ "landing-scoring",
  "rusqlite",
  "serde",
  "serde_json",

@@ -471,6 +471,21 @@ pub struct TouchdownPayload {
 
 fn is_false(b: &bool) -> bool { !*b }
 
+/// v0.7.1: Stability-Gate-Window-Metadaten.
+/// Beschreibt welche Sample-Region in `sub_stability` einging.
+/// Spec §5.4 + §3.4: Werte aus `landing_scoring::gate::*`.
+#[derive(Clone, Debug, Default, Serialize, serde::Deserialize)]
+pub struct GateWindow {
+    /// ms relativ zum Touchdown (negativ = vor TD)
+    pub start_at_ms: i64,
+    pub end_at_ms: i64,
+    /// AGL/HAT in ft am Anfang/Ende des Windows
+    pub start_height_ft: f32,
+    pub end_height_ft: f32,
+    /// Anzahl der Samples die `is_scored_gate == true` hatten
+    pub sample_count: u32,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct PirepPayload {
     pub ts: i64,
@@ -509,6 +524,66 @@ pub struct PirepPayload {
     /// Spec: docs/spec/touchdown-forensics-v2.md.
     #[serde(default = "default_forensics_version_v1")]
     pub forensics_version: u8,
+
+    // ─── v0.7.1 Erweiterung (Spec §5.1) ────────────────────────────────
+    // Alle Felder MUESSEN #[serde(default)] haben — alte PIREPs ohne
+    // diese Felder muessen weiter deserialisieren (P3.4 Test-Anforderung).
+
+    /// UX-Cutoff-Marker. 0 = pre-v0.7.1 PIREP (Score nicht-vergleichbar),
+    /// 1 = v0.7.1+ (sub_scores aus landing-scoring Crate, Asymmetrie-
+    /// Logik aktiv). UI nutzt diesen Marker um zu entscheiden ob der
+    /// neue Sub-Score-Breakdown gerendert wird oder LegacyPirepNotice.
+    /// Spec §3.5 Legacy-Schutz.
+    #[serde(default)]
+    pub ux_version: u8,
+
+    // ─── F4: Forensik-Sichtbarkeit ────────────────────────────────────
+    /// Confidence-Tagging vom Touchdown-v2-Cascade — High/Medium/Low/VeryLow.
+    /// Wird parallel zu landing_rate_fpm via `finalize_landing_rate`-Helper
+    /// gesetzt (siehe lib.rs:9362/11532/12312 — P2.2-D fix).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landing_confidence: Option<String>,
+    /// Welche VS-Kette den finalen Wert geliefert hat.
+    /// "vs_at_impact" | "smoothed_500ms" | "smoothed_1000ms" | "pre_flare_peak"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landing_source: Option<String>,
+
+    // ─── F6: Flare als eigene Zone (in PIREP exponiert, war nur in landing_history.json) ─
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flare_detected: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flare_reduction_fpm: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flare_quality_score: Option<u8>,
+
+    // ─── F7: Stability-v2-Felder (P2.1-A: bestehende Backend-Felder exponieren) ──────
+    // Aliase: vs_jerk = mean |ΔVS|, NICHT max. excessive_sink = bool, NICHT count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approach_vs_stddev_fpm: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approach_bank_stddev_deg: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approach_vs_jerk_fpm: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approach_ias_stddev_kt: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approach_stable_config: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approach_excessive_sink: Option<bool>,
+    /// Gate-Window-Metadaten — welche Sample-Region wirklich bewertet wurde.
+    /// Spec F5 Tooltip "Bewertet werden Anflug-Samples zwischen 0 und 1000 ft AGL,
+    /// die letzten 3 Sekunden vor TD ausgeschlossen". Werte aus
+    /// `landing_scoring::gate::STABILITY_GATE_*`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_window: Option<GateWindow>,
+
+    // ─── Sub-Scores aus der landing-scoring Crate (Spec §3.1 SSoT, §5.4 Wire-Format) ──
+    /// Voll ausgebautes `SubScoreEntry`-Format aus der landing-scoring
+    /// Crate — UI/Web rendert direkt aus diesen Felder, KEIN Recompute.
+    /// Bei alten PIREPs (ux_version < 1) ist der Vec leer; UI zeigt
+    /// dann LegacyPirepNotice statt Breakdown.
+    #[serde(default)]
+    pub sub_scores: Vec<landing_scoring::SubScoreEntry>,
 }
 
 /// Default fuer pre-v0.7.0 PIREPs ohne den marker. Wird von serde

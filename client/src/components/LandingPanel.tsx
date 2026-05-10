@@ -105,11 +105,75 @@ export interface LandingRecord {
   flare_quality_score?: number | null;
   flare_detected?: boolean | null;
   forensic_sample_count?: number | null;
+
+  // ─── v0.7.1 Felder (Spec docs/spec/v0.7.1-landing-ux-fairness.md §5) ──
+  // Phase 1: nur Felder durchreichen, keine UI-Aenderung. Phase 3
+  // konsumiert sie (ForensicsBadge + StabilityDetailPanel + Sub-Score-
+  // Breakdown via §3.5 getSubScores Legacy-Schutz).
+
+  /// UX-Cutoff. 0/fehlt = pre-v0.7.1, 1+ = v0.7.1 Sub-Scores aktiv.
+  ux_version?: number;
+  /// Confidence-Tagging vom Touchdown-v2-Cascade.
+  /// "High" | "Medium" | "Low" | "VeryLow"
+  landing_confidence?: string | null;
+  /// "vs_at_impact" | "smoothed_500ms" | "smoothed_1000ms" | "pre_flare_peak"
+  landing_source?: string | null;
+  /// F7: Stability-v2-Felder (P2.1-A — bestehende Backend-Felder
+  /// exponiert, keine neue Berechnung).
+  /// `approach_vs_jerk_fpm` ist mean |ΔVS| (NICHT max).
+  approach_vs_jerk_fpm?: number | null;
+  approach_ias_stddev_kt?: number | null;
+  approach_stable_config?: boolean | null;
+  /// `approach_excessive_sink` ist bool (NICHT count).
+  approach_excessive_sink?: boolean | null;
+  gate_window?: GateWindow | null;
+  /// Sub-Score-Breakdown aus der landing-scoring Crate (Spec §3.1
+  /// SSoT). UI rendert direkt aus diesen Felder, KEIN Recompute.
+  /// Bei alten PIREPs (ux_version < 1) leer/fehlt → LegacyPirepNotice.
+  sub_scores?: SubScoreEntry[];
+}
+
+/// v0.7.1: Stability-Gate-Window-Metadaten (Spec §5.4).
+export interface GateWindow {
+  start_at_ms: number;
+  end_at_ms: number;
+  start_height_ft: number;
+  end_height_ft: number;
+  sample_count: number;
+}
+
+/// v0.7.1 SubScoreEntry — voll ausgebautes Wire-Format aus der
+/// landing-scoring Crate (Spec §5.4 P1.5-A). Spiegel des Rust-Typs.
+/// UI rendert direkt aus diesen Felder, kein Recompute.
+export interface SubScoreEntry {
+  key: string;             // "landing_rate" | "g_force" | "bounces" | ...
+  score: number;           // 0-100
+  points: number;          // Alias fuer score (bestehende UI nutzt .points)
+  band: 'good' | 'ok' | 'bad' | 'skipped';
+  label_key: string;       // i18n key z.B. "landing.sub.fuel"
+  value?: string;          // formatiert: "-191 fpm"
+  rationale_key?: string;
+  tip_key?: string;
+  skipped: boolean;
+  reason?: string;
+  warning?: string;
 }
 
 export interface ApproachSample {
   vs_fpm: number;
   bank_deg: number;
+  // v0.7.1 (P1.1-D + P1.3-C): Zeit/Hoehe/Flags damit Approach-Chart
+  // Vorlauf/Gate/Flare-Zonen rendern kann. Alle optional —
+  // alte PIREPs ohne diese Felder fallen auf Index-basierten Plot zurueck.
+  t_ms?: number | null;
+  agl_ft?: number | null;
+  /// True wenn das Sample im Stability-Gate liegt
+  /// (`MIN_HEIGHT < height <= MAX_HEIGHT` UND nicht in den letzten
+  /// `FLARE_CUTOFF_MS` vor TD).
+  is_scored_gate?: boolean | null;
+  /// True wenn das Sample in den letzten `FLARE_CUTOFF_MS` vor TD
+  /// liegt (zeitbasiert).
+  is_flare?: boolean | null;
 }
 
 // ---- Score breakdown ---------------------------------------------------
