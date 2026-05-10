@@ -4,6 +4,115 @@ Alle nennenswerten Änderungen an AeroACARS. Format: lose an [Keep a Changelog](
 
 ---
 
+## [v0.7.6] — 2026-05-11
+
+🧮 **Landing Payload & UI Consistency — Score, Payload, Forensik und Web-Anzeige zeigen jetzt dieselbe Wahrheit. Drei reale Datenkonsistenz-Bugs beseitigt, durch zwei v0.7.5-Pilot-Logs belegt.**
+
+### Was
+
+QS-Sichtung von zwei realen v0.7.5-Pilot-Logs (SAS9987 EDDH→ENSB, GSG303 2OR3→OR66) hat drei Datenkonsistenz-Bugs aufgedeckt, bei denen Score, PIREP-Payload und Web-Dashboard sich gegenseitig widersprachen. Score-Algorithmus selbst war NICHT kaputt — alle Bugs sassen im Payload-Contract, im Web-Frontend, oder in fehlender Sicherheitsnetz-Logik. v0.7.6 ist daher ein reiner Konsistenz-Schnitt.
+
+Spec: `docs/spec/v0.7.6-landing-payload-consistency.md` (v1.2 final).
+
+### P1-1 — Fuel-Contract sauberziehen
+
+PIREP-Payload bekommt das neue Feld `actual_trip_burn_kg` = `takeoff_fuel_kg − landing_fuel_kg`. Single Source of Truth fuer OFP-Vergleich zwischen Pilot-Client, Web-Dashboard, Discord-Embed und phpVMS-Modul.
+
+`fuel_used_kg` bleibt im Payload, ist aber **explizit als raw/sim-cumulative** markiert — bei MSFS oft Cumulative-Counter seit Sim-Start. Real-Beleg SAS9987: 19984 kg gemeldet bei tatsaechlich 8762 kg Trip-Burn → +117% Phantom-Abweichung im Web-Dashboard.
+
+**Web-Dashboard Fallback-Kette** fuer Backward-Compat:
+
+```
+actualBurn = actual_trip_burn_kg                    (v0.7.6+ PIREPs)
+          ?? takeoff_fuel_kg - landing_fuel_kg       (v0.7.5 Backward-Compat)
+          ?? null                                     (Fuel-Zeile ausgeblendet)
+```
+
+`pl.fuel_used_kg` darf fuer den OFP-Vergleich **niemals direkt** genutzt werden.
+
+Auch im Recorder (`recorder/src/db.ts`) wurde der SessionStats-Fuel-Compute auf die Trip-Burn-Reihenfolge umgestellt: Position-Stream-Delta hat Vorrang vor Raw-PIREP-`fuel_used_kg`.
+
+### P1-2 — Bounce-Quelle synchronisieren
+
+Bei SAS9987 zeigte v0.7.5 gleichzeitig `landing_analysis.bounce_count = 1` (max AGL 13.6 ft Wiederabheben) UND `payload.bounce_count = 0` UND Sub-Score `bounces = 100 (clean)`. Drei Quellen, zwei Wahrheiten.
+
+Fix in der **Forensik-Schicht** (touchdown_v2 — nicht landing-scoring, weil nur die Forensik AGL-Verlauf kennt):
+
+```rust
+pub const BOUNCE_FORENSIC_MIN_AGL_FT: f32 = 5.0;   // sichtbar im Replay
+pub const BOUNCE_SCORED_MIN_AGL_FT:   f32 = 15.0;  // bestraft im Sub-Score
+```
+
+`landing_analysis` emittiert jetzt **drei** Counts:
+- `forensic_bounce_count` (≥ 5 ft) — kleine Hopser im Replay sichtbar
+- `scored_bounce_count` (≥ 15 ft) — was wirklich im Sub-Score zaehlt
+- `bounce_count` = `forensic_bounce_count` (Backward-Compat fuer alte Reader)
+
+Die Override-Logik nach dem 50-Hz-Sampler-Dump schreibt jetzt `scored_bounce_count` zurueck in `s.bounce_count`, sodass alle 5 Score-Pfade konsistent sind. Zentraler `scored_bounce_count_for_score(stats)`-Helper macht die Semantik im Code explizit.
+
+SAS9987-Klasse (13.6 ft) → `forensic_bounce_count: 1, scored_bounce_count: 0`, Sub-Score bleibt 100 (clean) — alle drei Quellen erzaehlen jetzt die gleiche Geschichte.
+
+### P1-3 — Runway-Geometry-Trust-Check
+
+GSG303 v0.7.5: `arr_airport=OR66` aber `runway_match_icao=K5S9` (3.5 km Centerline-Offset, Float-Distance −613 m). Score behandelte das trotzdem als "TD Zone 1, excellent stop".
+
+Neue **pure-function** `runway_geometry_trust_check()` mit 4 Reasons:
+
+```rust
+pub const RUNWAY_TRUST_MAX_CENTERLINE_OFFSET_M: f32 = 200.0;
+pub const RUNWAY_TRUST_MIN_FLOAT_DISTANCE_M:    f32 = -100.0;
+
+// Returns (trusted, reason):
+//   "no_runway_match"             — None matched_icao → silent in UI
+//   "icao_mismatch"               — Match != arr/divert → Alarm-Pill
+//   "centerline_offset_too_large" — > 200 m → Alarm-Pill
+//   "negative_float_distance"     — < -100 m → Alarm-Pill
+```
+
+ICAO-Vergleich ist `eq_ignore_ascii_case` — robust gegen Mixed-Case aus externen Quellen.
+
+PIREP-Payload + TouchdownPayload + LandingRecord (storage) bekommen `runway_geometry_trusted` + `runway_geometry_reason`-Felder. Bei `trusted=false` wird `landing_touchdown_zone` auf `None` gesetzt. `landing_float_distance_m` bleibt als Raw-Wert (Diagnostik).
+
+**Web-Dashboard + Pilot-Client** blenden bei untrusted geometry komplett aus:
+- Touchdown-Zone, Float-Distance, Centerline-Offset, Past-Threshold
+- Runway-ID + Runway-Length (waeren bei GSG303 sonst "K5S9/16 (asphalt) · 1152 m" = irrefuehrend)
+- RunwayDiagram
+
+Sichtbar bleibt nur ein lokalisierter Hint-Pill mit dem Reason. **Rollout-Sub-Score bleibt valide** (kommt aus GPS-Track, nicht aus Runway-DB).
+
+`no_runway_match` (Privatplaetze ohne DB-Eintrag) zeigt **kein** Alarm-Pill — silent Suppression der Geometry-Tiles.
+
+### P2 — Render-Artefakte + Legacy-Felder
+
+- React `&&`-mit-Zahl-Bug in `PirepFeed.tsx` gefixt (`{count && ...}` rendert "0" wenn count exakt 0). `(count ?? 0) > 0` Pattern statt truthy-Check. Verhindert die `00`/`0`-Artefakte aus dem v0.7.5-Screenshot.
+- `Stat label="Fuel"` in PilotHistory: `!= null` statt truthy → 0 kg (Glider-Sessions) wird jetzt korrekt angezeigt.
+- Monitor PirepFeed bekommt gleiche Fuel-Fallback-Kette wie Webapp.
+- `fuel_efficiency_pct` (alter, abweichender Berechnungs-Wert) ist `@deprecated since v0.7.6` markiert — Web rendert nicht mehr, Feld bleibt im Payload fuer externe Discord-Embeds / Custom-Dashboards. Single Source of Truth: `sub_scores[fuel].value`.
+
+### Backward-Compat
+
+- **Score-Algorithmus** unveraendert. Bei Re-Anzeige der zwei Real-Logs:
+  - SAS9987: Score bleibt **67**, OFP-Treue bleibt **95**
+  - GSG303: Score bleibt **49**, Fuel-Skip bleibt
+- Alte v0.7.5-PIREPs ohne `actual_trip_burn_kg` / `runway_geometry_trusted` werden via Fallback-Ketten korrekt angezeigt.
+- Alte landing_history.json-Eintraege im Pilot-Client bleiben deserialisierbar (alle neuen Felder `Option<...>` mit `serde(default)`).
+- Banner-Anzeige im Pilot-Client (Headline) war seit v0.7.1 schon master-score-derived → kein Change.
+
+### Tests
+
+- **131/131 gruen** (vorher 116)
+- 72 lib unit (+15 neue v0.7.6-Tests: 11 runway-trust + 3 bounce-threshold + 1 case-insensitive)
+- 30 sim_core unit
+- 8 goldenset (landing-scoring)
+- 13 phase_fsm_replay (v0.7.5)
+- 8 touchdown_v2_replay
+
+### Update-Empfehlung
+
+Auto-Updater zieht v0.7.6 automatisch fuer alle bestehenden v0.7.5-Pilot-Clients. Web-Dashboard auf live.kant.ovh nutzt ab v0.7.6 die neuen Felder bevorzugt, mit Fallback fuer alle vorhandenen v0.7.5-PIREPs in der DB.
+
+---
+
 ## [v0.7.5] — 2026-05-10
 
 🛡️ **Phase-Safety Hotfix — zwei reale State-Machine-Bugs beseitigt, durch echte VPS-Pilot-Daten belegt + replay-getestet.**
