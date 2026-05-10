@@ -109,7 +109,8 @@
       "bounces": "Bounce-Qualität",
       "stability": "Anflug-Stabilität",
       "rollout": "Bahn-Auslastung",
-      "fuel": "Spritverbrauch"
+      "fuel": "OFP-Treue",
+      "loadsheet": "Loadsheet"
     },
     "info": {
       "landing_rate": "Vertikalgeschwindigkeit (V/S) im Moment des Aufsetzens, in Fuß pro Minute. Negativ = sinkend. Boeing-/Airbus-FCOM-Schwellen: bis −240 fpm gilt als sauber, ab −600 fpm als Hard-Landing-Inspektion fällig.",
@@ -117,7 +118,8 @@
       "bounces": "Wie oft das Flugzeug nach dem ersten Aufsetzen wieder über 35 ft AGL gestiegen und erneut gelandet ist (BeatMyLanding-Algorithmus). 0 = sauber gesetzt; jeder Bounce drückt den Score.",
       "stability": "Standardabweichung (σ) der Sinkrate über die letzten ~10 Minuten Anflug. Niedrig = ruhig und konstant geflogen, hoch = wackelig. < 100 fpm σ gilt als sehr stabil; > 300 fpm σ ist Anlass für Stabilized-Approach-Review.",
       "rollout": "Prozent der verfügbaren Bahnlänge die du vom Touchdown bis zum Verlassen (Highspeed-Exit < 40 kt oder > 30° Heading-Abweichung) genutzt hast. < 70 % ist normal; > 85 % heißt knapp — bei nasser Bahn riskant.",
-      "fuel": "Abweichung des tatsächlichen Trip-Burns vom SimBrief-Plan. Positiv = mehr verbraucht, negativ = weniger. ±5 % ist saubere Performance-Kalkulation; > ±20 % deutet auf falsche Cruise-Höhe oder Wind-Einfluss.",
+      "fuel": "Treue zum SimBrief-OFP-Plan. Mehrverbrauch zählt (Cost-Index, Höhe oder Wind nicht passend), Minderverbrauch wird NICHT bestraft. Bei >15% unter Plan: Hinweis auf möglichen OFP-/Mess-/Routenfehler.",
+      "loadsheet": "Vorhandensein von Loadsheet-Daten (ZFW + TOW). Im VFR-/Manual-Mode ohne Dispatch-Daten wird dieser Sub-Score übersprungen — kein 0-Penalty.",
       "score_section": "Sechs Sub-Scores à 0-100 Punkte. Jede Kachel zeigt Wert, Punktzahl und farbigen Balken (grün/gelb/rot). Die schwächste Kategorie wird als nächstes Verbesserungs-Ziel im Coach-Tipp aufgegriffen.",
       "runway_section": "Visualisierung deines Touchdowns auf der Bahn. Das blaue Symbol markiert den Aufsetzpunkt, das grüne Band zeigt die Ausrollstrecke bis zum Verlassen der Bahn (Highspeed-Exit oder Stopp). Werte unten: Gesamtlänge, Centerline-Abweichung, Distanz hinter der Schwelle, genutzte Bahnlänge in Prozent.",
       "fuel_section": "Block = Spritmenge beim Abblock; TO Fuel = nach dem Rollen am Startpunkt; LDG Fuel = bei Touchdown; TOW = Takeoff Weight (= Leergewicht + Last + TO Fuel); LDW = Landing Weight. Plan-Werte stammen aus dem SimBrief-OFP, falls vorhanden. Differenzen Plan-vs-Real ergeben den Fuel-Efficiency-Score."
@@ -153,7 +155,10 @@
       "near_plan": "Nahe am Plan",
       "off_plan": "Vom Plan abgewichen",
       "very_off_plan": "Stark vom Plan abgewichen",
-      "way_off_plan": "Weit vom Plan entfernt"
+      "way_off_plan": "Weit vom Plan entfernt",
+      "efficient": "Effizient (Minderverbrauch)",
+      "very_efficient": "Sehr effizient — OFP prüfen",
+      "loadsheet_present": "Loadsheet vorhanden"
     },
     "tip": {
       "smooth_touchdown": "Genau so — leichter Flare zur richtigen Zeit, sanfte Reduzierung der Sinkrate kurz vor TD.",
@@ -184,10 +189,25 @@
       "marginal_runway": "Bahnreserve war knapp — bei nasser Bahn kritisch. Höheres Auto-Brake-Setting wählen.",
       "on_plan": "Sprit exakt auf Plan — saubere Performance-Kalkulation.",
       "near_plan": "Sehr nah am Plan, alles im grünen Bereich.",
-      "off_plan": "Abweichung vom OFP. Cruise-Speed-Mach und Höhe gegen Plan prüfen.",
-      "very_off_plan": "Deutliche Plan-Abweichung. Cost-Index, Cruise-Höhe oder Wind-Einfluss prüfen.",
-      "way_off_plan": "Stark vom Plan ab — eventuell falsches OFP oder andere Strecke geflogen.",
+      "off_plan": "Mehrverbrauch gegenüber OFP. Cruise-Speed-Mach und Höhe gegen Plan prüfen.",
+      "very_off_plan": "Deutlicher Mehrverbrauch. Cost-Index, Cruise-Höhe oder Wind-Einfluss prüfen.",
+      "way_off_plan": "Starker Mehrverbrauch — eventuell falsches OFP oder andere Strecke geflogen.",
+      "efficient": "Sparsam geflogen — gut! Minderverbrauch wird nicht bestraft.",
+      "very_efficient": "Sehr sparsam (>15% unter Plan). Prüfen ob OFP-Burn korrekt war oder eine kürzere Route geflogen wurde.",
+      "loadsheet_present": "Loadsheet-Daten vorhanden — alles im grünen Bereich.",
       "fallback": "Solide Landung. Im Score-Breakdown siehst du wo es noch Luft nach oben gibt."
+    },
+    "forensics": {
+      "label": "Forensik v2",
+      "source": "Quelle: {{source}}",
+      "source_unknown": "Quelle: nicht verfügbar"
+    },
+    "confidence": {
+      "high": "Confidence: Hoch",
+      "medium": "Confidence: Mittel",
+      "low": "Confidence: Niedrig",
+      "very_low": "Confidence: Sehr niedrig",
+      "unknown": "Confidence: —"
     },
     "vs_at_edge": "Sinkrate am Edge",
     "vs_at_edge_hint": "Linear interpoliert auf den exakten on_ground-Edge zwischen zwei 20-ms-Samples (= Volanta-äquivalent)",

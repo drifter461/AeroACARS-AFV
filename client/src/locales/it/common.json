@@ -109,7 +109,8 @@
       "bounces": "Qualità rimbalzo",
       "stability": "Stabilità avvicinamento",
       "rollout": "Pista utilizzata",
-      "fuel": "Consumo carburante"
+      "fuel": "Aderenza OFP",
+      "loadsheet": "Loadsheet"
     },
     "info": {
       "landing_rate": "Velocità verticale (V/S) al momento del touchdown, in piedi al minuto. Negativa = in discesa. Soglie FCOM Boeing/Airbus: fino a −240 fpm è pulito, da −600 fpm in poi è dovuta un'ispezione hard-landing.",
@@ -117,7 +118,8 @@
       "bounces": "Quante volte l'aereo è risalito sopra i 35 ft AGL dopo il primo touchdown e poi è atterrato di nuovo (algoritmo BeatMyLanding). 0 = atterraggio pulito; ogni rimbalzo riduce il punteggio.",
       "stability": "Deviazione standard (σ) del rateo di discesa negli ultimi ~10 minuti di avvicinamento. Bassa = volo costante, alta = instabile. < 100 fpm σ è molto stabile; > 300 fpm σ richiede una review di stabilized-approach.",
       "rollout": "Percentuale della pista utilizzata dal touchdown all'uscita (highspeed-exit < 40 kt o > 30° di deviazione di heading). < 70 % è normale; > 85 % è al limite — rischioso su pista bagnata.",
-      "fuel": "Scostamento del consumo reale dal piano SimBrief. Positivo = consumato di più, negativo = di meno. ±5 % è una calcolazione di performance pulita; > ±20 % indica quota di crociera errata o influenza del vento.",
+      "fuel": "Aderenza al piano OFP SimBrief. Il consumo eccessivo conta (cost-index, quota o vento non corretti), il consumo ridotto NON viene penalizzato. >15% sotto piano segnala possibile errore OFP/misurazione/rotta.",
+      "loadsheet": "Presenza dei dati di loadsheet (ZFW + TOW). Voli VFR/manuali senza dati dispatch saltano questo sub-score — nessuna penalità.",
       "score_section": "Sei sotto-punteggi da 0-100 punti. Ogni riquadro mostra valore, punti e barra colorata (verde/giallo/rosso). La categoria più debole viene presa come prossimo obiettivo nel suggerimento del coach.",
       "runway_section": "Visualizzazione del touchdown sulla pista. Il simbolo blu indica il punto di tocco, la banda verde mostra la distanza di arresto fino all'uscita (highspeed-exit o stop). Valori sotto: lunghezza totale, scostamento dall'asse, distanza dalla soglia, percentuale di pista utilizzata.",
       "fuel_section": "Block = carburante al pushback; TO Fuel = dopo il rullaggio al punto di decollo; LDG Fuel = al touchdown; TOW = peso al decollo (= peso a vuoto + carico + carburante TO); LDW = peso all'atterraggio. I valori pianificati provengono dall'OFP SimBrief, se disponibile. Le differenze piano-vs-reale generano il punteggio Fuel-Efficiency."
@@ -153,7 +155,10 @@
       "near_plan": "Vicino al piano",
       "off_plan": "Scostato dal piano",
       "very_off_plan": "Molto fuori piano",
-      "way_off_plan": "Lontano dal piano"
+      "way_off_plan": "Lontano dal piano",
+      "efficient": "Efficiente (sotto piano)",
+      "very_efficient": "Molto efficiente — verifica OFP",
+      "loadsheet_present": "Loadsheet presente"
     },
     "tip": {
       "smooth_touchdown": "Esattamente così — flare leggero al momento giusto, riduzione dolce del rateo di discesa appena prima del TD.",
@@ -184,10 +189,25 @@
       "marginal_runway": "Margine pista al limite — critico su pista bagnata. Scegli un setting auto-brake più alto.",
       "on_plan": "Carburante esatto sul piano — calcolazione di performance pulita.",
       "near_plan": "Molto vicino al piano, tutto in zona verde.",
-      "off_plan": "Scostamento dall'OFP. Verifica cruise-speed-mach e quota contro il piano.",
-      "very_off_plan": "Scostamento netto dal piano. Verifica cost-index, quota di crociera o influenza del vento.",
-      "way_off_plan": "Molto fuori piano — possibile OFP errato o rotta diversa volata.",
+      "off_plan": "Consumo eccessivo rispetto all'OFP. Verifica cruise-speed-mach e quota contro il piano.",
+      "very_off_plan": "Consumo eccessivo netto. Verifica cost-index, quota di crociera o influenza del vento.",
+      "way_off_plan": "Forte consumo eccessivo — possibile OFP errato o rotta diversa volata.",
+      "efficient": "Volato risparmioso — bene! Il sotto-consumo non viene penalizzato.",
+      "very_efficient": "Molto efficiente (>15% sotto piano). Verifica se il piano OFP era corretto o se hai volato una rotta più corta.",
+      "loadsheet_present": "Dati di loadsheet presenti — tutto in zona verde.",
       "fallback": "Atterraggio solido. Nello score-breakdown vedi dove c'è ancora margine di miglioramento."
+    },
+    "forensics": {
+      "label": "Forensica v2",
+      "source": "Fonte: {{source}}",
+      "source_unknown": "Fonte: non disponibile"
+    },
+    "confidence": {
+      "high": "Confidenza: Alta",
+      "medium": "Confidenza: Media",
+      "low": "Confidenza: Bassa",
+      "very_low": "Confidenza: Molto bassa",
+      "unknown": "Confidenza: —"
     },
     "vs_at_edge": "Rateo discesa al touchdown",
     "vs_at_edge_hint": "Interpolato linearmente al momento esatto del contatto al suolo (= equivalente Volanta)",

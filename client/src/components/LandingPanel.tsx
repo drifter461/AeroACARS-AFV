@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { useConfirm } from "./ConfirmDialog";
+import { ForensicsBadge } from "./ForensicsBadge";
 // v0.5.47 — Score-Modul ist jetzt zentral, identisch zu webapp/src/
 // components/landingScoring.ts. Dieselben Schwellen, Bands, Coach-Tipps
 // für Pilot-App und Live-Monitor.
@@ -198,9 +199,33 @@ export interface SubScore {
 // Webapp und Client nutzen jetzt dieselben Schwellen, Bands und
 // Coach-Tipps. SubScore (lokal) ist strukturidentisch zu LibSubScore.
 
-function computeSubScores(r: LandingRecord): SubScore[] {
-  // peak_vs_fpm wenn vorhanden bevorzugen (Sampler-recomputed Spitzenwert),
-  // sonst landing_rate_fpm (Edge-Sample). Spiegelt Webapp-Verhalten.
+/// v0.7.1 Phase 3 (Spec §3.5 Legacy-Schutz):
+///   - ux_version >= 1 → gespeicherte sub_scores aus dem Record nutzen
+///     (kein Recompute), damit Werte konsistent zum PIREP-Payload sind
+///   - ux_version < 1 → Legacy-Pfad mit libComputeSubScores (nur fuer
+///     pre-v0.7.1-PIREPs als Backward-Compat)
+///   - bei v0.7.1+ ohne sub_scores (sollte nie passieren) → Legacy-Pfad
+function getSubScores(r: LandingRecord): SubScore[] {
+  const ux = r.ux_version ?? 0;
+  if (ux >= 1 && r.sub_scores && r.sub_scores.length > 0) {
+    // Phase 3: vom Backend (landing-scoring Crate) berechnete Sub-Scores
+    // direkt verwenden. SubScoreEntry ist Wire-Format-kompatibel zu
+    // SubScore (key, points, value, band, rationale via rationale_key).
+    return r.sub_scores
+      .filter((s) => !s.skipped) // skipped Sub-Scores werden separat als "nicht bewertet" gerendert
+      .map((s) => {
+        const band: SubScore["band"] =
+          s.band === "good" || s.band === "ok" || s.band === "bad" ? s.band : "ok";
+        return {
+          key: s.key,
+          points: s.points ?? s.score,
+          value: s.value ?? "",
+          band,
+          rationale: (s.rationale_key ?? "").replace(/^landing\.rat\./, ""),
+        };
+      });
+  }
+  // Legacy-Pfad fuer pre-v0.7.1-PIREPs (forward-compat)
   const peakVs = r.landing_peak_vs_fpm ?? r.landing_rate_fpm;
   const subs: LibSubScore[] = libComputeSubScores({
     vs_fpm: peakVs,
@@ -211,9 +236,12 @@ function computeSubScores(r: LandingRecord): SubScore[] {
     rollout_distance_m: r.rollout_distance_m,
     fuel_efficiency_pct: r.fuel_efficiency_pct,
   });
-  // SubScore-Lokaltyp ist eine Erweiterung von LibSubScore (gleiche
-  // Felder + nichts Neues) — direktes Cast ist sicher.
   return subs as SubScore[];
+}
+
+// Alias fuer Backward-Compat mit bestehenden Aufruf-Stellen
+function computeSubScores(r: LandingRecord): SubScore[] {
+  return getSubScores(r);
 }
 
 /** Rationale → i18n key for the coach tip. We point straight at the
@@ -1205,6 +1233,19 @@ function LandingDetail({
               fpm ({personalBest.dpt_airport} → {personalBest.arr_airport})
             </div>
           )}
+          {/* v0.7.1 Phase 3 F4: Forensik-v2 Badge mit Confidence-Pill.
+              Bedingung im Component (P1.1-C: ux_version >= 1 AND
+              forensics_version >= 2). v0.7.1+ PIREPs haben implizit
+              forensics_version >= 2 weil touchdown_v2 seit v0.7.0
+              aktiv ist — wir setzen 2 als Default fuer ux >= 1. */}
+          <div style={{ marginTop: "0.5rem" }}>
+            <ForensicsBadge
+              forensicsVersion={2}
+              uxVersion={record.ux_version}
+              confidence={record.landing_confidence}
+              source={record.landing_source}
+            />
+          </div>
         </div>
       </div>
 

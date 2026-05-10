@@ -109,7 +109,8 @@
       "bounces": "Bounce quality",
       "stability": "Approach stability",
       "rollout": "Runway used",
-      "fuel": "Fuel efficiency"
+      "fuel": "OFP compliance",
+      "loadsheet": "Loadsheet"
     },
     "info": {
       "landing_rate": "Vertical speed (V/S) at the moment of touchdown, in feet per minute. Negative = sinking. Boeing/Airbus FCOM thresholds: clean up to -240 fpm; hard-landing inspection at -600 fpm.",
@@ -117,7 +118,8 @@
       "bounces": "How many times the aircraft climbed back above 35 ft AGL after the first touchdown and re-landed (BeatMyLanding algorithm). 0 = clean set; each bounce drops the score.",
       "stability": "Standard deviation (σ) of vertical speed over the last ~10 minutes of approach. Low = smooth, constant flying. < 100 fpm σ is 'very stable'; > 300 fpm σ warrants a stabilized-approach review.",
       "rollout": "Percent of available runway length used from touchdown until clearing the runway (high-speed exit below 40 kt or > 30° heading deviation). < 70 % is normal; > 85 % is tight, especially on wet runway.",
-      "fuel": "Deviation of actual trip burn from the SimBrief plan. Positive = burned more, negative = less. ±5 % means clean performance calc; > ±20 % suggests wrong cruise altitude or unaccounted wind.",
+      "fuel": "Compliance with the SimBrief OFP plan. Overburn counts (cost index, altitude or wind not matching), underburn is NOT penalised. >15% under plan flags a possible OFP/measurement/route mismatch.",
+      "loadsheet": "Presence of loadsheet data (ZFW + TOW). VFR/manual flights without dispatch data skip this sub-score — no 0-penalty.",
       "score_section": "Six sub-scores rated 0-100 each. Every card shows value, points, and a coloured bar (green/yellow/red). The weakest category becomes the focus of the coach tip below.",
       "runway_section": "Visualisation of your touchdown on the runway. The cyan dot marks the touchdown point; the green band shows the rollout distance until you cleared the runway (high-speed exit or stop). Values below: total length, centerline offset, distance past threshold, runway used as a percentage.",
       "fuel_section": "Block = fuel at chocks-off; TO Fuel = at takeoff position; LDG Fuel = at touchdown; TOW = takeoff weight (empty + payload + TO fuel); LDW = landing weight. Plan values come from the SimBrief OFP if available. Plan-vs-actual delta drives the fuel-efficiency score."
@@ -153,7 +155,10 @@
       "near_plan": "Near plan",
       "off_plan": "Off plan",
       "very_off_plan": "Very off plan",
-      "way_off_plan": "Way off plan"
+      "way_off_plan": "Way off plan",
+      "efficient": "Efficient (under-burn)",
+      "very_efficient": "Very efficient — review OFP",
+      "loadsheet_present": "Loadsheet present"
     },
     "tip": {
       "smooth_touchdown": "Exactly right — flare timing was on point and the descent rate bled off cleanly.",
@@ -184,10 +189,25 @@
       "marginal_runway": "Runway margin was tight — risky on wet runway. Use a higher auto-brake setting.",
       "on_plan": "Fuel exactly on plan — clean performance computation.",
       "near_plan": "Very close to plan, all green.",
-      "off_plan": "Drift from OFP. Check cruise Mach and altitude vs plan.",
-      "very_off_plan": "Significant plan deviation. Check cost index, cruise altitude or wind impact.",
-      "way_off_plan": "Way off plan — possibly wrong OFP or different routing.",
+      "off_plan": "Overburn vs OFP. Check cruise Mach and altitude vs plan.",
+      "very_off_plan": "Significant overburn. Check cost index, cruise altitude or wind impact.",
+      "way_off_plan": "Severe overburn — possibly wrong OFP or different routing.",
+      "efficient": "Burned less than planned — nice. Underburn isn't penalised.",
+      "very_efficient": "Very efficient (>15% under plan). Verify OFP burn was correct, or whether you flew a shorter route.",
+      "loadsheet_present": "Loadsheet data on file — all green.",
       "fallback": "Solid landing. The score breakdown shows where there's still room to grow."
+    },
+    "forensics": {
+      "label": "Forensics v2",
+      "source": "Source: {{source}}",
+      "source_unknown": "Source: not available"
+    },
+    "confidence": {
+      "high": "Confidence: High",
+      "medium": "Confidence: Medium",
+      "low": "Confidence: Low",
+      "very_low": "Confidence: Very low",
+      "unknown": "Confidence: —"
     },
     "vs_at_edge": "Sink rate at edge",
     "vs_at_edge_hint": "Linearly interpolated to the exact on_ground edge between two 20 ms samples (= Volanta-equivalent)",
