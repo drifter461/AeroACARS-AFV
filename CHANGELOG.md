@@ -4,6 +4,84 @@ Alle nennenswerten Änderungen an AeroACARS. Format: lose an [Keep a Changelog](
 
 ---
 
+## [v0.7.4] — 2026-05-10
+
+🧹 **Polish ueber v0.7.3 — Cargo-Aliase praeziser, A359-Edge geloest, Strict-Tests pro Familie.**
+
+### Was
+
+QS-Review nach v0.7.3 hat 1 P1 + 3 P2 + 3 P3 aufgedeckt — alles in v0.7.4 abgearbeitet.
+
+### P1 — `FREIGHTER`-Long-Form fuer alle Cargo-Aliase
+
+v0.7.3 hatte das Long-Form `"X-X FREIGHTER"` nur fuer `B748F` eingebaut. Ein Sim-Addon das `"Boeing 757-200 Freighter"` als Title meldet hatte mit `B752F`-Bid weiter geblockt. v0.7.4 zieht das fuer alle Frachter nach:
+
+```rust
+"B74F"  => &["747-400F", "747-400 FREIGHTER", "B74F"],
+"B752F" => &["757-200F", "757-200 FREIGHTER", "B752F"],
+"B763F" => &["767-300F", "767-300 FREIGHTER", "B763F"],
+"B762F" => &["767-200F", "767-200 FREIGHTER", "B762F"],
+"A332F" => &["A330-200F", "A330-200 FREIGHTER", "A332F"],
+```
+
+### P2 — A359-Alias narrowed
+
+`A359 => &["A350-900", "A350"]` matchte faelschlich auch `A350-1000` weil `"A350-1000".contains("A350")` true ist. Substring-Match ist sensitiv — der `"A350"`-Alias war zu breit und kollidierte mit der A35K-Familie. Fix:
+
+```rust
+"A359" => &["A350-900"],  // "A350" entfernt
+```
+
+Alle bekannten Sim-Adapter (Asobo, iniBuilds, Aerosoft) liefern den Variant-Suffix immer mit. Der `"A350"`-Alias war redundant + gefaehrlich.
+
+### P2 — Strict-Cargo-Grenze testgesichert
+
+Spec §7.3 sagt explizit "Cargo-Bid + Pax-Sim = strict geblockt" (Pax-Compartment hat keine Cargo-Lasten-Verteilung). v0.7.3 hatte aber nur Mismatch-Tests gegen unverwandte Familien — die Strict-Grenze pro Familie war nicht getestet. v0.7.4 fuegt drei explizite Tests hinzu:
+
+```rust
+fn cargo_bid_strict_against_pax_sim() {
+    assert!(!aircraft_types_match("B752F", "757-200"));   // BLOCKIERT
+    assert!(!aircraft_types_match("B763F", "767-300"));   // BLOCKIERT
+    // ... pro Familie
+}
+
+fn pax_bid_accepts_cargo_sim_pragmatism() {
+    assert!(aircraft_types_match("B752", "757-200F"));    // erlaubt
+    // ... umgekehrte Richtung okay (Cargo-Pragmatismus)
+}
+
+fn cargo_aliases_match_freighter_long_form() {
+    assert!(aircraft_types_match("B752F", "757-200 Freighter"));
+    // ... P1-Verifikation
+}
+
+fn a359_does_not_match_a350_1000() {
+    assert!(!aircraft_types_match("A359", "A350-1000"));  // BLOCKIERT
+}
+```
+
+### Spec-Pflege (3 P3)
+
+- Spec-Status-Texte alle auf v0.7.4-Pending aktualisiert (52 Aliases, 21 Tests, 17 Familien)
+- B748F-Edge-Case-Eintrag uebersetzt vom "wird kommen" auf "ist da seit v0.7.3" + neuer A359-A350-1000-Eintrag
+- Code-Tippfehler `"Quatar Cargo"` → `"Qatar Cargo"`
+
+### Tests
+
+- **57/57 lib** (vorher 53 — 4 neue Tests)
+- **21/21 aircraft_alias_tests** (vorher 17)
+- 30/30 landing-scoring + 8/8 goldenset
+- 8/8 touchdown_v2_replay
+- **Gesamt 103/103 Tests grün**
+
+### Backward-Compat
+
+Aliases sind additiv (Spec §8). Eine bestehende Pilot-PIREP die unter v0.7.3 ging, geht auch unter v0.7.4. Die Aenderungen unter v0.7.4 sind:
+- 5 Cargo-Familien akzeptieren ZUSAETZLICHE Long-Form-Strings (`" FREIGHTER"`)
+- A359 akzeptiert KEIN A350-1000 mehr — das war vorher faelschlich akzeptiert. Wer in v0.7.3 mit A359-Bid + A350-1000-Sim flog, wird ab v0.7.4 mit aircraft_mismatch geblockt. Das ist die korrekte Strenge — ein A350-1000 ist kein A350-900 (33 Pax mehr, andere Performance).
+
+---
+
 ## [v0.7.3] — 2026-05-10
 
 🛬 **Aircraft-Type-Match: Cargo-Frachter HOHE-Prio Aliase + Spec-Pflege.**
