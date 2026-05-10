@@ -1,6 +1,6 @@
 # Flight-Phase State-Machine — QS-Inventur fuer Bug-Untersuchung
 
-**Status:** v1.4 — **Draft for QS Review** (Round-4 Doku-Glaettung)
+**Status:** v1.5 — **Draft for QS Review** (VPS-Daten-Analyse + 2 reale Regression-Kandidaten)
 **Zweck:** Vollstaendige Inventur aller Phase-Wechsel + Trigger + Side-Effects + Anti-Flicker-Mechaniken. Damit kann VA-Owner / QS systematisch durchgehen und potenzielle Bug-Klassen finden bevor sie als Live-Bug auftauchen.
 **KEIN Implementierungs-Auftrag** — diese Spec dokumentiert NUR den Status-Quo + markiert Verdachtsstellen.
 
@@ -14,7 +14,22 @@ Die Phase-State-Machine in `step_flight()` (~600 Zeilen in `lib.rs`) ist ueber M
 
 Diese Spec ist die Antwort. Pro Transition: was triggert sie, welche Schwellen, welche Anti-Flicker-Mechaniken sind aktiv, welche Side-Effects passieren. Plus eine Verdachts-Liste (markiert mit **[VERDACHT]**) mit Stellen die im Code-Audit verdaechtig wirkten.
 
-### 0.1 Changelog v1.3 → v1.4 (Round-4 Doku-Glaettung)
+### 0.1 Changelog v1.4 → v1.5 (VPS-Daten-Analyse)
+
+VA-Owner hat 29 echte Pilot-PIREP-JSONLs + DB-Snapshot vom VPS untersucht. Ergebnis: **2 Verdachts-Punkte sind historisch belegt**, plus eine neue Bug-Klasse + konkrete Daten-Coverage-Tabelle. Reine Spec-Erweiterung, kein Code-Fix.
+
+| # | Aenderung |
+|---|---|
+| **§15** (NEU) | VPS-Daten-Coverage-Tabelle: was DB vs JSONL liefert, was real fuer welches Szenario nutzbar ist |
+| **§16** (NEU) | Reale Regression-Kandidaten: URO913 (Arrived-Fallback), DLH742 (echtes Holding), PTO105 (Holding-Leak), PTO705 (Go-Around) |
+| **§13.1 → §13.5** alle Verdachts-Klassen mit "real belegt"-Markierung wenn aus VPS-Daten bestaetigt |
+| **§13.9** (NEU) | Holding-Pending leakt phasenuebergreifend — PTO105 zeigt 5.2s Holding statt 90s Dwell. `holding_pending_since` wird bei Approach→Final/Climb-Wechseln nicht zurueckgesetzt |
+| **§14** S9-S12 in Status "synthetisch noetig" markiert (kein VPS-Daten-Beleg) |
+| **§14.2** (NEU) Test-Strategie: Real-Replay vs synthetisch vs manuell pro Szenario |
+
+---
+
+### 0.2 Changelog v1.3 → v1.4 (Round-4 Doku-Glaettung)
 
 2 P2 + 2 P3 aus Review-Round 4. Reine Doku-Konsistenz, keine neuen Themen.
 
@@ -27,7 +42,7 @@ Diese Spec ist die Antwort. Pro Transition: was triggert sie, welche Schwellen, 
 
 ---
 
-### 0.2 Changelog v1.2 → v1.3 (Round-3 Doku-Glaettung)
+### 0.3 Changelog v1.2 → v1.3 (Round-3 Doku-Glaettung)
 
 2 P1 + 3 P2 + 1 P3 aus VA-Owner Review-Round 3. Reine Doku-Konsistenz-Korrekturen, kein neues Thema.
 
@@ -42,7 +57,7 @@ Diese Spec ist die Antwort. Pro Transition: was triggert sie, welche Schwellen, 
 
 ---
 
-### 0.3 Changelog v1.1 → v1.2 (Round-2 Korrekturen)
+### 0.4 Changelog v1.1 → v1.2 (Round-2 Korrekturen)
 
 3 P1 + 4 P2 sachliche Fehler aus Review-Round 2. v1.1 beschrieb teils ein "Idealmodell" das nicht zur Code-Realitaet passt — v1.2 zieht das gerade ohne neue Themen aufzumachen.
 
@@ -60,7 +75,7 @@ Plus 4 QS-Test-Verfeinerungen in §14.
 
 ---
 
-### 0.4 Changelog v1.0 → v1.1
+### 0.5 Changelog v1.0 → v1.1
 
 VA-Owner Review-Round 1 hat 3 P1 + 3 P2 sachliche Fehler aufgedeckt — alle korrigiert:
 
@@ -455,39 +470,67 @@ phpVMS hat weniger Phasen als AeroACARS — Cruise/Descent/Holding alle ENR. **U
 
 ---
 
-## 13. Bekannte Bug-Klassen — was zu pruefen ist (v1.1 Update)
+## 13. Bekannte Bug-Klassen (v1.5 Status nach VPS-Daten-Analyse)
 
-### 13.1 Phase-Race-Conditions (§3.1)
+Status-Konvention:
+- **🟢 VERDACHT** — nur Code-Audit, keine echten Daten
+- **🔴 BELEGT** — durch echte VPS-Pilot-Daten bestaetigt (siehe §16)
+- **🟡 VERMUTUNG** — durch VPS-Daten-Auffaelligkeit nahegelegt aber nicht eindeutig
 
-**Verdacht (v1.4 praezisiert):** Sampler schreibt `sampler_touchdown_at`, Streamer kopiert daraus nach `landing_at`. Race-Klasse: Streamer-Tick koennte den Final→Landing-Edge sehen BEVOR der Sampler seinen `sampler_touchdown_at`-Wert validiert hat — Streamer schreibt dann `landing_at` aus dem Snapshot-Buffer (lib.rs:11679), Sampler kommt einen Tick spaeter mit besserem Wert. Pruefen ob die `sampler_at`-Override-Stelle (lib.rs:11734) verlaesslich greift oder ob `landing_at` auf dem Snapshot-Buffer-Wert haengen bleibt.
+### 13.1 🟢 Phase-Race-Conditions (§3.1)
 
-### 13.2 Pause-Resume-Drift (§11.4)
+**Verdacht (v1.4 praezisiert):** Sampler schreibt `sampler_touchdown_at`, Streamer kopiert daraus nach `landing_at`. Race-Klasse: Streamer-Tick koennte den Final→Landing-Edge sehen BEVOR der Sampler seinen `sampler_touchdown_at`-Wert validiert hat — Streamer schreibt dann `landing_at` aus dem Snapshot-Buffer (lib.rs:11679), Sampler kommt einen Tick spaeter mit besserem Wert. Pruefen ob die `sampler_at`-Override-Stelle (lib.rs:11734) verlaesslich greift oder ob `landing_at` auf dem Snapshot-Buffer-Wert haengen bleibt. **VPS-Daten zeigen kein Beispiel** — bisher nur Code-Verdacht.
 
-**Verdacht:** Phase wird restored, aber kein Sim-Snapshot-Validation. Pilot der die App nach Final restartet ohne den Sim-Flug zu beenden koennte einen Phantom-Touchdown bekommen.
+### 13.2 🟢 Pause-Resume-Drift (§11.4)
 
-### 13.3 Slew/Teleport vergiftet Distance (§11.5)
+**Verdacht:** Phase wird restored, aber kein Sim-Snapshot-Validation. Pilot der die App nach Final restartet ohne den Sim-Flug zu beenden koennte einen Phantom-Touchdown bekommen. **VPS-Daten haben 13 `flight_resumed` Events**, aber keinen mit Final-Restore + neuer Sim-Position — synthetischer Test noetig.
 
-**Verdacht:** Distance-Akkumulation passiert VOR Pause/Slew-Freeze.
+### 13.3 🟢 Slew/Teleport vergiftet Distance (§11.5)
 
-### 13.4 Holding zu permissiv (§7.4)
+**Verdacht:** Distance-Akkumulation passiert VOR Pause/Slew-Freeze (lib.rs:10926 vor lib.rs:11077). **VPS-Daten zeigen 0 Logs mit `slew_mode=true`** — Pilot hat Slew offenbar nicht benutzt oder Streamer skipt diese Snapshots. Bug-Klasse bleibt aber strukturell — synthetischer Test noetig.
 
-**Verdacht:** `check_holding_entry` triggert auch bei langen ATC-Vektoren oder Orbit-Training. Anzeige-only, also kein Daten-Schaden, aber UX.
+### 13.4 🟢 Holding zu permissiv (§7.4)
 
-### 13.5 was_airborne Sticky (§9.2)
+**Verdacht:** `check_holding_entry` triggert auch bei langen ATC-Vektoren oder Orbit-Training. Anzeige-only, also kein Daten-Schaden, aber UX. VPS-Daten zeigen DLH742 mit 3 plausiblen Holdings (109s, 116s, 288s) — kein false positive sichtbar.
 
-**Verdacht:** Einmal true, bleibt true. Wenn Schutz durchbricht, bleibt es vergiftet.
+### 13.5 🟢 was_airborne Sticky (§9.2)
 
-### 13.6 Sonderpfade VFR/Heli/Glider/Seaplane (NEU v1.1)
+**Verdacht:** Einmal true, bleibt true. Wenn Schutz durchbricht, bleibt es vergiftet. Keine VPS-Daten-Auffaelligkeit.
 
-Code hat Boarding-Direct-To-Takeoff-Pfade (laut Audit). Pruefen ob diese Flugarten alle wichtigen Timestamps + Distance + PIREP sauber bekommen.
+### 13.6 🟢 Sonderpfade VFR/Heli/Glider/Seaplane (NEU v1.1)
 
-### 13.7 I3 Timestamp-Reihenfolge nicht gepruft (§4.1)
+Code hat Boarding-Direct-To-Takeoff-Pfade (laut Audit). Pruefen ob diese Flugarten alle wichtigen Timestamps + Distance + PIREP sauber bekommen. **VPS-Daten enthalten keinen Heli/Glider/Seaplane-Flug** — alle 29 Logs sind Airliner.
 
-**Verdacht:** Bei Resume mit defektem `active_flight.json` koennte z.B. `landing_at < takeoff_at` reinkommen.
+### 13.7 🟢 I3 Timestamp-Reihenfolge nicht gepruft (§4.1)
 
-### 13.8 Universal Arrived-Fallback Edge-Cases (§8.1)
+**Verdacht:** Bei Resume mit defektem `active_flight.json` koennte z.B. `landing_at < takeoff_at` reinkommen. VPS-Daten ohne Zeit-Anomalien gefunden.
 
-**Verdacht:** Stationary-Dwell + Engines-Check + Near-Arrival-Check Robustheit pruefen.
+### 13.8 🔴 Universal Arrived-Fallback Edge-Cases — BELEGT (§8.1)
+
+**HISTORISCH BELEGT durch URO913** (siehe §16.1). Pilot rollte mit `engines_running=0` aber `groundspeed_kt = 141 → 42` ueber ~31.5 Sekunden — der Universal-Fallback feuerte trotzdem `Arrived` obwohl der Flieger noch rollte. Genau die Bug-Klasse die §8.1 als Verdacht beschrieb.
+
+**Konkrete Fix-Empfehlung:**
+```rust
+// lib.rs:12680 erweitern
+let conditions_basic = snap.on_ground
+    && snap.engines_running == 0
+    && snap.groundspeed_kt < 1.0;  // NEU: echtes "stationary"
+```
+Eventuell zusaetzlich `parking_brake` oder `phase in [Landing, TaxiIn, BlocksOn]` als zweiter Schutz.
+
+**Regression-Test-Empfehlung:** URO913-JSONL als anonymisierte/minimierte Fixture in `tests/fixtures/phase_arrived_fallback_uro913.jsonl.gz`.
+
+### 13.9 🔴 Holding-Pending leakt phasenuebergreifend — BELEGT (NEU v1.5)
+
+**HISTORISCH BELEGT durch PTO105** (siehe §16.3). Pilot hatte `Approach → Holding → Approach` mit nur **5.2s** Holding-Aufenthalt — passt nicht zur 90s-Dwell-Regel von `HOLDING_ENTRY_DWELL_SECS`.
+
+**Wahrscheinliche Ursache:** `holding_pending_since` (lib.rs:2693) wird beim Verlassen von Approach/Final/Climb-Pfaden NICHT zurueckgesetzt. Wenn der Pilot vorher in Cruise war und kurz auf Holding-Entry-Bedingungen kam (z.B. lange Vektor-Drehung) → `holding_pending_since` zaehlt schon Sekunden. Dann Wechsel auf Approach → Final → wieder Approach. Sobald die Holding-Bedingungen wieder kurz erfuellt sind, wird die akkumulierte Pending-Zeit gerechnet → Holding-Trigger nach 5.2s sichtbar.
+
+**Konkrete Fix-Empfehlung:**
+- `holding_pending_since = None` setzen bei jedem Phase-Wechsel der NICHT `→ Holding` ist
+- Oder: Phase-Tracking-Marker im pending-state mitfuehren, beim Phase-Mismatch reset
+
+**Regression-Test-Empfehlung:** PTO105-JSONL als Fixture in `tests/fixtures/phase_holding_leak_pto105.jsonl.gz`. Erwartung: Holding darf NICHT nach 5s triggern wenn `HOLDING_ENTRY_DWELL_SECS = 90`.
 
 ---
 
@@ -511,22 +554,117 @@ Statt riesiger Test-Liste — diese 13 Szenarien decken die wichtigsten Faelle a
 | **S12** (NEU v1.2) | Final restored, Sim auf anderem Flughafen (App-Restart waehrend Final, Sim laed neuen Flug) | **Vor User-Bestaetigung des Resume-Banners:** keine Transition (FSM-Tick darf nicht laufen). **Nach Bestaetigung:** ein "Sanity-Tick" muss verhindern dass der erste Snapshot Phantom-Landing triggert (z.B. neuer Sim-Standort auf Bahn → on_ground=true → Streamer wuerde `Final → Landing`-Edge sehen). Aktuell: **kein Sanity-Tick implementiert** (siehe §11.4 Verdacht), Bug-Risiko-Klasse |
 | **S13** (NEU v1.2) | Holding zwei Faelle: (a) echter 5-Min-Hold ueber VOR, (b) langer ATC-Vector / Orbit-Training | (a) Phase = Holding nach 90s. (b) Bewusst akzeptieren als "false positive" ODER Code-Threshold anpassen — entscheiden in QS-Review |
 
-### 14.1 Test-Empfehlung
+### 14.1 Test-Empfehlung (v1.5 nach VPS-Analyse)
 
-**Replay-/synthetische Tests** (analog `touchdown_v2_replay.rs`):
-- **S1** (Airliner Baseline)
-- **S6** (T&G), **S7** (GA), **S8** (Holding), **S9** (Pause/Resume), **S10** (Slew)
-- **S11** (NEU v1.3 Empfehlung: Engines off while rolling — Arrived-Fallback-Risiko §8.1)
-- **S12** (NEU v1.3 Empfehlung: Final-Restore Sanity-Tick — Phantom-Landing-Risiko §11.4)
+| Szenario | Test-Form | Daten-Quelle |
+|---|---|---|
+| **S1** Airliner Baseline | Real-Replay | VPS-JSONL (mehrere DLH/ITY/GTI-Logs) |
+| **S6** T&G | Real-Replay | VPS-JSONL (PTO705) — heuristisch via `Climb` count > 1 |
+| **S7** Go-Around | Real-Replay | VPS-JSONL (mehrere PTO-Fluege mit Approach→Climb-Sequenz) |
+| **S8** Holding | Real-Replay | VPS-JSONL (DLH742 — 3 echte Holdings) |
+| **S9** Pause | **Synthetisch** | Mock-Snapshots `paused=true` (kein VPS-Beleg) |
+| **S10** Slew | **Synthetisch** | Mock-Snapshots `slew_mode=true` (kein VPS-Beleg) |
+| **S11** Engines-Out-Fallback | Real-Replay | **VPS-JSONL (URO913 — historischer Bug)** — siehe §16.1 |
+| **S12** Final-Restore Sanity-Tick | **Synthetisch** | Mock 2-Phase-Fixture (kein VPS-Beleg) |
+| **S13(a)** Echter Hold | Real-Replay | VPS-JSONL (DLH742) |
+| **S13(b)** Holding-Pending-Leak | **Real-Replay** | **VPS-JSONL (PTO105 — historischer Bug)** — siehe §16.3 |
+| S2 VFR ohne ZFW | Manuell | VA-Owner mit Sim (kein VPS-Beleg) |
+| S3-S5 Heli/Glider/Seaplane | Manuell | VA-Owner mit Sim (kein VPS-Beleg) |
 
-**Manuelle Acceptance-Tests** (vom VA-Owner mit echtem Sim):
-- S2 (VFR Manual ohne ZFW), S3 (Heli), S4 (Glider), S5 (Seaplane), S13 (Holding zwei Faelle)
+### 14.2 Test-Strategie (NEU v1.5)
 
-S11 + S12 sind die **kritischsten neuen Risiken** und sollten zuerst Replay-Coverage bekommen.
+Empfohlene Reihenfolge:
+1. **Zuerst** S11 (URO913-Replay) und S13(b) (PTO105-Replay) — beide historisch belegt, hoechster Aufwand-Nutzen-Wert
+2. **Dann** S1, S7, S8 als Regression-Basis fuer die normalen Pfade
+3. **Synthetisch** S9, S10, S12 — kontrollierte Mock-Snapshots, deterministische Asserts
+4. **Manuell** S2-S5, S13(a) — VA-Owner-Validierung mit echtem Sim
+
+**Daten-Hygiene:** JSONL-Replays muessen **anonymisiert/minimiert** werden bevor sie ins Repo committed werden:
+- Pilot-IDs / Callsigns durch generische ersetzen (`PILOT01`, `TEST123`)
+- Lat/Lon-Streams auf nur die relevanten Phase-Wechsel-Samples reduzieren (~50-100 statt mehrere tausend)
+- `aircraft_registration`, `aircraft_title` neutralisieren wenn nicht testrelevant
 
 ---
 
-## 15. Glossar
+## 15. VPS-Daten-Coverage (NEU v1.5)
+
+### 15.1 Daten-Quellen
+
+| Quelle | Inhalt | Geeignet fuer |
+|---|---|---|
+| **`recorder.db` SQLite** (28 MB) | `positions` (133k), `flight_sessions` (46), `pireps` (39), `touchdowns` (42), `flight_events` (673 — nur block+takeoff!) | Aggregierte Stats, Phase-Counts, Touchdown-Score-Audit |
+| **JSONL-Logs** (`flight-logs/<va>/<pilot>/<pirep_id>.jsonl.gz`, 29 Files) | Komplette `SimSnapshot`-Streams mit allen Feldern + Phase-Changed-Events + Score-Events | **Bessere Quelle fuer Phase-QS** weil `engines_running`, `paused`, `slew_mode`, `simulation_rate`, `on_ground`, `gear_normal_force_n` etc. alle drin |
+
+### 15.2 Wichtige Beobachtungen
+
+- **DB.positions hat KEIN `engines_running` Feld** — fuer S11 Engine-Out-Detection nicht ausreichend, JSONL noetig
+- **Keine `paused=true` / `slew_mode=true` / `simulation_rate != 1` in den JSONLs** — Pilot hat Pause/Slew offenbar nicht benutzt, ODER Streamer skipt diese Snapshots vor dem Upload (zu pruefen!)
+- **`flight_events` Tabelle hat nur `block` und `takeoff`** — Phase-Wechsel werden NICHT in der DB persistiert, nur in den JSONL-Logs
+
+### 15.3 Pilot-Datensatz-Inventur (8 GSG-Piloten, 29 Logs)
+
+29 Logs mit kompletten Phase-Sequenzen — dominante Aircraft-Typen: B777F, A320, A330, A350, B738. **Keine Heli/Glider/Seaplane/VFR-Flugzeuge** — fuer S2-S5 muessen synthetische oder manuelle Tests ran.
+
+### 15.4 Datenschutz
+
+- JSONLs enthalten Pilot-IDs, Callsigns, Aircraft-Registrierungen, lat/lon-Strecken — **PII**.
+- DB enthaelt zusaetzlich `provisioned_pilots.password` + `admin_users.password` als bcrypt-Hashes — bei Verbreitung Brute-Force-Risiko.
+- **`.gitignore` blockiert** `pilot-pirep-data-*.zip` und `aeroacars-live-snapshot-*.db.gz` (seit v1.5 Patch).
+- Replay-Test-Fixtures muessen vor Commit anonymisiert/minimiert werden (siehe §14.2).
+
+---
+
+## 16. Reale Regression-Kandidaten (NEU v1.5 — VPS-belegt)
+
+### 16.1 🔴 URO913 — Universal Arrived-Fallback while rolling
+
+**Was passierte:** Pilot landete, rollte mit gestoppten Engines aber hoher Groundspeed Richtung Cargo-Stand. Phase blieb auf `Pushback` (vermutlich falscher Phase-Wechsel davor — bleibt zu untersuchen). Nach ~31.5 Sekunden mit `on_ground=true && engines_running=0` aber `groundspeed_kt = 141 → 42` feuerte der Universal-Fallback `Arrived` — obwohl der Flieger noch rollte.
+
+**Bug-Klasse §13.8:** Universal-Fallback misst nicht echtes Stillstand sondern nur "on_ground + engines off".
+
+**Fix-Empfehlung:** `conditions_basic` um `groundspeed_kt < 1.0` erweitern (Code-Anker `step_flight`-Universal-Branch).
+
+**Test-Empfehlung:** URO913-JSONL als Fixture `tests/fixtures/phase_arrived_fallback_uro913.jsonl.gz`. Erwartung: `Arrived` darf erst feuern wenn `groundspeed_kt < 1.0` ueber 30s anhaelt.
+
+### 16.2 🟢 DLH742 — echtes Holding (positiv-Beleg)
+
+**Was passierte:** Pilot fuehrte 3 echte Holdings durch: 109s, 116s, 288s. Alle drei wurden korrekt als `Cruise → Holding → Cruise` erkannt.
+
+**Bedeutung:** Bestaetigt dass `check_holding_entry` Standard-Holds zuverlaessig erkennt. Kein Bug — nur Positiv-Beleg fuer S8/S13(a).
+
+**Test-Empfehlung:** DLH742-JSONL als Fixture `tests/fixtures/phase_holding_positive_dlh742.jsonl.gz` fuer Regression-Schutz.
+
+### 16.3 🔴 PTO105 — Holding-Pending-Leak
+
+**Was passierte:** Pilot hatte `Approach → Holding → Approach` mit nur **5.2s** Holding-Aufenthalt. Das passt nicht zur 90s-Dwell-Regel von `HOLDING_ENTRY_DWELL_SECS`.
+
+**Wahrscheinliche Ursache (siehe §13.9):** `holding_pending_since` (lib.rs:2693) wird beim Verlassen von Approach/Final/Climb-Pfaden NICHT zurueckgesetzt. Akkumulierte Pending-Zeit aus einer frueheren Phase kann spaeter sofort triggern.
+
+**Fix-Empfehlung:**
+- `holding_pending_since = None` setzen bei jedem Phase-Wechsel der NICHT `→ Holding` ist
+- Oder: Phase-Tracking-Marker im pending-state mitfuehren
+
+**Test-Empfehlung:** PTO105-JSONL als Fixture `tests/fixtures/phase_holding_leak_pto105.jsonl.gz`. Erwartung: Holding darf NICHT nach 5s triggern.
+
+### 16.4 🟢 PTO705 — Go-Around / low-level-touch (positiv-Beleg)
+
+**Was passierte:** Standard-Go-Around-Sequenz mit `Final → Climb` plus zusaetzliche low-level Touches. Wurde korrekt als Go-Around erkannt (`go_around_count > 0`).
+
+**Bedeutung:** Positiv-Beleg fuer S7. Keine Auffaelligkeit.
+
+**Test-Empfehlung:** PTO705-JSONL als Fixture `tests/fixtures/phase_go_around_pto705.jsonl.gz`.
+
+### 16.5 Empfohlene Reihenfolge fuer Replay-Test-Implementation
+
+1. **URO913-Fallback** (§16.1) — historisch belegter Code-Risiko-Punkt, hoechste Prio
+2. **PTO105-Holding-Leak** (§16.3) — historisch belegt, mittlere Prio (UX-Bug, kein Daten-Schaden)
+3. **DLH742-Holding-positiv** (§16.2) — Regression-Schutz fuer §13.4-Verdacht
+4. **PTO705-Go-Around** (§16.4) — Regression-Schutz fuer S7
+5. Spaeter: weitere DLH/ITY/GTI-Logs als Baseline-Regression-Fixtures
+
+---
+
+## 17. Glossar
 
 - **Phase:** Wert von `FlightPhase` enum. Aktuell aktive Position im Flight-Lifecycle.
 - **Transition:** Wechsel von einer Phase zur naechsten in `step_flight`.
@@ -544,4 +682,4 @@ S11 + S12 sind die **kritischsten neuen Risiken** und sollten zuerst Replay-Cove
 
 ---
 
-**Ende der Spec v1.4 — Round-4 Doku-Glaettung eingearbeitet. Naechster Schritt: §13 (8 Verdachts-Klassen) + §14 (13 Szenarien) systematisch klassifizieren.**
+**Ende der Spec v1.5 — VPS-Daten-Analyse eingebaut. 2 Verdachts-Punkte (§13.8 + §13.9) jetzt als 🔴 BELEGT markiert. §15/§16 als neue Sektionen. Naechster Schritt: Replay-Test-Implementation gemaess §16.5 — URO913-Fallback zuerst, dann PTO105-Holding-Leak.**

@@ -109,6 +109,17 @@ scratch/
 tmp/
 .tmp/
 
+# ===== Pilot-Daten / VPS-Snapshots =====
+# JSONL-Logs der Piloten enthalten kompletten Flight-Snapshot-Stream + PII.
+# DB-Snapshots enthalten bcrypt-Hashes (provisioned_pilots, admin_users).
+# Diese Files NIE committen — auch nicht "anonymisiert ohne ausdruecklich
+# zu pruefen welche Felder PII tragen".
+pilot-pirep-data-*.zip
+pilot-pirep-data-*.tar.gz
+aeroacars-live-snapshot-*.db
+aeroacars-live-snapshot-*.db.gz
+.release-notes-*.md
+
 # ===== macOS code-signing / notarization =====
 *.cer
 *.p8
