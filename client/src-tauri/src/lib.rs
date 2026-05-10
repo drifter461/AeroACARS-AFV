@@ -6571,10 +6571,21 @@ pub const RUNWAY_TRUST_MIN_FLOAT_DISTANCE_M: f32 = -100.0;
 /// damit die Logik 1:1 testbar ist. Returns (trusted, reason).
 ///
 /// Reasons (in Pruefungs-Reihenfolge):
-///   "icao_mismatch"             — Match-ICAO != arr/divert
+///   "no_runway_match"           — Kein Runway-Match in der DB (Privatplatz,
+///                                 Off-DB-Bahn) — UI sollte hier KEINE
+///                                 alarmierende Pille zeigen, einfach die
+///                                 Geometry-Tiles ausblenden
+///   "icao_mismatch"             — Match-ICAO existiert aber != arr/divert
+///                                 (echter Bug-Indikator: falscher Flughafen)
 ///   "centerline_offset_too_large" — > 200 m
 ///   "negative_float_distance"   — < -100 m
 ///   None                         — alle Checks pass
+///
+/// **Wichtig (v1.1-Refinement):** "kein Match" und "falscher Match" sind
+/// semantisch verschieden — bei Privatplaetzen / Bush-Strips ist es normal
+/// dass die ourairports-DB keinen Eintrag hat, das ist KEIN Pilot-Fehler.
+/// "falscher Match" dagegen ist ein echter Datenintegritaets-Bug
+/// (GSG303-Klasse: arr=OR66, gematcht auf K5S9 weil 3.5 km daneben).
 pub fn runway_geometry_trust_check(
     matched_icao: Option<&str>,
     arr_airport: &str,
@@ -6582,14 +6593,13 @@ pub fn runway_geometry_trust_check(
     centerline_offset_m: Option<f32>,
     float_distance_m: Option<f32>,
 ) -> (bool, Option<&'static str>) {
-    // ICAO-Match: Match-Airport muss arr_airport sein ODER divert_to sein
-    let icao_ok = match matched_icao {
-        Some(matched) => {
-            !matched.is_empty()
-                && (matched == arr_airport || Some(matched) == divert_to)
-        }
-        None => false,
+    // 1) Kein Match → eigener Reason, nicht als "icao_mismatch" verkaufen.
+    let matched = match matched_icao {
+        Some(m) if !m.is_empty() => m,
+        _ => return (false, Some("no_runway_match")),
     };
+    // 2) Match existiert aber != arr/divert → echtes Mismatch.
+    let icao_ok = matched == arr_airport || Some(matched) == divert_to;
     if !icao_ok {
         return (false, Some("icao_mismatch"));
     }
@@ -6608,6 +6618,31 @@ pub fn runway_geometry_trust_check(
         }
     }
     (true, None)
+}
+
+/// v0.7.6 P1-2 / P2-B Helper: zentraler Read-Sites-Wrapper fuer den
+/// scoring-relevanten Bounce-Count. Aktuell ist `stats.bounce_count`
+/// das Feld das sowohl Streamer-Tally (35-ft armed counter) als auch
+/// nach dem Analysis-Override den scored_bounce_count haelt — ein
+/// Caller der das Feld direkt liest weiss nicht ob das Override schon
+/// gelaufen ist oder nicht.
+///
+/// Dieser Helper macht die Semantik im Score-Pfad explizit: "ich will
+/// den scored_bounce_count, mit Fallback auf das was im stats steht".
+/// Falls in v0.8.x die FlightStats umstrukturiert werden (eigenes
+/// `scored_bounce_count`-Feld), aendert sich nur diese eine Stelle.
+///
+/// Spec docs/spec/v0.7.6-landing-payload-consistency.md §3 P1-2,
+/// Refinement nach Thomas-Review (P2-B fragility).
+fn scored_bounce_count_for_score(stats: &FlightStats) -> u32 {
+    // stats.bounce_count wurde von der Override-Logik (lib.rs ~9869-9891)
+    // mit scored_bounce_count aus dem analysis-JSON ueberschrieben falls
+    // der 50-Hz-Sampler-Buffer vollstaendig war. Ohne Override haelt das
+    // Feld den Streamer-Tally (35-ft armed counter) — auch das ist eine
+    // konservative Annaeherung an "echter Bounce" (35 ft >= 15 ft scored
+    // threshold), sodass kein Pilot faelschlich bestraft wird wenn der
+    // Sampler-Buffer fehlt.
+    stats.bounce_count as u32
 }
 
 /// v0.7.1 Helper: actual_trip_burn = takeoff_fuel - landing_fuel
@@ -6635,7 +6670,8 @@ fn compute_aggregate_master_score(stats: &FlightStats) -> Option<u8> {
     let scoring_input = landing_scoring::LandingScoringInput {
         vs_fpm: stats.landing_peak_vs_fpm.or(stats.landing_rate_fpm),
         peak_g_load: stats.landing_peak_g_force,
-        bounce_count: Some(stats.bounce_count as u32),
+        // v0.7.6 P2-B: zentraler Helper statt direkten Read.
+        bounce_count: Some(scored_bounce_count_for_score(stats)),
         approach_vs_stddev_fpm: stats.approach_vs_stddev_fpm,
         approach_bank_stddev_deg: stats.approach_bank_stddev_deg,
         rollout_distance_m: stats.rollout_distance_m.map(|m| m as f32),
@@ -6801,7 +6837,8 @@ fn build_landing_record(
     let scoring_input = landing_scoring::LandingScoringInput {
         vs_fpm: stats.landing_peak_vs_fpm.or(stats.landing_rate_fpm),
         peak_g_load: stats.landing_peak_g_force,
-        bounce_count: Some(stats.bounce_count as u32),
+        // v0.7.6 P2-B: zentraler Helper statt direkten Read.
+        bounce_count: Some(scored_bounce_count_for_score(stats)),
         approach_vs_stddev_fpm: stats.approach_vs_stddev_fpm,
         approach_bank_stddev_deg: stats.approach_bank_stddev_deg,
         rollout_distance_m: stats.rollout_distance_m.map(|m| m as f32),
@@ -7009,6 +7046,31 @@ fn build_landing_record(
         // schon berechnet damit aggregate_master_score → score_numeric
         // gehen kann. Hier nur noch durchreichen, NICHT erneut rechnen.
         sub_scores: computed_sub_scores,
+        // v0.7.6 P1-3: Runway-Geometry-Trust ins LandingRecord. Damit
+        // der Pilot-Client (LandingPanel.tsx) die TD-Zone und Float-
+        // Distance bei untrusted geometry ausblenden kann — gleiche
+        // Logik wie Web-Dashboard. Spec docs/spec/v0.7.6-landing-
+        // payload-consistency.md §3 P1-3.
+        runway_geometry_trusted: {
+            let (trusted, _) = runway_geometry_trust_check(
+                stats.runway_match.as_ref().map(|m| m.airport_ident.as_str()),
+                &flight.arr_airport,
+                stats.divert_hint.as_ref().and_then(|h| h.actual_icao.as_deref()),
+                stats.runway_match.as_ref().map(|m| m.centerline_distance_m as f32),
+                stats.landing_float_distance_m,
+            );
+            Some(trusted)
+        },
+        runway_geometry_reason: {
+            let (_, reason) = runway_geometry_trust_check(
+                stats.runway_match.as_ref().map(|m| m.airport_ident.as_str()),
+                &flight.arr_airport,
+                stats.divert_hint.as_ref().and_then(|h| h.actual_icao.as_deref()),
+                stats.runway_match.as_ref().map(|m| m.centerline_distance_m as f32),
+                stats.landing_float_distance_m,
+            );
+            reason.map(String::from)
+        },
     })
 }
 
@@ -8069,7 +8131,8 @@ async fn flight_end(
                                 .landing_peak_vs_fpm
                                 .or(stats_for_post.landing_rate_fpm),
                             peak_g_load: stats_for_post.landing_peak_g_force,
-                            bounce_count: Some(stats_for_post.bounce_count as u32),
+                            // v0.7.6 P2-B: zentraler Helper statt direkten Read.
+                            bounce_count: Some(scored_bounce_count_for_score(&stats_for_post)),
                             approach_vs_stddev_fpm: stats_for_post.approach_vs_stddev_fpm,
                             approach_bank_stddev_deg: stats_for_post
                                 .approach_bank_stddev_deg,
@@ -8113,7 +8176,8 @@ async fn flight_end(
                                 .landing_peak_vs_fpm
                                 .or(stats.landing_rate_fpm),
                             peak_g_load: stats.landing_peak_g_force,
-                            bounce_count: Some(stats.bounce_count as u32),
+                            // v0.7.6 P2-B: zentraler Helper statt direkten Read.
+                            bounce_count: Some(scored_bounce_count_for_score(&stats)),
                             approach_vs_stddev_fpm: stats.approach_vs_stddev_fpm,
                             approach_bank_stddev_deg: stats.approach_bank_stddev_deg,
                             rollout_distance_m: stats
@@ -13931,7 +13995,8 @@ fn build_pirep_notes(flight: &ActiveFlight, stats: &FlightStats) -> String {
     let crate_input = landing_scoring::LandingScoringInput {
         vs_fpm: stats.landing_peak_vs_fpm.or(stats.landing_rate_fpm),
         peak_g_load: stats.landing_peak_g_force,
-        bounce_count: Some(stats.bounce_count as u32),
+        // v0.7.6 P2-B: zentraler Helper statt direkten Read.
+        bounce_count: Some(scored_bounce_count_for_score(stats)),
         approach_vs_stddev_fpm: stats.approach_vs_stddev_fpm,
         approach_bank_stddev_deg: stats.approach_bank_stddev_deg,
         rollout_distance_m: stats.rollout_distance_m.map(|m| m as f32),
@@ -17667,10 +17732,11 @@ mod v0_7_6_payload_consistency_tests {
     }
 
     #[test]
-    fn runway_trust_blocks_on_missing_icao() {
-        // Kein Match gefunden → nicht trusted (vorsorglich, weil sonst
-        // die Geometry-Felder mit Default-Werten ueberschrieben werden
-        // koennten).
+    fn runway_trust_no_match_returns_no_runway_match() {
+        // v1.1: "kein Match" und "falscher Match" sind verschieden.
+        // Bei Privatplaetzen / Bush-Strips ohne ourairports-DB-Eintrag
+        // ist None das normale Verhalten. UI darf das NICHT als
+        // alarmierende "Falscher Flughafen erkannt"-Warnung zeigen.
         let (trusted, reason) = runway_geometry_trust_check(
             None,
             "EDDM",
@@ -17679,7 +17745,22 @@ mod v0_7_6_payload_consistency_tests {
             Some(400.0),
         );
         assert!(!trusted);
-        assert_eq!(reason, Some("icao_mismatch"));
+        assert_eq!(reason, Some("no_runway_match"));
+    }
+
+    #[test]
+    fn runway_trust_empty_match_string_returns_no_runway_match() {
+        // Defensive Variante: Leerer String wird wie None behandelt
+        // (verteidigt gegen Adapter die "" statt None liefern).
+        let (trusted, reason) = runway_geometry_trust_check(
+            Some(""),
+            "EDDM",
+            None,
+            Some(50.0),
+            Some(400.0),
+        );
+        assert!(!trusted);
+        assert_eq!(reason, Some("no_runway_match"));
     }
 
     #[test]

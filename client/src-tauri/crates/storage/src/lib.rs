@@ -371,6 +371,25 @@ pub struct LandingRecord {
     /// LegacyPirepNotice statt Breakdown.
     #[serde(default)]
     pub sub_scores: Vec<landing_scoring::SubScoreEntry>,
+
+    // ─── v0.7.6 P1-3: Runway-Geometry-Trust ──────────────────────────
+    // Spec docs/spec/v0.7.6-landing-payload-consistency.md §3 P1-3.
+    //
+    // Bei trusted=Some(false) blendet das LandingPanel die Touchdown-Zone
+    // und Float-Distance-Tiles aus und zeigt einen Hinweis-Pill mit dem
+    // reason. Rollout-Sub-Score bleibt valide (kommt aus GPS-Track).
+    //
+    // Backward-Compat: alte v0.7.5-PIREPs ohne diese Felder bleiben
+    // deserialisierbar (serde(default)). Frontend behandelt None wie
+    // trusted=true (= Verhalten vor v0.7.6).
+    /// Ist die Runway-Geometrie plausibel? Definitionen + Reasons siehe
+    /// `runway_geometry_trust_check` in `aeroacars_app::lib`.
+    #[serde(default)]
+    pub runway_geometry_trusted: Option<bool>,
+    /// "no_runway_match" / "icao_mismatch" / "centerline_offset_too_large"
+    /// / "negative_float_distance"
+    #[serde(default)]
+    pub runway_geometry_reason: Option<String>,
 }
 
 /// v0.7.1: Stability-Gate-Window-Metadaten (Spec §5.4).

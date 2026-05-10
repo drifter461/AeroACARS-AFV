@@ -135,6 +135,19 @@ export interface LandingRecord {
   /// SSoT). UI rendert direkt aus diesen Felder, KEIN Recompute.
   /// Bei alten PIREPs (ux_version < 1) leer/fehlt → LegacyPirepNotice.
   sub_scores?: SubScoreEntry[];
+
+  // ─── v0.7.6 P1-3: Runway-Geometry-Trust ──────────────────────────────
+  // Spec docs/spec/v0.7.6-landing-payload-consistency.md §3 P1-3.
+  // Bei trusted=false werden Centerline-Offset, Past-Threshold (= Float-
+  // Distance) und der RunwayDiagram ausgeblendet — Pilot soll nicht mit
+  // einer kaputten Runway-Geometrie konfrontiert werden. Rollout bleibt
+  // sichtbar (kommt aus GPS-Track, nicht aus Runway-DB).
+  // Backward-Compat: alte v0.7.5-PIREPs ohne diese Felder werden via
+  // (trusted ?? true) wie trusted behandelt.
+  runway_geometry_trusted?: boolean | null;
+  /// "no_runway_match" / "icao_mismatch" / "centerline_offset_too_large"
+  /// / "negative_float_distance"
+  runway_geometry_reason?: string | null;
 }
 
 /// v0.7.1: Stability-Gate-Window-Metadaten (Spec §5.4).
@@ -460,6 +473,31 @@ function VsCurveChart({ profile }: { profile: LandingProfilePoint[] }) {
       </text>
     </svg>
   );
+}
+
+// ---- v0.7.6 P1-3: Runway-Geometry-Trust Helper -------------------------
+//
+// Spec docs/spec/v0.7.6-landing-payload-consistency.md §3 P1-3.
+//
+// Bei untrusted geometry werden Centerline-Offset, Past-Threshold (Float-
+// Distance) und das RunwayDiagram ausgeblendet — Pilot soll nicht mit
+// kaputter Runway-Geometrie konfrontiert werden. "no_runway_match" wird
+// SILENT behandelt (kein Alarm-Pill — bei Privatplaetzen normal).
+
+function runwayTrustReasonLabel(reason: string | null | undefined): string | null {
+  switch (reason) {
+    case "icao_mismatch":
+      return "Falscher Flughafen erkannt — Geometrie ausgeblendet";
+    case "centerline_offset_too_large":
+      return "Touchdown weit von Runway-Mitte — Geometrie ausgeblendet";
+    case "negative_float_distance":
+      return "Touchdown vor Threshold — Geometrie ausgeblendet";
+    case "no_runway_match":
+      // Privatplatz / Off-DB-Bahn ist KEIN Pilot-Fehler — kein Alarm-Pill.
+      return null;
+    default:
+      return null;
+  }
 }
 
 // ---- Runway diagram ----------------------------------------------------
@@ -1575,66 +1613,108 @@ function LandingDetail({
       )}
 
       {/* Runway */}
-      {record.runway_match && (
-        <section className="landing-section">
-          <h3>
-            {t("landing.runway")}
-            <InfoBadge explanation={t("landing.info.runway_section")} />
-          </h3>
-          <RunwayDiagram
-            rw={record.runway_match}
-            rolloutDistanceM={record.rollout_distance_m}
-          />
-          <dl className="landing-keyvals landing-keyvals--inline">
-            <div>
-              <dt>{t("landing.runway_id")}</dt>
-              <dd>
-                {record.runway_match.airport_ident}/{record.runway_match.runway_ident}{" "}
-                ({record.runway_match.surface})
-              </dd>
-            </div>
-            <div>
-              <dt>{t("landing.runway_length")}</dt>
-              <dd>
-                {(record.runway_match.length_ft * 0.3048).toFixed(0)} m
-              </dd>
-            </div>
-            <div>
-              <dt>{t("landing.centerline_offset")}</dt>
-              <dd>
-                {Math.abs(record.runway_match.centerline_distance_m).toFixed(1)} m{" "}
-                {t(sideKey(record.runway_match.side))}
-              </dd>
-            </div>
-            <div>
-              <dt>{t("landing.past_threshold")}</dt>
-              <dd>
-                {(record.runway_match.touchdown_distance_from_threshold_ft * 0.3048).toFixed(0)} m
-              </dd>
-            </div>
-            {record.rollout_distance_m != null && (
-              <div>
-                <dt>{t("landing.rollout")}</dt>
-                <dd>{record.rollout_distance_m.toFixed(0)} m</dd>
+      {record.runway_match && (() => {
+        // v0.7.6 P1-3: Runway-Geometry-Trust check.
+        // - trusted ?? true → alte v0.7.5-PIREPs werden wie trusted
+        //   behandelt (Backward-Compat).
+        // - Bei untrusted: Centerline-Offset, Past-Threshold, runway_used_pct
+        //   und das RunwayDiagram ausblenden. Rollout bleibt sichtbar
+        //   (kommt aus GPS-Track).
+        // - "no_runway_match" zeigt KEINEN Alarm-Pill (Privatplatz normal).
+        const geometryTrusted = record.runway_geometry_trusted ?? true;
+        const trustWarning = !geometryTrusted
+          ? runwayTrustReasonLabel(record.runway_geometry_reason)
+          : null;
+        return (
+          <section className="landing-section">
+            <h3>
+              {t("landing.runway")}
+              <InfoBadge explanation={t("landing.info.runway_section")} />
+            </h3>
+            {trustWarning && (
+              <div
+                style={{
+                  padding: "6px 10px",
+                  marginBottom: 10,
+                  borderRadius: 6,
+                  background: "#3f2b0e",
+                  border: "1px solid #b8842a",
+                  color: "#f5d68b",
+                  fontSize: "0.85rem",
+                }}
+              >
+                ⚠ {trustWarning}
               </div>
             )}
-            {record.runway_match.length_ft > 0 &&
-              record.rollout_distance_m != null && (
+            {geometryTrusted && (
+              <RunwayDiagram
+                rw={record.runway_match}
+                rolloutDistanceM={record.rollout_distance_m}
+              />
+            )}
+            <dl className="landing-keyvals landing-keyvals--inline">
+              <div>
+                <dt>{t("landing.runway_id")}</dt>
+                <dd>
+                  {record.runway_match.airport_ident}/{record.runway_match.runway_ident}{" "}
+                  ({record.runway_match.surface})
+                </dd>
+              </div>
+              <div>
+                <dt>{t("landing.runway_length")}</dt>
+                <dd>
+                  {(record.runway_match.length_ft * 0.3048).toFixed(0)} m
+                </dd>
+              </div>
+              {/* v0.7.6 P1-3: Centerline-Offset nur bei trusted geometry */}
+              {geometryTrusted && (
                 <div>
-                  <dt>{t("landing.runway_used_pct")}</dt>
+                  <dt>{t("landing.centerline_offset")}</dt>
                   <dd>
-                    {(
-                      ((record.rollout_distance_m * 3.28084) /
-                        record.runway_match.length_ft) *
-                      100
-                    ).toFixed(0)}
-                    %
+                    {Math.abs(record.runway_match.centerline_distance_m).toFixed(1)} m{" "}
+                    {t(sideKey(record.runway_match.side))}
                   </dd>
                 </div>
               )}
-          </dl>
-        </section>
-      )}
+              {/* v0.7.6 P1-3: Past-Threshold (= Float-Distance-Equivalent)
+                  nur bei trusted geometry. */}
+              {geometryTrusted && (
+                <div>
+                  <dt>{t("landing.past_threshold")}</dt>
+                  <dd>
+                    {(record.runway_match.touchdown_distance_from_threshold_ft * 0.3048).toFixed(0)} m
+                  </dd>
+                </div>
+              )}
+              {/* Rollout bleibt unconditional sichtbar — GPS-basiert,
+                  nicht runway-DB-abhaengig. */}
+              {record.rollout_distance_m != null && (
+                <div>
+                  <dt>{t("landing.rollout")}</dt>
+                  <dd>{record.rollout_distance_m.toFixed(0)} m</dd>
+                </div>
+              )}
+              {/* v0.7.6 P1-3: runway_used_pct nutzt runway_length aus DB
+                  → nur bei trusted geometry zeigen. */}
+              {geometryTrusted &&
+                record.runway_match.length_ft > 0 &&
+                record.rollout_distance_m != null && (
+                  <div>
+                    <dt>{t("landing.runway_used_pct")}</dt>
+                    <dd>
+                      {(
+                        ((record.rollout_distance_m * 3.28084) /
+                          record.runway_match.length_ft) *
+                        100
+                      ).toFixed(0)}
+                      %
+                    </dd>
+                  </div>
+                )}
+            </dl>
+          </section>
+        );
+      })()}
 
       {/* Fuel + Weight — Soll/Ist-Vergleich (v0.3.0).
           Render whenever ANY fuel/weight value is present. */}
