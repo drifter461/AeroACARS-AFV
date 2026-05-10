@@ -5845,18 +5845,29 @@ async fn flight_start_manual(
             "Erwartete Flugzeit muss > 0 Minuten sein",
         ));
     }
-    // ZFW ist ab v0.5.42 Pflicht. Ohne planned_zfw_kg gibt es weder ein
-    // sinnvolles planned_tow noch einen Loadsheet-Score — der Mehrwert
-    // gegenüber einem reinen Manual-PIREP fällt weg.
-    let planned_zfw = match plan.planned_zfw_kg {
-        Some(v) if v > 0.0 => v,
-        _ => {
+    // v0.7.1 Phase 2 F1 (Spec docs/spec/v0.7.1-landing-ux-fairness.md
+    // P1.1-A + P1.3-B): ZFW ist NICHT mehr Pflicht. VFR-/Manual-Mode-
+    // Piloten ohne Dispatch-Daten koennen jetzt starten.
+    //   - None      → Loadsheet-Sub-Score wird skipped (siehe sub_loadsheet
+    //                 in landing-scoring Crate)
+    //   - Some(0.0) oder negativ → Eingabefehler-Schutz, klarer Error-Code
+    //                 invalid_zfw_value (Frontend mapped diesen via
+    //                 ManualFlightModal knownCodes-Map auf i18n)
+    //   - Some(>0)  → wie bisher, planned_tow = zfw + block_fuel
+    let planned_zfw: Option<f32> = match plan.planned_zfw_kg {
+        Some(v) if v > 0.0 => Some(v),
+        Some(v) if v <= 0.0 => {
             return Err(UiError::new(
-                "invalid_zfw",
-                "ZFW (Zero Fuel Weight) ist Pflicht — bitte den geplanten Leerflug-Wert (Aircraft + Pilot + Pax + Cargo) in kg angeben.",
+                "invalid_zfw_value",
+                "ZFW muss > 0 sein wenn angegeben. Lass das Feld leer fuer VFR/Manual ohne Loadsheet-Wertung.",
             ));
         }
+        _ => None,
     };
+    let _ = planned_zfw; // Wird unten bei Manual-TOW-Zuweisung benutzt
+    // Noisy-cast-Hinweis: NaN-Faelle werden vom is-pattern-match
+    // in der `Some(v)` arm abgedeckt (NaN ist niemals > 0.0 noch <= 0.0,
+    // also Some-NaN faellt in den catchall `_` und wird wie None behandelt).
 
     let setup_guard = FlightSetupGuard::try_acquire(&state.flight_setup_in_progress)?;
 
@@ -6080,15 +6091,18 @@ async fn flight_start_manual(
     {
         let mut stats = flight.stats.lock().expect("flight stats lock");
         stats.planned_block_fuel_kg = Some(plan.planned_block_fuel_kg);
-        // planned_burn = explicit oder 90%-Fallback
-        stats.planned_burn_kg = plan.planned_burn_kg
-            .or(Some(plan.planned_block_fuel_kg * 0.9));
-        // v0.5.42: ZFW ist jetzt Pflicht, daher immer Some + planned_tow voll
-        stats.planned_zfw_kg = Some(planned_zfw);
-        stats.planned_tow_kg = match (Some(planned_zfw), Some(plan.planned_block_fuel_kg)) {
-            (Some(zfw), Some(fuel)) => Some(zfw + fuel),
-            _ => None,
-        };
+        // v0.7.1 Phase 2 F2 (Spec docs/spec/v0.7.1-landing-ux-fairness.md):
+        // KEIN Fallback mehr. Wenn der Pilot keinen geplanten Trip-Burn aus
+        // dem OFP hat, wird kein Fuel-Score vergeben (sub_fuel skipped).
+        // Pilot wird nicht mehr fuer eine 90%-Annahme bewertet die er nie
+        // selbst geplant hat.
+        stats.planned_burn_kg = plan.planned_burn_kg;
+        // v0.7.1 Phase 2 F1 (P1.3-B): ZFW ist Option<f32>, planned_tow nur
+        // wenn ZFW vorhanden. planned_ldw bleibt None im Manual-Pfad
+        // (kein Trip-Burn-Plan ohne OFP).
+        stats.planned_zfw_kg = planned_zfw;
+        stats.planned_tow_kg = planned_zfw.map(|zfw| zfw + plan.planned_block_fuel_kg);
+        stats.planned_ldw_kg = None;
         stats.planned_route = plan.planned_route;
         stats.planned_alternate = plan.alt_airport_id;
         stats.flight_plan_source = Some("manual");
@@ -6683,10 +6697,11 @@ fn build_landing_record(
         // wrappen Some() unconditional.
         approach_excessive_sink: Some(stats.approach_excessive_sink),
         gate_window: None, // Phase 3: aus stab_v2-Compute befuellen
-        // P1.5: sub_scores aus der landing-scoring Crate. Phase 0
-        // Schatten-Validation hat verifiziert dass Werte bit-identisch
-        // zur TS-Implementation sind. UI kann ab jetzt direkt aus
-        // sub_scores rendern (Spec §3.5 Legacy-Schutz).
+        // P1.5 + Phase 2 F1/F2/F3: sub_scores aus der landing-scoring
+        // Crate. Inputs nutzen jetzt planned_burn + actual_trip_burn
+        // (statt fuel_efficiency_pct) damit das Hard-Gate aus F2 +
+        // Asymmetrie aus F3 greifen. planned_zfw + planned_tow
+        // aktivieren sub_loadsheet (F1: skipped wenn None).
         sub_scores: {
             let scoring_input = landing_scoring::LandingScoringInput {
                 vs_fpm: stats.landing_peak_vs_fpm.or(stats.landing_rate_fpm),
@@ -6695,7 +6710,10 @@ fn build_landing_record(
                 approach_vs_stddev_fpm: stats.approach_vs_stddev_fpm,
                 approach_bank_stddev_deg: stats.approach_bank_stddev_deg,
                 rollout_distance_m: stats.rollout_distance_m.map(|m| m as f32),
-                fuel_efficiency_pct: fuel_pct,
+                planned_burn_kg: stats.planned_burn_kg,
+                actual_trip_burn_kg: actual_burn,
+                planned_zfw_kg: stats.planned_zfw_kg,
+                planned_tow_kg: stats.planned_tow_kg,
                 ..Default::default()
             };
             landing_scoring::compute_sub_scores(&scoring_input)
@@ -7821,8 +7839,21 @@ async fn flight_end(
                             approach_stable_config: stats.approach_stable_config,
                             approach_excessive_sink: Some(stats.approach_excessive_sink),
                             gate_window: None, // Phase 3
-                            // P1.5: Sub-Scores aus der landing-scoring Crate
+                            // P1.5 + Phase 2 (F1/F2/F3): Sub-Scores aus der
+                            // landing-scoring Crate mit den gleichen Inputs
+                            // wie build_landing_record (Konsistenz-Garantie).
                             sub_scores: {
+                                let actual_burn = match (
+                                    stats.takeoff_fuel_kg,
+                                    stats.landing_fuel_kg,
+                                ) {
+                                    (Some(toff), Some(land))
+                                        if toff > land && toff > 0.0 && land >= 0.0 =>
+                                    {
+                                        Some(toff - land)
+                                    }
+                                    _ => None,
+                                };
                                 let scoring_input = landing_scoring::LandingScoringInput {
                                     vs_fpm: stats
                                         .landing_peak_vs_fpm
@@ -7835,22 +7866,10 @@ async fn flight_end(
                                     rollout_distance_m: stats
                                         .rollout_distance_m
                                         .map(|m| m as f32),
-                                    fuel_efficiency_pct: match (
-                                        stats.takeoff_fuel_kg,
-                                        stats.landing_fuel_kg,
-                                        stats.planned_burn_kg,
-                                    ) {
-                                        (Some(toff), Some(land), Some(plan))
-                                            if toff > land
-                                                && toff > 0.0
-                                                && land >= 0.0
-                                                && plan > 0.0 =>
-                                        {
-                                            let actual = toff - land;
-                                            Some(((actual - plan) / plan) * 100.0)
-                                        }
-                                        _ => None,
-                                    },
+                                    planned_burn_kg: stats.planned_burn_kg,
+                                    actual_trip_burn_kg: actual_burn,
+                                    planned_zfw_kg: stats.planned_zfw_kg,
+                                    planned_tow_kg: stats.planned_tow_kg,
                                     ..Default::default()
                                 };
                                 landing_scoring::compute_sub_scores(&scoring_input)
@@ -13406,31 +13425,28 @@ fn build_pirep_notes(flight: &ActiveFlight, stats: &FlightStats) -> String {
     //
     // Phase-0-Acceptance: dieser Schatten-Wert MUSS dem TS-berechneten
     // Master-Score entsprechen (Bit-Drift = Phase-0-Bug).
+    // Phase 2 Update: nutzt jetzt planned_burn + actual_trip_burn
+    // (statt fuel_efficiency_pct Legacy-Pfad), planned_zfw + planned_tow
+    // damit sub_loadsheet skipped/scored werden kann.
+    let actual_burn = match (stats.takeoff_fuel_kg, stats.landing_fuel_kg) {
+        (Some(toff), Some(land))
+            if toff > land && toff > 0.0 && land >= 0.0 =>
+        {
+            Some(toff - land)
+        }
+        _ => None,
+    };
     let crate_input = landing_scoring::LandingScoringInput {
-        // Spiegel von LandingPanel.tsx:140 `peakVs = landing_peak_vs_fpm ?? landing_rate_fpm`
         vs_fpm: stats.landing_peak_vs_fpm.or(stats.landing_rate_fpm),
-        // Spiegel von LandingPanel.tsx:143 `peak_g_load: r.landing_peak_g_force`
         peak_g_load: stats.landing_peak_g_force,
         bounce_count: Some(stats.bounce_count as u32),
         approach_vs_stddev_fpm: stats.approach_vs_stddev_fpm,
         approach_bank_stddev_deg: stats.approach_bank_stddev_deg,
         rollout_distance_m: stats.rollout_distance_m.map(|m| m as f32),
-        // Spiegel von build_landing_record lib.rs:6467-6477:
-        //   actual_burn = takeoff_fuel - landing_fuel  (NICHT block_fuel - landing_fuel)
-        //   pct = (actual - planned) / planned * 100
-        fuel_efficiency_pct: match (
-            stats.takeoff_fuel_kg,
-            stats.landing_fuel_kg,
-            stats.planned_burn_kg,
-        ) {
-            (Some(toff), Some(land), Some(plan))
-                if toff > land && toff > 0.0 && land >= 0.0 && plan > 0.0 =>
-            {
-                let actual = toff - land;
-                Some(((actual - plan) / plan) * 100.0)
-            }
-            _ => None,
-        },
+        planned_burn_kg: stats.planned_burn_kg,
+        actual_trip_burn_kg: actual_burn,
+        planned_zfw_kg: stats.planned_zfw_kg,
+        planned_tow_kg: stats.planned_tow_kg,
         ..Default::default()
     };
     let crate_subs = landing_scoring::compute_sub_scores(&crate_input);

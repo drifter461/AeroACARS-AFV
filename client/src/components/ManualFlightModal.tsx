@@ -205,6 +205,9 @@ export function ManualFlightModal({ bid, simHint, onClose, onFlightStarted }: Pr
         "invalid_block_fuel",
         "invalid_flight_time",
         "invalid_zfw",
+        // v0.7.1 Phase 2 F1 (P2.4-B): neuer Code wenn ZFW=0/negativ
+        // angegeben wird. None bleibt erlaubt → kein Error.
+        "invalid_zfw_value",
         "phpvms_error",
       ];
       const msg = knownCodes.includes(ui.code)

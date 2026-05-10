@@ -845,6 +845,7 @@
       "invalid_block_fuel": "Il block fuel deve essere un numero positivo in kg.",
       "invalid_flight_time": "Il tempo di volo previsto deve essere un numero positivo in minuti.",
       "invalid_zfw": "Lo ZFW (Zero Fuel Weight) è obbligatorio — inserisci il peso a vuoto pianificato (velivolo + pilota + pax + carico, senza carburante) in kg.",
+      "invalid_zfw_value": "Lo ZFW deve essere > 0 se specificato. Lascia il campo vuoto per voli VFR/manuali senza valutazione del loadsheet.",
       "phpvms_error": "phpVMS ha rifiutato il volo — vedi dettagli."
     }
   },

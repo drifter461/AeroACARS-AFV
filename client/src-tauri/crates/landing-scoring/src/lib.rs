@@ -19,6 +19,7 @@ pub mod sub_bounces;
 pub mod sub_fuel;
 pub mod sub_g_force;
 pub mod sub_landing_rate;
+pub mod sub_loadsheet;
 pub mod sub_rollout;
 pub mod sub_stability;
 
@@ -156,18 +157,21 @@ pub struct LandingScoringInput {
     pub approach_bank_stddev_deg: Option<f32>,
     pub rollout_distance_m: Option<f32>,
     pub fuel_efficiency_pct: Option<f32>,
-    // Phase 2 hooks (Felder akzeptieren, Sub-Score-Logik kommt in
-    // Phase 2/F1+F2+F3). Phase 0 ignoriert sie.
+    // Phase 2 (F1 + F2 + F3): VFR/ZFW + Fuel-Asymmetrie
     pub planned_zfw_kg: Option<f32>,
+    pub planned_tow_kg: Option<f32>,
     pub planned_burn_kg: Option<f32>,
     pub actual_trip_burn_kg: Option<f32>,
     // Phase 3 hook (Flare-Sub-Score kommt in Phase 3/F6).
     pub flare_quality_score: Option<u8>,
 }
 
-/// Berechnet alle Sub-Scores. Phase-0-Verhalten: matched 1:1 die TS-
-/// `computeSubScores`. Phase 2 wird Skip-Logik fuer Fuel/Loadsheet
-/// einfuehren, Phase 3 erweitert subStability auf 4-Faktor-Voting.
+/// Berechnet alle Sub-Scores.
+///
+/// v0.7.1 Phase 2: nutzt `sub_fuel_v0_7_1` (F2 Hard-Gate + F3
+/// Asymmetrie) und `sub_loadsheet` (F1 VFR-Skip). Stability bleibt
+/// im 2-Faktor-Modus bis Phase 3 F7-B aktiviert (siehe Spec §5.5
+/// Backward-Compat-Test 7.2.1).
 pub fn compute_sub_scores(input: &LandingScoringInput) -> Vec<SubScoreEntry> {
     let mut out = Vec::with_capacity(8);
 
@@ -188,9 +192,23 @@ pub fn compute_sub_scores(input: &LandingScoringInput) -> Vec<SubScoreEntry> {
     if let Some(ro) = sub_rollout::sub_rollout(input.rollout_distance_m) {
         out.push(ro);
     }
-    if let Some(fu) = sub_fuel::sub_fuel_legacy(input.fuel_efficiency_pct) {
-        out.push(fu);
-    }
+
+    // v0.7.1 Phase 2 F2 + F3: ersetzt sub_fuel_legacy durch
+    // sub_fuel_v0_7_1 mit Hard-Gate + Asymmetrie. Wenn weder
+    // planned_burn noch actual_trip_burn vorhanden → skipped (NICHT
+    // in den Master-Score eingerechnet).
+    out.push(sub_fuel::sub_fuel_v0_7_1(
+        input.planned_burn_kg,
+        input.actual_trip_burn_kg,
+    ));
+
+    // v0.7.1 Phase 2 F1: NEU sub_loadsheet. VFR/Manual-Mode ohne
+    // Dispatch-Daten → skipped (planned_zfw/tow None). Sonst Score 100
+    // als Phase-2-Placeholder; Phase 3 wird actuelle Mass-Schwellen.
+    out.push(sub_loadsheet::sub_loadsheet(
+        input.planned_zfw_kg,
+        input.planned_tow_kg,
+    ));
 
     out
 }
