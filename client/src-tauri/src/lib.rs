@@ -6516,6 +6516,35 @@ fn open_landing_store(app: &AppHandle) -> Option<LandingStore> {
     LandingStore::open(dir).ok()
 }
 
+/// v0.7.5 Phase-Safety Hotfix (Spec docs/spec/flight-phase-state-machine.md §13.8):
+/// Reine pure-function fuer den Universal Arrived-Fallback. URO913 zeigte historisch:
+/// Pilot rollte mit `engines_running=0` aber `groundspeed_kt = 141 -> 42` ueber ~31.5s
+/// zum Cargo-Stand → Fallback feuerte `Arrived` obwohl der Flieger noch rollte.
+///
+/// Ab v0.7.5: `groundspeed_kt < 1.0` Pflicht — echtes Stillstand statt nur "on ground".
+///
+/// Returns true wenn der 30s-Dwell starten/laufen darf.
+pub fn arrived_fallback_conditions_basic(
+    on_ground: bool,
+    engines_running: u8,
+    groundspeed_kt: f32,
+) -> bool {
+    on_ground && engines_running == 0 && groundspeed_kt < 1.0
+}
+
+/// v0.7.5 Phase-Safety Hotfix (Spec §13.9):
+/// Reine pure-function: muss `holding_pending_since` resetet werden bei diesem
+/// Phase-Wechsel? PTO105 (Bug-Beleg): Approach -> Holding mit nur 5.2s Aufenthalt —
+/// alter Pending-State aus einer frueheren Phase wurde mitgeschleppt.
+///
+/// Regel: bei jedem Phase-Wechsel der NICHT `→ Holding` ist, Pending-Reset.
+pub fn should_reset_holding_pending(
+    prev_phase: FlightPhase,
+    next_phase: FlightPhase,
+) -> bool {
+    next_phase != prev_phase && next_phase != FlightPhase::Holding
+}
+
 /// v0.7.1 Helper: actual_trip_burn = takeoff_fuel - landing_fuel
 /// (1:1 wie in build_landing_record line 6527-6530). Damit sub_scores
 /// + aggregate_master_score den gleichen Wert nutzen.
@@ -12677,7 +12706,13 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
         // the original fallback behaviour.
         let near_planned = near_planned || arr_pos.is_none();
 
-        let conditions_basic = snap.on_ground && snap.engines_running == 0;
+        // v0.7.5 Phase-Safety Hotfix (Spec docs/spec/flight-phase-state-
+        // machine.md §13.8): siehe arrived_fallback_conditions_basic.
+        let conditions_basic = arrived_fallback_conditions_basic(
+            snap.on_ground,
+            snap.engines_running,
+            snap.groundspeed_kt,
+        );
         if conditions_basic {
             let pending_at = stats.arrived_fallback_pending_since.get_or_insert(now);
             let elapsed = (now - *pending_at).num_seconds();
@@ -12818,6 +12853,10 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
     stats.was_parking_brake = Some(snap.parking_brake);
 
     if next_phase != prev_phase {
+        // v0.7.5 Phase-Safety Hotfix (Spec §13.9): siehe should_reset_holding_pending.
+        if should_reset_holding_pending(prev_phase, next_phase) {
+            stats.holding_pending_since = None;
+        }
         stats.phase = next_phase;
         stats.transitions.push((now, next_phase));
         Some(next_phase)
