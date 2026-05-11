@@ -316,17 +316,21 @@ export function BidsList({
     // meisten Real-Boarding-Faellen wird flight_refresh_simbrief mit
     // `bid_not_found` antworten — refreshNoticeKey() macht daraus
     // einen ehrlichen Pilot-Hinweis (Spec §8).
+    //
+    // v0.7.10: IMMER aufrufen, auch ohne aktiven Flug. Backend gibt
+    // dann `no_active_flight` zurueck — das mappen wir zu einem klaren
+    // Pilot-Hinweis statt frueher silent-success. v0.7.11 wird einen
+    // echten Pre-Flight-Refresh-Pfad bauen (eigener bid_preview_simbrief
+    // Backend-Command).
     const refreshP: Promise<{
       result: SimBriefRefreshResult | null;
       error: { code?: string } | null;
-    }> = hasActiveFlight
-      ? invoke<SimBriefRefreshResult>("flight_refresh_simbrief")
-          .then((result) => ({ result, error: null }))
-          .catch((err: { code?: string; message?: string }) => ({
-            result: null,
-            error: err,
-          }))
-      : Promise.resolve({ result: null, error: null });
+    }> = invoke<SimBriefRefreshResult>("flight_refresh_simbrief")
+      .then((result) => ({ result, error: null }))
+      .catch((err: { code?: string; message?: string }) => ({
+        result: null,
+        error: err,
+      }));
 
     const [, , freshProfile, refreshOutcome] = await Promise.all([
       bidsP,

@@ -144,6 +144,14 @@ export function formatRefreshError(
     if (context === "bidlist") return null;
     return { text: t("bids.no_simbrief_link"), tone: "info" };
   }
+  // v0.7.10: no_active_flight — Pilot drueckte "Aktualisieren" im Bid-Tab
+  // OHNE einen aktiven Flug. SimBrief-OFP-Refresh ist im aktuellen
+  // Backend nur waehrend Boarding/Preflight verfuegbar (eigener Bid-
+  // Preview kommt in v0.7.11). Pilot bekommt klaren Hinweis statt
+  // generischem "Refresh ohne Antwort" oder silent fail.
+  if (err.code === "no_active_flight") {
+    return { text: t("bids.no_active_flight_hint"), tone: "info" };
+  }
 
   // ─── Unbekannte Codes: rohe message als err-Tone ───────────────────
   // Letzter Fallback — sollte nur fuer interne Bugs / unerwartete

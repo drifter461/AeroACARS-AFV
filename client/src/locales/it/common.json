@@ -928,7 +928,8 @@
       "details_summary": "Mostra dettagli tecnici"
     },
     "refresh_unknown_error": "Aggiornamento fallito ({{code}}) — controlla il log ACARS",
-    "refresh_no_result": "Aggiornamento senza risposta dal backend — riprova"
+    "refresh_no_result": "Aggiornamento senza risposta dal backend — riprova",
+    "no_active_flight_hint": "Pre-volo — l'OFP SimBrief viene caricato con il piano attuale quando clicchi **IFR Start (SimBrief)**. Il pulsante \"Aggiorna\" nel tab dei bid non può fare un refresh OFP pre-volo (in arrivo in v0.7.11)."
   },
   "flight": {
     "error": {

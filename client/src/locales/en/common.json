@@ -927,7 +927,8 @@
       "details_summary": "Show technical details"
     },
     "refresh_unknown_error": "Refresh failed ({{code}}) — please check the ACARS log",
-    "refresh_no_result": "Refresh returned no result — please retry"
+    "refresh_no_result": "Refresh returned no result — please retry",
+    "no_active_flight_hint": "Pre-flight — the SimBrief OFP is loaded with the current plan when you click **IFR Start (SimBrief)**. The Refresh button in the bid tab cannot do a pre-flight OFP refresh (coming in v0.7.11)."
   },
   "flight": {
     "error": {
