@@ -182,10 +182,25 @@ function airlineMonogram(flight: Flight): string {
 
 // v0.7.7: Pure helper damit der i18n-Key-Wahl gegen Tests + ohne React-
 // Renderer separat verifizierbar ist. Spec §8 Notice-Tabelle.
+// v0.7.8: erweitert um SimBrief-direct-Outcomes (Spec §8 Notice-Tabelle v1.4).
 export function refreshNoticeKey(
   result: SimBriefRefreshResult | null,
   error: { code?: string } | null,
 ): { key: string; tone: "info" | "warn" } | null {
+  // v0.7.8 Outcomes — Direct-Pfad
+  if (error?.code === "ofp_does_not_match_active_flight") {
+    return { key: "bids.ofp_does_not_match_active_flight", tone: "warn" };
+  }
+  if (error?.code === "simbrief_user_not_found") {
+    return { key: "bids.simbrief_user_not_found", tone: "warn" };
+  }
+  if (error?.code === "simbrief_unavailable_and_bid_gone") {
+    return { key: "bids.simbrief_unavailable_and_bid_gone", tone: "warn" };
+  }
+  if (error?.code === "simbrief_direct_failed") {
+    return { key: "bids.simbrief_direct_failed", tone: "warn" };
+  }
+  // v0.7.7 Outcomes — Pointer-Pfad
   if (error?.code === "bid_not_found") {
     return { key: "bids.ofp_bid_gone", tone: "warn" };
   }

@@ -277,6 +277,21 @@ function App() {
   }, []);
 
   // Centralised active-flight polling. Lives at the top so both the
+  // v0.7.8: Beim Login-Mount localStorage → Backend syncen damit
+  // SimBrief-Settings nach App-Restart sofort verfuegbar sind, ohne
+  // dass der Pilot Settings oeffnen muss. Spec §4.2 P2-Korrektur.
+  useEffect(() => {
+    if (status.kind !== "loggedIn") return;
+    const username = localStorage.getItem("simbrief_username") ?? null;
+    const userId = localStorage.getItem("simbrief_user_id") ?? null;
+    if (username || userId) {
+      void invoke("set_simbrief_settings", {
+        username: username && username.trim() ? username.trim() : null,
+        userId: userId && userId.trim() ? userId.trim() : null,
+      }).catch(() => null);
+    }
+  }, [status.kind]);
+
   // Cockpit and the Briefing tab see the same state without duplicate
   // IPC calls. Cockpit auto-becomes the default tab once a flight
   // shows up; Briefing is the default while idle.

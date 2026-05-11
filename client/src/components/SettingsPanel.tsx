@@ -74,6 +74,87 @@ export function SettingsPanel({
   const [kind, setKind] = useState<SimKind | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // v0.7.8: SimBrief Integration Settings — Username + User-ID.
+  // Persistence: localStorage Frontend-side, Backend-State wird per
+  // set_simbrief_settings befuellt. App.tsx pusht beim Login-Mount
+  // (Spec §4.2). Spec docs/spec/ofp-refresh-simbrief-direct-v0.7.8.md.
+  const [simbriefUsername, setSimbriefUsername] = useState<string>(
+    () => localStorage.getItem("simbrief_username") ?? "",
+  );
+  const [simbriefUserId, setSimbriefUserId] = useState<string>(
+    () => localStorage.getItem("simbrief_user_id") ?? "",
+  );
+  const [verifying, setVerifying] = useState(false);
+  const [verifyStatus, setVerifyStatus] = useState<{
+    tone: "ok" | "err";
+    text: string;
+  } | null>(null);
+
+  // v0.7.8: Auto-clear verify-status nach 8s.
+  useEffect(() => {
+    if (!verifyStatus) return;
+    const id = window.setTimeout(() => setVerifyStatus(null), 8000);
+    return () => window.clearTimeout(id);
+  }, [verifyStatus]);
+
+  // v0.7.8: Persistiere SimBrief-Settings bei onBlur in localStorage +
+  // Backend. KEIN Test-Fetch hier (= Pilot druckt Pruefen-Button
+  // explizit, Spec §4.4 Punkt 1).
+  function persistSimbriefSettings(username: string, userId: string) {
+    const u = username.trim();
+    const i = userId.trim();
+    if (u) localStorage.setItem("simbrief_username", u);
+    else localStorage.removeItem("simbrief_username");
+    if (i) localStorage.setItem("simbrief_user_id", i);
+    else localStorage.removeItem("simbrief_user_id");
+    void invoke("set_simbrief_settings", {
+      username: u || null,
+      userId: i || null,
+    }).catch(() => null);
+  }
+
+  async function handleVerifySimbrief() {
+    if (verifying) return;
+    setVerifying(true);
+    setVerifyStatus(null);
+    try {
+      const result = await invoke<{
+        ok: boolean;
+        origin?: string;
+        destination?: string;
+        callsign?: string;
+        error_code?: string;
+      }>("verify_simbrief_identifier", {
+        username: simbriefUsername.trim() || null,
+        userId: simbriefUserId.trim() || null,
+      });
+      if (result.ok) {
+        setVerifyStatus({
+          tone: "ok",
+          text: t("settings.simbrief.verify_ok", {
+            origin: result.origin ?? "—",
+            destination: result.destination ?? "—",
+            callsign: result.callsign ?? "—",
+          }),
+        });
+      } else {
+        const errCode = result.error_code ?? "unknown";
+        setVerifyStatus({
+          tone: "err",
+          text: t(`settings.simbrief.verify_err_${errCode}`),
+        });
+      }
+    } catch (err: unknown) {
+      const msg =
+        typeof err === "object" && err !== null && "message" in err
+          ? String((err as { message: string }).message)
+          : String(err);
+      setVerifyStatus({ tone: "err", text: msg });
+    } finally {
+      setVerifying(false);
+    }
+  }
+
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -140,6 +221,73 @@ export function SettingsPanel({
             <option value="light">{t("settings.theme_light")}</option>
           </select>
         </label>
+      </div>
+
+      {/* v0.7.8: SimBrief Integration — fuer Direct-OFP-Refresh
+          ohne phpVMS-Bid-Pointer (W5-Workaround). Eigene Section,
+          NICHT unter "Allgemein" (Spec §4.4 v1.1-Entscheidung). */}
+      <div className="settings__section">
+        <h3>{t("settings.simbrief.title")}</h3>
+        <p className="settings__row-hint">{t("settings.simbrief.intro")}</p>
+
+        <label className="settings__field">
+          <span className="settings__field-label">
+            {t("settings.simbrief.username_label")}
+          </span>
+          <input
+            type="text"
+            value={simbriefUsername}
+            onChange={(e) => setSimbriefUsername(e.target.value)}
+            onBlur={() => persistSimbriefSettings(simbriefUsername, simbriefUserId)}
+            placeholder="z.B. thomaskant"
+            autoComplete="off"
+            spellCheck={false}
+          />
+          <small>{t("settings.simbrief.username_hint")}</small>
+        </label>
+
+        <label className="settings__field">
+          <span className="settings__field-label">
+            {t("settings.simbrief.userid_label")}
+          </span>
+          <input
+            type="text"
+            inputMode="numeric"
+            value={simbriefUserId}
+            onChange={(e) =>
+              setSimbriefUserId(e.target.value.replace(/[^0-9]/g, ""))
+            }
+            onBlur={() => persistSimbriefSettings(simbriefUsername, simbriefUserId)}
+            placeholder="z.B. 612345"
+            autoComplete="off"
+            spellCheck={false}
+          />
+          <small>{t("settings.simbrief.userid_hint")}</small>
+        </label>
+
+        <div className="settings__field" style={{ flexDirection: "row", gap: 10, alignItems: "center" }}>
+          <button
+            type="button"
+            onClick={handleVerifySimbrief}
+            disabled={
+              verifying ||
+              (!simbriefUsername.trim() && !simbriefUserId.trim())
+            }
+          >
+            {verifying ? "…" : t("settings.simbrief.verify_button")}
+          </button>
+          {verifyStatus && (
+            <span
+              style={{
+                fontSize: "0.85rem",
+                color: verifyStatus.tone === "ok" ? "#4ade80" : "#f87171",
+              }}
+            >
+              {verifyStatus.tone === "ok" ? "✓ " : "⚠ "}
+              {verifyStatus.text}
+            </span>
+          )}
+        </div>
       </div>
 
       <div className="settings__section">

@@ -164,6 +164,40 @@ pub enum ApiError {
     BadResponse(String),
 }
 
+/// v0.7.8: Spezifische Fehler-Varianten fuer den SimBrief-direct
+/// Fetch-Pfad. Werden auf Frontend-Notice-Codes gemapped (Spec §8).
+/// Nicht aus ApiError abgeleitet weil:
+///   - Pfad ist getrennt (keine phpVMS-API-Schicht dazwischen)
+///   - Notice-Wording haengt von Variante ab — Pilot soll wissen ob
+///     User falsch konfiguriert ist (UserNotFound) vs Internet weg
+///     (Network) vs SimBrief offline (Unavailable) vs XML kaputt
+///     (ParseFailed). Pure code-Granularitaet, Wording landet
+///     i18n-side.
+/// Spec docs/spec/ofp-refresh-simbrief-direct-v0.7.8.md §3 + §5.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum SimBriefDirectError {
+    /// Settings haben weder username noch user_id gesetzt.
+    /// Pure code-Variante — Pfad-Auswahl im Caller faengt das ab,
+    /// dieser Variant tritt nicht in der Praxis auf.
+    #[error("no SimBrief identifier configured")]
+    NoIdentifier,
+    /// HTTP 400 (Navigraph-Doku-Pfad) ODER `<fetch><status>Error</status>`
+    /// (Live-Probe-Pfad). Pilot muss Settings pruefen.
+    #[error("SimBrief user not found")]
+    UserNotFound,
+    /// HTTP 5xx — SimBrief offline / maintenance.
+    #[error("SimBrief service unavailable")]
+    Unavailable,
+    /// Network-Layer-Fehler (DNS, TLS, Connection-Refused, etc.).
+    /// Auch fuer unerwartete non-2xx-Codes die nicht 400/5xx sind.
+    #[error("SimBrief network error")]
+    Network,
+    /// HTTP 200 + Status Success aber XML konnte nicht geparsed werden.
+    /// Sollte praktisch nie passieren — SimBrief liefert stabile XML.
+    #[error("SimBrief XML parse failed")]
+    ParseFailed,
+}
+
 impl ApiError {
     /// Stable identifier surfaced to the UI for i18n key lookup.
     pub fn code(&self) -> &'static str {
@@ -442,6 +476,13 @@ pub struct SimBriefOfp {
     /// Wann der OFP erstellt wurde (Unix-Timestamp als String aus
     /// dem XML, oder ISO-Datum). Empty wenn nicht im XML.
     pub ofp_generated_at: String,
+    /// v0.7.8: `<params><request_id>` aus dem SimBrief-XML. Aendert sich
+    /// bei JEDER Re-Generation auf simbrief.com — canonical changed-flag-
+    /// Quelle fuer SimBrief-direct Refresh. Leer wenn Tag fehlt (sollte
+    /// praktisch nie passieren laut Live-API-Probe).
+    /// Spec docs/spec/ofp-refresh-simbrief-direct-v0.7.8.md §3.
+    #[serde(default)]
+    pub request_id: String,
 }
 
 /// Single navlog fix from a SimBrief OFP. `kind` carries the SimBrief
@@ -1176,6 +1217,90 @@ impl Client {
         Ok(parse_simbrief_ofp(&xml))
     }
 
+    /// v0.7.8: SimBrief-direct OFP-Fetch via `xml.fetcher.php?username=X`
+    /// oder `?userid=X` (= "Fetching a User's Latest OFP Data" laut
+    /// Navigraph-Doku). Bypasst den phpVMS-Bid-Pointer → funktioniert
+    /// auch wenn der Bid nach Prefile entfernt wurde (W5).
+    ///
+    /// Pfad-Auswahl:
+    /// - `user_id` (numerisch) → `?userid={user_id}` (Navigraph-Empfehlung,
+    ///   robuster weil unveraenderlich)
+    /// - sonst `username` → `?username={username}` (offiziell ebenfalls
+    ///   unterstuetzt, einfacher zu finden im Profile-URL)
+    ///
+    /// Error-Detection (Spec §3.3 v1.3 — beide Pfade abdecken):
+    /// - HTTP 400 ODER `<fetch><status>Error</status>` → `UserNotFound`
+    /// - HTTP 5xx → `Unavailable`
+    /// - andere non-2xx → `Network`
+    /// - Parse-Fehler nach Status-OK → `ParseFailed`
+    /// - Network/IO-Error vor Response → `Network`
+    ///
+    /// Spec docs/spec/ofp-refresh-simbrief-direct-v0.7.8.md §3.
+    pub async fn fetch_simbrief_direct(
+        &self,
+        user_id: Option<&str>,
+        username: Option<&str>,
+    ) -> Result<SimBriefOfp, SimBriefDirectError> {
+        // user_id > username Prioritaet (Spec §4.1 — robuster, unveraenderlich)
+        let url = if let Some(uid) = user_id.filter(|s| !s.is_empty()) {
+            format!(
+                "https://www.simbrief.com/api/xml.fetcher.php?userid={}",
+                urlencoding_escape(uid),
+            )
+        } else if let Some(un) = username.filter(|s| !s.is_empty()) {
+            format!(
+                "https://www.simbrief.com/api/xml.fetcher.php?username={}",
+                urlencoding_escape(un),
+            )
+        } else {
+            return Err(SimBriefDirectError::NoIdentifier);
+        };
+
+        let response = self.http.get(&url).send().await.map_err(|e| {
+            tracing::warn!(error = %e, "SimBrief-direct network error");
+            SimBriefDirectError::Network
+        })?;
+
+        let status = response.status();
+        if status == reqwest::StatusCode::BAD_REQUEST {
+            // Navigraph-Doku-Pfad: invalid user → HTTP 400 + small XML error
+            tracing::warn!(%status, "SimBrief-direct: HTTP 400, treating as UserNotFound");
+            return Err(SimBriefDirectError::UserNotFound);
+        }
+        if status.is_server_error() {
+            tracing::warn!(%status, "SimBrief-direct: server error, Unavailable");
+            return Err(SimBriefDirectError::Unavailable);
+        }
+        if !status.is_success() {
+            tracing::warn!(%status, "SimBrief-direct: unexpected non-2xx status");
+            return Err(SimBriefDirectError::Network);
+        }
+
+        let xml = response.text().await.map_err(|e| {
+            tracing::warn!(error = %e, "SimBrief-direct body read failed");
+            SimBriefDirectError::Network
+        })?;
+
+        // Live-Probe-Pfad: HTTP 200 + <fetch><status>Error</status>
+        // moeglich. Status MUSS gepruefped werden, nicht nur HTTP-Code.
+        let fetch_status = extract_tag(&xml, "fetch")
+            .and_then(|inner| extract_tag(inner, "status"))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        if fetch_status != "Success" {
+            tracing::warn!(
+                fetch_status = %fetch_status,
+                "SimBrief-direct: <fetch><status> not Success, treating as UserNotFound",
+            );
+            return Err(SimBriefDirectError::UserNotFound);
+        }
+
+        parse_simbrief_ofp(&xml).ok_or_else(|| {
+            tracing::warn!("SimBrief-direct: XML parse failed");
+            SimBriefDirectError::ParseFailed
+        })
+    }
+
     /// `POST /api/pireps/{pirep_id}/acars/position` — push a batch of positions.
     pub async fn post_positions(
         &self,
@@ -1493,6 +1618,13 @@ fn parse_simbrief_ofp(xml: &str) -> Option<SimBriefOfp> {
         .and_then(|inner| extract_tag(inner, "time_generated"))
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|| extract_str("time_generated"));
+    // v0.7.8: <params><request_id> als canonical changed-flag-Quelle
+    // fuer SimBrief-direct Refresh-Pfad. Aendert sich bei JEDER
+    // Re-Generation. Spec §3.
+    let request_id = extract_tag(xml, "params")
+        .and_then(|inner| extract_tag(inner, "request_id"))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
     let route = extract_tag(xml, "route")
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
@@ -1526,6 +1658,7 @@ fn parse_simbrief_ofp(xml: &str) -> Option<SimBriefOfp> {
         ofp_origin_icao,
         ofp_destination_icao,
         ofp_generated_at,
+        request_id,
     })
 }
 
@@ -1695,5 +1828,43 @@ mod tests {
         "#;
         let ofp = parse_simbrief_ofp(xml).expect("parses");
         assert_eq!(ofp.alternate.as_deref(), Some("LFBO"));
+    }
+
+    /// v0.7.8: <params><request_id> ist die canonical changed-flag-
+    /// Quelle fuer SimBrief-direct Refresh. Spec §3.
+    #[test]
+    fn simbrief_parser_extracts_request_id_from_params() {
+        let xml = r#"
+            <ofp>
+                <params>
+                    <request_id>172403072</request_id>
+                    <static_id></static_id>
+                    <time_generated>1778461205</time_generated>
+                </params>
+                <weights>
+                    <est_zfw>71242</est_zfw>
+                </weights>
+            </ofp>
+        "#;
+        let ofp = parse_simbrief_ofp(xml).expect("parses");
+        assert_eq!(ofp.request_id, "172403072");
+    }
+
+    /// v0.7.8: Wenn <request_id> fehlt, bekommen wir leeren String
+    /// statt Parse-Fehler. (Should-not-happen-in-praxis, aber defensiv.)
+    #[test]
+    fn simbrief_parser_handles_missing_request_id_with_empty_string() {
+        let xml = r#"
+            <ofp>
+                <params>
+                    <time_generated>1778461205</time_generated>
+                </params>
+                <weights>
+                    <est_zfw>71242</est_zfw>
+                </weights>
+            </ofp>
+        "#;
+        let ofp = parse_simbrief_ofp(xml).expect("parses");
+        assert_eq!(ofp.request_id, "");
     }
 }

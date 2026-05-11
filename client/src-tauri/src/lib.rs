@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use api_client::{
     Airport, ApiError, Bid, Client, Connection, FareEntry, FileBody, PositionEntry, PrefileBody,
-    Profile, UpdateBody,
+    Profile, SimBriefDirectError, SimBriefOfp, UpdateBody,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -641,6 +641,33 @@ struct AppState {
     /// only ever accessed from async contexts (hook points run
     /// inside the streamer's async tasks).
     mqtt: tokio::sync::Mutex<Option<aeroacars_mqtt::Handle>>,
+    /// v0.7.8: SimBrief-Identifier (Username + User-ID) fuer den
+    /// SimBrief-direct OFP-Refresh-Pfad. Wenn mindestens eines gesetzt
+    /// ist, kann `flight_refresh_simbrief` den neuen OFP direkt von
+    /// simbrief.com holen ohne Bid-Pointer (= W5-Workaround).
+    /// User-ID > Username Prioritaet wenn beide da.
+    /// Persistenz: Frontend localStorage, Backend-State wird per
+    /// `set_simbrief_settings` befuellt (mount + change) und beim
+    /// App-Start/Login via App.tsx zurueck-gesynct.
+    /// Spec docs/spec/ofp-refresh-simbrief-direct-v0.7.8.md §4.
+    simbrief_settings: Mutex<SimBriefSettings>,
+}
+
+/// v0.7.8: SimBrief-Identifier-Settings. Beide Felder optional, aber
+/// mindestens eines muss gesetzt sein damit SimBrief-direct funktioniert.
+/// Wenn beide gefuellt → User-ID gewinnt (robuster, unveraenderlich).
+/// Spec docs/spec/ofp-refresh-simbrief-direct-v0.7.8.md §4.1.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SimBriefSettings {
+    /// SimBrief-Profile-Name (z.B. "thomaskant"). Sichtbar in
+    /// simbrief.com/dashboard/?username=X.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    /// SimBrief-User-ID (numerisch als String, z.B. "612345").
+    /// Aus SimBrief Account Settings. Robuster als Username weil
+    /// unveraenderlich.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
 }
 
 /// RAII guard for `AppState::flight_setup_in_progress`. Acquire it at the
@@ -4199,6 +4226,149 @@ fn set_minimize_to_tray(
     Ok(())
 }
 
+/// v0.7.8: Read SimBrief-Identifier-Settings.
+/// Spec docs/spec/ofp-refresh-simbrief-direct-v0.7.8.md §4.
+#[tauri::command]
+fn get_simbrief_settings(state: tauri::State<'_, AppState>) -> SimBriefSettings {
+    state.simbrief_settings.lock().expect("simbrief_settings lock").clone()
+}
+
+/// v0.7.8: Set SimBrief-Identifier-Settings. Wird vom Frontend
+/// SettingsPanel + App.tsx Login-Mount aufgerufen. Empty-Strings werden
+/// als None behandelt (Pilot loescht das Feld → kein Identifier).
+/// Spec §4.
+#[tauri::command]
+fn set_simbrief_settings(
+    state: tauri::State<'_, AppState>,
+    username: Option<String>,
+    user_id: Option<String>,
+) -> Result<(), UiError> {
+    let username = username.and_then(|s| {
+        let t = s.trim().to_string();
+        if t.is_empty() { None } else { Some(t) }
+    });
+    let user_id = user_id.and_then(|s| {
+        // Numerische User-IDs — Frontend filtert schon non-digit raus,
+        // aber defensiv hier auch nochmal trimmen.
+        let t = s.trim().to_string();
+        if t.is_empty() { None } else { Some(t) }
+    });
+    let mut guard = state.simbrief_settings.lock().expect("simbrief_settings lock");
+    let was_set = guard.username.is_some() || guard.user_id.is_some();
+    let now_set = username.is_some() || user_id.is_some();
+    *guard = SimBriefSettings { username, user_id };
+    if was_set != now_set {
+        tracing::info!(
+            now_set,
+            has_username = guard.username.is_some(),
+            has_user_id = guard.user_id.is_some(),
+            "simbrief_settings updated",
+        );
+    }
+    Ok(())
+}
+
+/// v0.7.8: "Pruefen"-Button in Settings — testet ob der konfigurierte
+/// SimBrief-Identifier (Username/User-ID) ein valides Profil hat.
+/// Frontend ruft das mit den AKTUELLEN Werten aus den Inputs auf (nicht
+/// aus dem AppState), damit der Pilot direkt nach Tippen testen kann
+/// ohne erst "Save" zu druecken.
+/// Spec docs/spec/ofp-refresh-simbrief-direct-v0.7.8.md §4.4.
+#[tauri::command]
+async fn verify_simbrief_identifier(
+    state: tauri::State<'_, AppState>,
+    username: Option<String>,
+    user_id: Option<String>,
+) -> Result<VerifySimBriefResult, UiError> {
+    let username = username.and_then(|s| {
+        let t = s.trim().to_string();
+        if t.is_empty() { None } else { Some(t) }
+    });
+    let user_id = user_id.and_then(|s| {
+        let t = s.trim().to_string();
+        if t.is_empty() { None } else { Some(t) }
+    });
+    if username.is_none() && user_id.is_none() {
+        return Err(UiError::new(
+            "no_identifier",
+            "Mindestens Username oder User-ID muss gesetzt sein.",
+        ));
+    }
+
+    // Wir brauchen einen Client mit HTTP-Setup. Der phpVMS-Client
+    // taugt nicht — wir wollen direkt zu simbrief.com. Aber: der
+    // api_client::Client haengt am phpVMS-Endpoint. Workaround:
+    // wir setzen einen Dummy-Connection auf, da fetch_simbrief_direct
+    // intern nur self.http nutzt (= reqwest::Client) der unabhaengig
+    // vom phpVMS-Endpoint ist.
+    let client = current_client(&state)?;
+
+    match client.fetch_simbrief_direct(user_id.as_deref(), username.as_deref()).await {
+        Ok(ofp) => Ok(VerifySimBriefResult {
+            ok: true,
+            origin: Some(ofp.ofp_origin_icao),
+            destination: Some(ofp.ofp_destination_icao),
+            callsign: Some(ofp.ofp_flight_number),
+            error_code: None,
+        }),
+        Err(SimBriefDirectError::UserNotFound) => Ok(VerifySimBriefResult {
+            ok: false,
+            origin: None,
+            destination: None,
+            callsign: None,
+            error_code: Some("user_not_found".to_string()),
+        }),
+        Err(SimBriefDirectError::Unavailable) => Ok(VerifySimBriefResult {
+            ok: false,
+            origin: None,
+            destination: None,
+            callsign: None,
+            error_code: Some("unavailable".to_string()),
+        }),
+        Err(SimBriefDirectError::Network) => Ok(VerifySimBriefResult {
+            ok: false,
+            origin: None,
+            destination: None,
+            callsign: None,
+            error_code: Some("network".to_string()),
+        }),
+        Err(SimBriefDirectError::ParseFailed) => Ok(VerifySimBriefResult {
+            ok: false,
+            origin: None,
+            destination: None,
+            callsign: None,
+            error_code: Some("parse_failed".to_string()),
+        }),
+        Err(SimBriefDirectError::NoIdentifier) => Err(UiError::new(
+            "no_identifier",
+            "no SimBrief identifier provided",
+        )),
+    }
+}
+
+/// v0.7.8: Result-DTO fuer den "Pruefen"-Button. Bei Erfolg sieht der
+/// Pilot Origin/Destination/Callsign des latest OFP — das ist gleichzeitig
+/// eine Bestaetigung dass der Username/User-ID korrekt konfiguriert ist
+/// und der OFP zum aktuellen Flug-Plan passt.
+#[derive(Debug, Clone, Serialize)]
+struct VerifySimBriefResult {
+    /// true wenn SimBrief das Profil findet + OFP parsable.
+    ok: bool,
+    /// Origin-ICAO des latest OFP (nur bei ok=true).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    origin: Option<String>,
+    /// Destination-ICAO (nur bei ok=true).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    destination: Option<String>,
+    /// Callsign aus dem OFP (nur bei ok=true).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    callsign: Option<String>,
+    /// Bei ok=false: spezifischer Error-Code ("user_not_found" /
+    /// "unavailable" / "network" / "parse_failed") fuer i18n-Lookup.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_code: Option<String>,
+}
+
 /// Find the N nearest airports to the active flight's CURRENT
 /// position. Powers the manual-divert modal in the cockpit so the
 /// pilot can pick from a list of nearby fields (or type a custom
@@ -4373,17 +4543,35 @@ async fn flight_refresh_simbrief(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<SimBriefRefreshResult, UiError> {
-    // Snapshot bid_id, current_phase, previous_ofp_id under the lock;
-    // release it before any await.
+    // Snapshot bid_id, current_phase, previous_ofp_id, plus Match-
+    // Verifikation-Felder (dpt/arr/airline/flight_number) unter dem Lock;
+    // release before any await.
     //
-    // v0.7.7: Phase-Gate + previous_ofp_id-Capture im selben Lock-Scope.
-    let (bid_id, current_phase, previous_ofp_id) = {
+    // v0.7.8: Snapshot erweitert um dpt/arr/airline/flight_number fuer
+    // die Flight-Match-Verifikation im Direct-Pfad.
+    let (
+        bid_id,
+        current_phase,
+        previous_ofp_id,
+        active_dpt,
+        active_arr,
+        active_airline_icao,
+        active_flight_number,
+    ) = {
         let guard = state.active_flight.lock().expect("active_flight lock");
         let flight = guard
             .as_ref()
             .ok_or_else(|| UiError::new("no_active_flight", "no flight is active"))?;
         let stats = flight.stats.lock().expect("flight stats lock");
-        (flight.bid_id, stats.phase, stats.simbrief_ofp_id.clone())
+        (
+            flight.bid_id,
+            stats.phase,
+            stats.simbrief_ofp_id.clone(),
+            flight.dpt_airport.clone(),
+            flight.arr_airport.clone(),
+            flight.airline_icao.clone(),
+            flight.flight_number.clone(),
+        )
     };
 
     // v0.7.7 Phase-Gate: OFP-Refresh ist nur bis vor Takeoff erlaubt
@@ -4401,42 +4589,62 @@ async fn flight_refresh_simbrief(
         ));
     }
 
+    // v0.7.8 Pfad-Auswahl: SimBrief-direct vs Pointer-Pfad
+    // Spec §5: Wenn SimBrief-Identifier (userid oder username) konfiguriert,
+    // versuche Direct zuerst. Bei Mismatch HARD-Block. Bei
+    // Netzwerk/Unavailable-Fehler SOFT-Fallback auf Pointer, aber
+    // Direct-Error fuer compose_failure merken.
+    let simbrief_settings = state.simbrief_settings.lock().expect("simbrief_settings lock").clone();
+    let has_direct = simbrief_settings.user_id.is_some() || simbrief_settings.username.is_some();
     let client = current_client(&state)?;
-    // Pull the up-to-date bid list — the pilot's OFP regeneration would
-    // have updated the bid->simbrief relation server-side. We don't have
-    // a "GET single bid by id" endpoint, so we list all and filter.
-    //
-    // v0.7.7 W5-Realitaet: phpVMS-7 entfernt den Bid nach Prefile. Der
-    // `bid_not_found`-Pfad ist deshalb in v0.7.7 wahrscheinlich der
-    // haeufigste Outcome. Frontend macht daraus eine ehrliche Notice
-    // ("OFP-Refresh ueber phpVMS-Pointer nicht moeglich" — siehe Spec §8).
-    let bids = client.get_bids().await.map_err(|e| {
-        UiError::new(
-            "bids_fetch_failed",
-            format!("could not refresh bid list: {e}"),
-        )
-    })?;
-    let bid = bids.into_iter().find(|b| b.id == bid_id).ok_or_else(|| {
-        UiError::new(
-            "bid_not_found",
-            "current bid is no longer in your bid list — cannot refresh OFP",
-        )
-    })?;
-    let sb_id = bid.flight.simbrief.as_ref().map(|s| s.id.clone()).ok_or_else(|| {
-        UiError::new(
-            "no_simbrief_link",
-            "bid has no SimBrief OFP linked — generate one on simbrief.com first",
-        )
-    })?;
-    let ofp = client.fetch_simbrief_ofp(&sb_id).await.map_err(|e| {
-        UiError::new("ofp_fetch_failed", format!("SimBrief OFP fetch failed: {e}"))
-    })?;
-    let ofp = ofp.ok_or_else(|| {
-        UiError::new(
-            "ofp_unusable",
-            "SimBrief returned no usable OFP — check your simbrief.com OFP",
-        )
-    })?;
+
+    let (sb_id, ofp) = if has_direct {
+        match try_simbrief_direct_with_match(
+            &client,
+            &simbrief_settings,
+            &active_dpt,
+            &active_arr,
+            &active_airline_icao,
+            &active_flight_number,
+        ).await {
+            DirectOutcome::Match { ofp } => {
+                // v0.7.8: Im Direct-Pfad ist `request_id` aus dem XML die
+                // canonical OFP-ID (NICHT die phpVMS-bid.simbrief.id).
+                // Erster Pfad-Wechsel kann changed=true triggern auch bei
+                // inhaltsgleichem Plan — danach stabil. Spec §3.
+                (ofp.request_id.clone(), ofp)
+            }
+            DirectOutcome::Mismatch { simbrief_origin, simbrief_dest, simbrief_callsign } => {
+                // v0.7.8 HARD-Block bei Mismatch (Spec v1.1 P1-2).
+                return Err(UiError::new(
+                    "ofp_does_not_match_active_flight",
+                    format!(
+                        "Latest SimBrief OFP belongs to {} → {} ({}). \
+                         Please regenerate the OFP for the current flight on simbrief.com.",
+                        simbrief_origin, simbrief_dest, simbrief_callsign,
+                    ),
+                ));
+            }
+            DirectOutcome::Error(direct_err) => {
+                // v0.7.8 SOFT-Fallback: SimBrief offline / Network. Versuche
+                // Pointer-Pfad, aber wenn der auch tot ist → compose_failure
+                // priorisiert den Direct-Fehler (Spec §5.1).
+                tracing::warn!(
+                    ?direct_err,
+                    "SimBrief-direct failed, attempting pointer fallback",
+                );
+                match fetch_via_pointer(&client, bid_id).await {
+                    Ok((sb_id, ofp)) => (sb_id, ofp),
+                    Err(pointer_err) => {
+                        return Err(compose_simbrief_failure(direct_err, pointer_err));
+                    }
+                }
+            }
+        }
+    } else {
+        // v0.7.7-Pfad: kein SimBrief-Identifier → nur Pointer-Pfad
+        fetch_via_pointer(&client, bid_id).await?
+    };
 
     // v0.7.7 changed-Flag: identische OFP-ID → kein Pilot-Frust-Trigger.
     let changed = previous_ofp_id.as_deref() != Some(sb_id.as_str());
@@ -4515,6 +4723,133 @@ async fn flight_refresh_simbrief(
         current_ofp_id: sb_id,
         changed,
     })
+}
+
+/// v0.7.8: Outcome des SimBrief-direct-Fetch + Match-Verifikation.
+/// Spec docs/spec/ofp-refresh-simbrief-direct-v0.7.8.md §5 + §6.
+enum DirectOutcome {
+    /// SimBrief lieferte OFP, dpt/arr/callsign matchen den aktiven Flug.
+    Match { ofp: SimBriefOfp },
+    /// SimBrief lieferte OFP, aber dpt/arr oder callsign passen NICHT —
+    /// Pilot hat zwischendurch einen OFP fuer einen anderen Flug
+    /// regeneriert. HARD-Block, kein Fallback (Spec v1.1 P1-2).
+    Mismatch {
+        simbrief_origin: String,
+        simbrief_dest: String,
+        simbrief_callsign: String,
+    },
+    /// Direct-Fetch fehlgeschlagen (Network/Unavailable/UserNotFound/
+    /// ParseFailed). SOFT-Fallback auf Pointer-Pfad versuchen,
+    /// Direct-Error fuer compose_failure merken.
+    Error(SimBriefDirectError),
+}
+
+/// v0.7.8: Versucht SimBrief-direct Fetch + Match-Verifikation.
+/// Spec §5.1.
+async fn try_simbrief_direct_with_match(
+    client: &Client,
+    settings: &SimBriefSettings,
+    active_dpt: &str,
+    active_arr: &str,
+    active_airline_icao: &str,
+    active_flight_number: &str,
+) -> DirectOutcome {
+    match client
+        .fetch_simbrief_direct(
+            settings.user_id.as_deref(),
+            settings.username.as_deref(),
+        )
+        .await
+    {
+        Ok(ofp) => {
+            if ofp_matches_active_flight(
+                &ofp.ofp_origin_icao,
+                &ofp.ofp_destination_icao,
+                &ofp.ofp_flight_number,
+                active_dpt,
+                active_arr,
+                active_airline_icao,
+                active_flight_number,
+            ) {
+                DirectOutcome::Match { ofp }
+            } else {
+                DirectOutcome::Mismatch {
+                    simbrief_origin: ofp.ofp_origin_icao.clone(),
+                    simbrief_dest: ofp.ofp_destination_icao.clone(),
+                    simbrief_callsign: ofp.ofp_flight_number.clone(),
+                }
+            }
+        }
+        Err(e) => DirectOutcome::Error(e),
+    }
+}
+
+/// v0.7.7/v0.7.8 Pointer-Pfad: Fetch via `client.get_bids()` + Bid.simbrief.id.
+/// Faellt bei `bid_not_found` (W5: Bid weg nach Prefile) mit klarem
+/// Error. Returns (sb_id, ofp) auf Erfolg.
+/// Spec docs/spec/ofp-refresh-during-boarding.md §5 + §5.1.
+async fn fetch_via_pointer(
+    client: &Client,
+    bid_id: i64,
+) -> Result<(String, SimBriefOfp), UiError> {
+    let bids = client.get_bids().await.map_err(|e| {
+        UiError::new(
+            "bids_fetch_failed",
+            format!("could not refresh bid list: {e}"),
+        )
+    })?;
+    let bid = bids.into_iter().find(|b| b.id == bid_id).ok_or_else(|| {
+        UiError::new(
+            "bid_not_found",
+            "current bid is no longer in your bid list — cannot refresh OFP",
+        )
+    })?;
+    let sb_id = bid.flight.simbrief.as_ref().map(|s| s.id.clone()).ok_or_else(|| {
+        UiError::new(
+            "no_simbrief_link",
+            "bid has no SimBrief OFP linked — generate one on simbrief.com first",
+        )
+    })?;
+    let ofp = client.fetch_simbrief_ofp(&sb_id).await.map_err(|e| {
+        UiError::new("ofp_fetch_failed", format!("SimBrief OFP fetch failed: {e}"))
+    })?;
+    let ofp = ofp.ok_or_else(|| {
+        UiError::new(
+            "ofp_unusable",
+            "SimBrief returned no usable OFP — check your simbrief.com OFP",
+        )
+    })?;
+    Ok((sb_id, ofp))
+}
+
+/// v0.7.8: Composite-Failure wenn BEIDE Pfade tot — Direct-Error
+/// priorisieren damit Pilot den actionable Hinweis kriegt
+/// ("Username falsch" beats "Bid weg"). Spec §5.1.
+fn compose_simbrief_failure(
+    direct: SimBriefDirectError,
+    pointer: UiError,
+) -> UiError {
+    match direct {
+        SimBriefDirectError::UserNotFound => UiError::new(
+            "simbrief_user_not_found",
+            "SimBrief-Username/User-ID nicht gefunden. Pruefe Settings → SimBrief Integration.",
+        ),
+        SimBriefDirectError::Unavailable => UiError::new(
+            "simbrief_unavailable_and_bid_gone",
+            "SimBrief gerade nicht erreichbar; Pointer-Fallback auch nicht moeglich. Versuche es in ein paar Minuten erneut.",
+        ),
+        SimBriefDirectError::Network | SimBriefDirectError::ParseFailed => UiError::new(
+            "simbrief_direct_failed",
+            format!(
+                "SimBrief-direct schlug fehl ({:?}). Pointer-Pfad: {}",
+                direct, pointer.message,
+            ),
+        ),
+        SimBriefDirectError::NoIdentifier => {
+            // Sollte nicht passieren — Pfad-Auswahl im Caller faengt das ab.
+            pointer
+        }
+    }
 }
 
 /// v0.7.7 DTO fuer `flight_refresh_simbrief`. Wrappt `SimBriefOfpDto`
@@ -6794,6 +7129,99 @@ fn scored_bounce_count_for_score(stats: &FlightStats) -> u32 {
     // threshold), sodass kein Pilot faelschlich bestraft wird wenn der
     // Sampler-Buffer fehlt.
     stats.bounce_count as u32
+}
+
+// ─── v0.7.8 SimBrief-direct: Flight-Match-Verifikation ──────────────────
+//
+// Spec docs/spec/ofp-refresh-simbrief-direct-v0.7.8.md §6.
+//
+// Wenn AeroACArS direkt von SimBrief den latest OFP holt, muss verifiziert
+// werden dass dieser zum aktiven Flug gehoert. Pilot koennte zwischen
+// flight_start und Refresh einen OFP fuer einen ANDEREN Flug regeneriert
+// haben (z.B. PPL-Training-Run). dpt+arr+callsign-Match faengt das ab.
+//
+// Match-Regeln:
+//   - Origin/Destination ICAO: case-insensitive exakt
+//   - Callsign: normalisierter Vergleich (kein blinder Suffix-Match)
+//
+// Pure functions — getestet ohne Tauri-State.
+
+/// v0.7.8: Normalisiert eine Callsign-Form auf vergleichbares Format.
+/// Entfernt Whitespace + Bindestrich + Underscore, uppercase.
+/// "DLH-100" → "DLH100", "GSG 100" → "GSG100", "dlh100" → "DLH100".
+pub fn normalize_callsign(s: &str) -> String {
+    s.chars()
+        .filter(|c| !c.is_whitespace() && *c != '-' && *c != '_')
+        .collect::<String>()
+        .to_ascii_uppercase()
+}
+
+/// v0.7.8: Trennt normalisierte Callsign-Form in (prefix, number).
+/// "DLH100" → ("DLH", "100"), "100" → ("", "100"),
+/// "GSG100A" → ("GSG", "100A").
+pub fn split_callsign(cs: &str) -> (String, String) {
+    let split_at = cs.find(|c: char| c.is_ascii_digit()).unwrap_or(cs.len());
+    let (prefix, number) = cs.split_at(split_at);
+    (prefix.to_string(), number.to_string())
+}
+
+/// v0.7.8: Verifiziert ob ein SimBrief-OFP zum aktiven AeroACARS-Flug passt.
+/// Match-Regeln:
+///   1. Origin/Destination ICAO: case-insensitive exakt
+///   2. Callsign: airline_icao + flight_number normalisiert ==
+///      SimBrief-Callsign normalisiert. SimBrief-side "number-only"
+///      (z.B. "100" statt "DLH100") wird gegen die aktive Number
+///      verglichen. Empty SimBrief-Callsign → toleranter Match (= dpt+arr
+///      genuegen).
+///
+/// **Wichtig (Spec v1.1 P1-3):** KEIN blinder Suffix-Match — sonst wuerde
+/// "DLH1100" mit "100" matchen weil 100 Suffix von 1100 ist.
+///
+/// Spec docs/spec/ofp-refresh-simbrief-direct-v0.7.8.md §6.1.
+pub fn ofp_matches_active_flight(
+    ofp_origin: &str,
+    ofp_destination: &str,
+    ofp_callsign: &str,
+    active_dpt: &str,
+    active_arr: &str,
+    active_airline_icao: &str,
+    active_flight_number: &str,
+) -> bool {
+    // 1. Origin / Destination MUESSEN matchen (case-insensitive).
+    let dpt_ok = ofp_origin.trim().eq_ignore_ascii_case(active_dpt.trim());
+    let arr_ok = ofp_destination.trim().eq_ignore_ascii_case(active_arr.trim());
+    if !dpt_ok || !arr_ok {
+        return false;
+    }
+
+    // 2. Callsign-Match: aktive Form bauen aus airline_icao + flight_number.
+    let active_full = format!(
+        "{}{}",
+        active_airline_icao.trim(),
+        active_flight_number.trim(),
+    );
+    let active_norm = normalize_callsign(&active_full);
+    let (_, active_number) = split_callsign(&active_norm);
+
+    let simbrief_norm = normalize_callsign(ofp_callsign);
+
+    if simbrief_norm.is_empty() {
+        // SimBrief liefert kein Callsign → toleranter Mode: dpt+arr genuegen.
+        // Real selten — SimBrief-OFP traegt typisch immer einen Callsign.
+        return true;
+    }
+
+    let (simbrief_prefix, simbrief_number) = split_callsign(&simbrief_norm);
+
+    if simbrief_prefix.is_empty() {
+        // SimBrief hat NUR die Number (z.B. "100") → mit aktiver Number
+        // vergleichen. Verhindert "DLH1100"-False-Positive aus v1.0.
+        return simbrief_number == active_number;
+    }
+
+    // SimBrief hat full callsign mit Prefix → exakter Vergleich mit
+    // konstruiertem Aktiv-Callsign.
+    simbrief_norm == active_norm
 }
 
 /// v0.7.1 Helper: actual_trip_burn = takeoff_fuel - landing_fuel
@@ -17141,6 +17569,10 @@ pub fn run() {
             fetch_release_notes,
             get_minimize_to_tray,
             set_minimize_to_tray,
+            // v0.7.8 SimBrief Integration (Spec §4)
+            get_simbrief_settings,
+            set_simbrief_settings,
+            verify_simbrief_identifier,
             sim_get_kind,
             sim_set_kind,
             sim_status,
@@ -18200,4 +18632,139 @@ mod v0_7_7_ofp_refresh_tests {
         assert!(prev2.as_deref() != Some(cur2));
     }
 }
+
+// ─── v0.7.8 SimBrief-direct Match-Verifikation Tests ───────────────────
+//
+// Spec docs/spec/ofp-refresh-simbrief-direct-v0.7.8.md §10.
+// Pure-function-Tests fuer die Match-Logik. Insbesondere der
+// "DLH1100-vs-100-False-Positive"-Test ist Regression-Guard fuer den
+// v1.1-Suffix-Match-Bug.
+
+#[cfg(test)]
+mod v0_7_8_simbrief_direct_match_tests {
+    use super::*;
+
+    #[test]
+    fn normalize_callsign_strips_hyphens_and_uppercases() {
+        assert_eq!(normalize_callsign("DLH-100"), "DLH100");
+        assert_eq!(normalize_callsign("gsg 100"), "GSG100");
+        assert_eq!(normalize_callsign("dlh_100"), "DLH100");
+        assert_eq!(normalize_callsign("  DLH100  "), "DLH100");
+        assert_eq!(normalize_callsign(""), "");
+    }
+
+    #[test]
+    fn split_callsign_separates_prefix_and_number() {
+        assert_eq!(split_callsign("DLH100"), ("DLH".to_string(), "100".to_string()));
+        assert_eq!(split_callsign("100"), ("".to_string(), "100".to_string()));
+        assert_eq!(split_callsign("GSG100A"), ("GSG".to_string(), "100A".to_string()));
+        assert_eq!(split_callsign(""), ("".to_string(), "".to_string()));
+        assert_eq!(split_callsign("DLH"), ("DLH".to_string(), "".to_string()));
+    }
+
+    #[test]
+    fn ofp_matches_when_callsigns_exact() {
+        assert!(ofp_matches_active_flight(
+            "EDDM", "LFPG", "DLH100",
+            "EDDM", "LFPG", "DLH", "100",
+        ));
+    }
+
+    #[test]
+    fn ofp_matches_when_simbrief_callsign_is_number_only() {
+        // SimBrief liefert nur "100", AeroACARS aktiv "DLH100" → match
+        assert!(ofp_matches_active_flight(
+            "EDDM", "LFPG", "100",
+            "EDDM", "LFPG", "DLH", "100",
+        ));
+    }
+
+    #[test]
+    fn ofp_matches_case_insensitive_icao() {
+        assert!(ofp_matches_active_flight(
+            "eddm", "lfpg", "DLH100",
+            "EDDM", "LFPG", "DLH", "100",
+        ));
+        assert!(ofp_matches_active_flight(
+            "EDDM", "LFPG", "DLH100",
+            "eddm", "LfPg", "DLH", "100",
+        ));
+    }
+
+    /// KRITISCHER v1.1-Regression-Test: "DLH1100" darf NICHT mit "100"
+    /// matchen weil die Numbers verschieden sind (1100 != 100).
+    /// v1.0-Suffix-Match haette das faelschlich als Match akzeptiert.
+    #[test]
+    fn ofp_rejects_when_callsign_numbers_overlap_but_differ() {
+        // SimBrief-OFP = "DLH1100" fuer einen anderen Flug
+        // AeroACARS-aktiv = "DLH100"
+        assert!(!ofp_matches_active_flight(
+            "EDDM", "LFPG", "DLH1100",
+            "EDDM", "LFPG", "DLH", "100",
+        ));
+        // Auch umgekehrt
+        assert!(!ofp_matches_active_flight(
+            "EDDM", "LFPG", "DLH100",
+            "EDDM", "LFPG", "DLH", "1100",
+        ));
+        // Und auch wenn SimBrief number-only liefert
+        assert!(!ofp_matches_active_flight(
+            "EDDM", "LFPG", "1100",
+            "EDDM", "LFPG", "DLH", "100",
+        ));
+    }
+
+    #[test]
+    fn ofp_rejects_when_callsign_completely_different() {
+        assert!(!ofp_matches_active_flight(
+            "EDDM", "LFPG", "AFR300",
+            "EDDM", "LFPG", "DLH", "100",
+        ));
+    }
+
+    #[test]
+    fn ofp_rejects_when_dpt_wrong() {
+        assert!(!ofp_matches_active_flight(
+            "EDDF", "LFPG", "DLH100",
+            "EDDM", "LFPG", "DLH", "100",
+        ));
+    }
+
+    #[test]
+    fn ofp_rejects_when_arr_wrong() {
+        assert!(!ofp_matches_active_flight(
+            "EDDM", "LFRS", "DLH100",
+            "EDDM", "LFPG", "DLH", "100",
+        ));
+    }
+
+    #[test]
+    fn ofp_tolerates_empty_simbrief_callsign() {
+        // SimBrief OFP ohne <atc><callsign> → dpt+arr genuegen.
+        assert!(ofp_matches_active_flight(
+            "EDDM", "LFPG", "",
+            "EDDM", "LFPG", "DLH", "100",
+        ));
+    }
+
+    #[test]
+    fn ofp_matches_with_hyphen_in_active() {
+        // "DLH-100" wird normalisiert zu "DLH100", matched dann
+        // SimBrief "DLH100" exakt.
+        assert!(ofp_matches_active_flight(
+            "EDDM", "LFPG", "DLH100",
+            "EDDM", "LFPG", "DLH", "-100",  // Pilot hat Bindestrich getippt
+        ));
+    }
+
+    #[test]
+    fn ofp_matches_with_whitespace_in_simbrief() {
+        // SimBrief liefert "DLH 100" mit Leerzeichen — normalisiert auf "DLH100"
+        assert!(ofp_matches_active_flight(
+            "EDDM", "LFPG", "DLH 100",
+            "EDDM", "LFPG", "DLH", "100",
+        ));
+    }
+}
+
 
