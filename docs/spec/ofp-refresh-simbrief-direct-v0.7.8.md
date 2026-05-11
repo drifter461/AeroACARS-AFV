@@ -1,6 +1,6 @@
 # OFP-Refresh SimBrief-direct (v0.7.8 Datenpfad)
 
-**Status:** Draft v1.1 nach QS-Review (5 Findings + Identifier-Klaerung)
+**Status:** Draft v1.2 nach direkter SimBrief-API-Probe (vereinfacht den Design)
 **Stand:** 2026-05-11
 **Trigger:** v0.7.7 (`608630e` auf main) loest nur die UX-Schicht. W5 (phpVMS-7 entfernt Bid nach Prefile) macht den pointer-basierten Daten-Pfad im Real-Boarding wirkungslos. Pilot kriegt eine ehrliche Notice — aber keine neuen Plan-Werte. Dieser Spec dokumentiert den **echten Daten-Pfad** der v0.7.7 abloest und beide Schichten **in einem Release** ausgeliefert werden.
 
@@ -56,18 +56,88 @@ Mismatch → klare Notice mit Erklaerung
 
 ---
 
-## 3. SimBrief API — was wir wissen
+## 3. SimBrief API — direkt verifiziert via Demo-Probe (v1.2)
 
-**Endpoint:** `https://www.simbrief.com/api/xml.fetcher.php?username={username}`
+**Endpoint:** `https://www.simbrief.com/api/xml.fetcher.php`
 
-- **Authentifizierung:** Keine. Username ist soft-identifier; jeder kann jeden Username abfragen (= Pilot-Daten sind public-by-design).
-- **Response:** Letzter OFP des Users (egal welcher Flug). XML-Format identisch zur public-by-ID-URL die `fetch_simbrief_ofp` schon parst.
-- **Rate-Limit:** SimBrief hat soft-limits (typisch < 5/min/IP). Unproblematisch fuer Pilot-Klick-Workflow.
-- **Failure-Modes:**
-  - 404 / leerer Response → Username unbekannt
-  - HTTP 5xx → SimBrief offline
-  - Network-Error → Internet weg
-  - Parse-Fehler → unerwartetes XML
+**Akzeptierte Query-Parameter** (verifiziert durch `?username=simbrief`-Probe):
+| Parameter | Pflicht? | Bedeutung |
+|---|---|---|
+| `username` | optional | SimBrief-Profile-Name (z.B. "simbrief") |
+| `userid` | optional | SimBrief-User-ID (numerisch) |
+| `static_id` | optional | spezifischer OFP-Slot — wenn weglassen, kommt LATEST |
+
+**Mindestens ein User-Identifier ist Pflicht** (entweder `username` ODER `userid`). `static_id` ist optional — ohne kommt der zuletzt generierte OFP des Users.
+
+Navigraph's "offizielles" Pattern (`?userid=X&static_id=Y`) ist nur EINE Variante fuer punktgenaue OFP-Abfrage. Fuer unseren Use-Case (latest OFP fuer aktiven Flug) reicht `?username=X` oder `?userid=X` — bestaetigt durch Live-Probe.
+
+### XML-Response-Struktur (direkt aus Probe)
+
+```xml
+<fetch>
+  <userid>1</userid>
+  <static_id></static_id>
+  <status>Success</status>     ← v1.2 KEY: Error-Indikator
+  <time>0.0042</time>
+</fetch>
+<params>
+  <request_id>172403072</request_id>       ← v1.2: canonical changed-flag-Quelle
+  <sequence_id>6963c3d8ce43</sequence_id>  ← v1.2 NEU entdeckt, derzeit ungenutzt
+  <static_id/>                              ← KANN LEER sein, nicht verlassbar
+  <user_id>1</user_id>
+  <time_generated>1778461205</time_generated>
+  <xml_file>https://www.simbrief.com/ofp/flightplans/xml/...</xml_file>
+</params>
+<origin>...</origin>
+<destination>...</destination>
+...
+```
+
+### Failure-Modes (v1.2 prazisiert)
+
+- **HTTP 200 + `<fetch><status>Success</status>`** → valid OFP, parse weiter
+- **HTTP 200 + `<fetch><status>Error</status>`** → invalid user / fetch error. `<fetch>`-Block hat dann Detail-Tag. Spec v1.1 sagte "HTTP 400 + XML" — v1.2 korrigiert: SimBrief liefert tatsaechlich HTTP 200 + Status-Tag im XML-Body. Wir muessen den Status parsen, nicht nur den HTTP-Code.
+- **HTTP 5xx / Network-Error** → SimBrief offline / Internet weg
+- **HTTP 200 + Parse-Fehler** → unerwartetes XML
+
+### Identifier-Strategie v1.2
+
+**Was wir tatsaechlich brauchen** (Vereinfachung gegenueber v1.1):
+- **EINER der zwei** Pilot-Identifier muss in Settings stehen: `username` ODER `userid`
+- **`static_id` brauchen wir NICHT** (= kann leer sein, Pilot-OFP-Slot-Konvention nicht zuverlaessig)
+- **`request_id`** parsen wir aus dem Response — das ist die canonical changed-flag-Quelle
+
+Damit ist die v1.0/v1.1-Ueberlegung "wir brauchen userid + static_id" **falsch**. Username-only Fetch reicht — wir verifizieren Match per dpt/arr/callsign (= §6).
+
+### Was wir AeroACARS-seitig parsen muessen
+
+`SimBriefOfp` bekommt zwei neue Felder:
+
+```rust
+pub struct SimBriefOfp {
+    // ... bestehende Felder ...
+    /// v0.7.8 (v1.2): `<params><request_id>`. Aendert sich bei JEDER
+    /// Re-Generation auf simbrief.com — canonical changed-flag-Quelle.
+    pub request_id: String,
+    /// v0.7.8 (v1.2): `<params><static_id>`. KANN LEER sein
+    /// (Pilot hat keinen "save dispatch" gemacht). Optional persistieren
+    /// fuer evtl. zukuenftige spezifische OFP-Abfrage.
+    pub static_id: Option<String>,
+}
+```
+
+Plus globale Error-Erkennung via `<fetch><status>`:
+
+```rust
+let fetch_status = extract_tag(xml, "fetch")
+    .and_then(|inner| extract_tag(inner, "status"))
+    .map(|s| s.trim().to_string())
+    .unwrap_or_default();
+if fetch_status != "Success" {
+    // SimBrief-side error — User not found, fetch error, etc.
+    return Err(SimBriefDirectError::UserNotFound);
+}
+```
 
 **Verwendete OFP-XML-Felder** (Parser-Stand `api-client/lib.rs:1492+`):
 - `<origin><icao_code>` → `ofp.ofp_origin_icao` (existing)
@@ -134,7 +204,7 @@ Eigenschaften im Vergleich:
 | Robustheit fuer Tool | gut | besser |
 | URL-Encoding noetig | ja (kann Sonderzeichen) | nein (nur Ziffern) |
 
-**Entscheidung v1.1:** Zwei separate Felder. Pilot muss **mindestens eines** ausfuellen. Wenn beide gefuellt → User-ID hat Vorrang (robuster).
+**Entscheidung v1.1 + v1.2-Bestaetigung:** Zwei separate Felder. Pilot muss **mindestens eines** ausfuellen. Wenn beide gefuellt → User-ID hat Vorrang (robuster, unveraenderlich).
 
 ```rust
 // AppState — beides separat persistiert
@@ -144,7 +214,24 @@ pub struct SimBriefSettings {
 }
 ```
 
-URL-Encoding: `urlencoding::encode(username)` fuer den Username-Query-Param — siehe `api-client/lib.rs:1152` (bestehendes Pattern `urlencoding_escape`).
+**v1.2-Bestaetigung:** Live-API-Probe `?username=simbrief` lieferte `<status>Success</status>` mit vollem OFP-XML. **Username-only Fetch ist also valide** — kein `static_id` noetig fuer Latest-OFP-Use-Case.
+
+URL-Aufbau zur Laufzeit:
+```rust
+let url = match (&settings.user_id, &settings.username) {
+    (Some(uid), _) if !uid.is_empty() => format!(
+        "https://www.simbrief.com/api/xml.fetcher.php?userid={}",
+        urlencoding_escape(uid),
+    ),
+    (_, Some(un)) if !un.is_empty() => format!(
+        "https://www.simbrief.com/api/xml.fetcher.php?username={}",
+        urlencoding_escape(un),
+    ),
+    _ => return Err(SimBriefDirectError::NoIdentifier),
+};
+```
+
+URL-Encoding via `urlencoding_escape` (= bestehendes Pattern in `api-client/lib.rs:1152`).
 
 ### 4.2 Storage-Modell
 
@@ -629,16 +716,29 @@ Frontend (manueller Smoke):
 - ✓ **Settings-Tab-Platzierung:** **eigene Section "SimBrief Integration"**.
 - ✓ **Test-Strategie:** primaer pure-function-Tests (Match-Logik, Settings-Storage) + manuelle Smoke-Tests fuer SimBrief-API-Interaktion (kein Mocking-Sweep in v0.7.8).
 
-### v1.1-Punkte (offen fuer 2. QS)
-- [ ] **OFP-ID-Quelle bestaetigen:** `<params><request_id>` = das was wir wollen (= aendert sich bei jeder Re-Generation). Alternative `<params><static_id>` (= Pilot-OFP-Profile-stabil, aendert sich nur bei Plan-Wechsel). PAX Studio nutzt `static_id` — ob das in der phpVMS-Bid-`simbrief.id` landet wissen wir nicht. v1.1 setzt auf `request_id` aus dem XML; falls bei Pfadwechsel zwischen Pointer (= PAX-Studio-ID) und Direct (= `request_id`) immer `changed=true` triggert, das ist akzeptabel (= Pilot weiss "OFP-Quelle wechselte").
-- [ ] **`SimBriefDirectError`-Enum:** muss `Network` von `ParseFailed` getrennt sein, oder reicht `simbrief_direct_failed` als Sammel-Code? v1.1-Spec hat sie getrennt — wenn nicht noetig, koennen wir zusammenfassen.
-- [ ] **`compose_failure`-Wording:** der Notice-Text fuer `simbrief_unavailable_and_bid_gone` darf laenger sein? Tendenz: kurz halten, Activity-Log liefert die Details.
+### v1.1-Punkte (in v1.2 entschieden nach API-Probe)
+- ✓ **OFP-ID-Quelle:** `<params><request_id>` aus XML — bestaetigt durch Live-Probe. `static_id` kann leer sein, ist nicht zuverlaessig. `sequence_id` (neu entdeckt) wird derzeit ignoriert.
+- ✓ **`SimBriefDirectError`-Enum:** getrennt halten (Network / UserNotFound / Unavailable / ParseFailed) — Notice-Wording haengt davon ab. Sammel-Code wuerde Pilot mit weniger actionable Info versorgen.
+- ✓ **`compose_failure`-Wording:** kurz halten. Notice gibt Hauptursache + "siehe Activity-Log fuer Details".
+
+### v1.2-Punkte (neu nach API-Probe — fuer dein OK)
+- [ ] **Username-only Fetch akzeptabel?** Live-API-Probe bestaetigt `?username=X` allein liefert latest OFP. v1.0/v1.1 hatten falsche Annahme dass static_id Pflicht sei. v1.2 entscheidet: username-only ODER userid-only reicht. Bestaetigen oder Bedenken?
+- [ ] **`sequence_id` ignorieren?** Im XML gibt's neben `request_id` noch `sequence_id` (hexstring "6963c3d8ce43"). Funktion unklar. v1.2 ignoriert es. Falls du eine Vermutung hast warum es da ist, gerne notieren.
+- [ ] **Pilot-Probe-Test:** Kannst du `https://www.simbrief.com/api/xml.fetcher.php?username=DEIN_NAME` einmal aufrufen und schauen ob `<params><request_id>` deinem typischen `bid.simbrief.id`-Muster aus phpVMS gleicht? Damit wuerden wir bestaetigen ob phpVMS-Bid und SimBrief-direct die GLEICHEN IDs sehen → kein "changed=true bei Pfad-Wechsel"-False-Positive.
 
 ---
 
 ## 12. Versionierung dieser Spec
 
 - **v1.0 (2026-05-11):** Initial Draft basierend auf Thomas-Decision "SimBrief-direct, big release bundle".
+- **v1.2 (2026-05-11):** Nach direkter SimBrief-API-Probe (Thomas verlinkte Navigraph-Doku + Live-Demo):
+  - §3 komplett ueberarbeitet — XML-Response-Struktur direkt aus `?username=simbrief`-Probe gezogen statt aus indirekter Doku-Interpretation.
+  - **Vereinfachung gegenueber v1.0/v1.1:** Username-only Fetch funktioniert (Status "Success" bestaetigt). static_id ist NICHT zwingend — kann leer sein.
+  - §3 NEU: `<fetch><status>`-Tag als Error-Indikator. SimBrief liefert HTTP 200 + Status-Tag im XML, NICHT primaer HTTP 400 wie v1.1 (= Navigraph-Doku) sagte. Parser muss Status pruefen.
+  - §3 NEU: `sequence_id`-Feld entdeckt (Funktion unklar, derzeit ignoriert).
+  - §3 SimBriefOfp-Parser: zwei neue Felder `request_id: String` + `static_id: Option<String>`. Spec v1.1 hatte nur `ofp_id` — jetzt klar getrennt.
+  - §4.1 URL-Aufbau-Snippet mit Prioritaet user_id > username, beide URL-encoded.
+  - §11 v1.1-Punkte alle entschieden (mit Stand der API-Probe), 3 neue v1.2-Punkte fuer dein OK + Pilot-Probe-Test-Vorschlag (bid.simbrief.id vs request_id Identitaet pruefen).
 - **v1.1 (2026-05-11):** Nach 1. QS-Review von Thomas:
   - §3 P1: Parser-Erweiterung um `<params><request_id>` als `ofp.ofp_id` — Spec v1.0 sagte faelschlich "Parser muss NICHT erweitert werden". OHNE OFP-ID kein sauberer `changed`-Flag-Vergleich.
   - §3 P2: SimBrief-Failure-Mode-Liste korrigiert auf laut Navigraph-Doku: HTTP 400 + small XML error fuer invalid user / fetch error (nicht primaer 404/empty).
