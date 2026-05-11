@@ -11059,6 +11059,26 @@ fn spawn_touchdown_sampler(app: AppHandle, flight: Arc<ActiveFlight>) {
                         touchdown_v2::compute_landing_rate(&samples_for_v2, &impact_result).ok()
                     });
 
+                // v0.7.11: Edge-Wert aus dem 50-Hz-Buffer als kanonische
+                // Score-Basis. Vorher haben wir bei v2-REJECT den SimVar-
+                // latched-Wert behalten — das war unsinnig weil der 50-Hz-
+                // Edge-Wert physikalisch genauer ist (interpoliert auf den
+                // exakten on_ground-Edge). User-Forderung Mai 12: "warum
+                // nutzen wir den MSFS Wert wenn wir das selber ermitteln".
+                //
+                // Neue Cascade-Ordnung:
+                //   1. v2-Result (= raffinierte Cascade vs_at_impact ->
+                //      smoothed_500ms -> smoothed_1000ms -> pre_flare_peak)
+                //   2. vs_at_edge_fpm aus dem Buffer (= 50-Hz interpoliert)
+                //   3. landing_rate_fpm unveraendert (= SimVar-latched
+                //      Fallback wenn weder v2 noch Edge verfuegbar — sehr
+                //      selten, nur bei Pre-v0.5.43 oder Buffer-Dump-Fail)
+                let edge_vs = analysis
+                    .get("vs_at_edge_fpm")
+                    .and_then(|v| v.as_f64())
+                    .map(|x| x as f32)
+                    .filter(|v| v.is_finite() && *v < 0.0);
+
                 let pg_500 = analysis.get("peak_g_post_500ms").and_then(|v| v.as_f64()).map(|x| x as f32);
                 {
                     let mut s = flight.stats.lock().expect("flight stats");
@@ -11083,14 +11103,34 @@ fn spawn_touchdown_sampler(app: AppHandle, flight: Arc<ActiveFlight>) {
                             forensics_version = v2.forensics_version,
                             "touchdown-forensics-v2 landing rate computed"
                         );
+                    } else if let Some(edge) = edge_vs {
+                        // v0.7.11: v2-REJECT-Fallback auf vs_at_edge_fpm
+                        // statt SimVar-latched. Der Edge-Wert ist die
+                        // 50-Hz-Buffer-Interpolation am exakten on_ground-
+                        // Frame — genauer als der SimVar-latched-Read der
+                        // typisch 1 Frame versetzt sein kann (Beispiel DAL804:
+                        // SimVar -407 fpm vs Edge -364 fpm).
+                        let previous = s.landing_rate_fpm.unwrap_or(0.0);
+                        finalize_landing_rate(
+                            &mut s,
+                            edge,
+                            Some("Medium"),
+                            Some("vs_at_edge_50hz"),
+                        );
+                        tracing::info!(
+                            pirep_id = %flight.pirep_id,
+                            vs_fpm = edge,
+                            previous = previous,
+                            source = "vs_at_edge_50hz",
+                            "v0.7.11: v2-REJECT, override mit vs_at_edge_fpm"
+                        );
                     } else {
-                        // REJECT-Fall (Spec 5.3): alle Quellen positiv ODER NaN.
-                        // Lass den existierenden landing_rate_fpm unveraendert
-                        // (= primary chain Wert oder None). Kein automatischer
-                        // Score-Override mit unsicherem Wert.
+                        // Echter REJECT: weder v2 noch Edge verfuegbar.
+                        // Pre-v0.5.43-Eintrag oder kompletter Buffer-Fail.
+                        // Behalte den primary-chain Wert (= SimVar-latched).
                         tracing::warn!(
                             pirep_id = %flight.pirep_id,
-                            "touchdown-forensics-v2 rejected — keeping primary-chain value"
+                            "touchdown-forensics-v2 + edge beide nicht verfuegbar — keeping primary-chain value"
                         );
                     }
                     if let Some(g) = pg_500 {
