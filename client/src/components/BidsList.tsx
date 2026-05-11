@@ -358,6 +358,27 @@ export function BidsList({
           tone: success.tone,
         });
       }
+      // v0.7.9: Pruefe ob Backend ein Callsign-Warning gesetzt hat
+      // (OFP wurde geladen aber Callsign weicht ab). Wenn ja, zeige
+      // einen warn-Tone-Notice mit konkreten Werten.
+      try {
+        const warn = await invoke<{
+          sb_callsign: string;
+          active_callsigns: string;
+          issued_at: string;
+        } | null>("ofp_callsign_warning_get");
+        if (warn) {
+          setRefreshNotice({
+            text: t("flight.ofp_callsign_warning", {
+              sb_callsign: warn.sb_callsign,
+              active_callsigns: warn.active_callsigns,
+            }),
+            tone: "warn",
+          });
+        }
+      } catch {
+        // noop — Warning ist Nice-to-have
+      }
     }
 
     // v0.7.7 §6.5b: Bei `changed=true` Parent direkt benachrichtigen

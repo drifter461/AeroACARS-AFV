@@ -4,6 +4,42 @@ Alle nennenswerten Änderungen an AeroACARS. Format: lose an [Keep a Changelog](
 
 ---
 
+## [v0.7.9] — 2026-05-11
+
+🔄 **SimBrief-OFP-Refresh: Callsign-Match auf SOFT-Warning umgestellt — DEP/ARR sind der echte Anker.**
+
+### Was
+
+Realer Pilot-Fall: phpVMS-Bid `EWL9725` (Eurowings Europe Operator-Code EWL), SimBrief-OFP-Callsign `EWG4PY` (Eurowings ICAO + Personal-Callsign). DEP/ARR identisch (LOWG → EDDL), aber das v0.7.7-Match-Verify rejectet den OFP als "Mismatch" → der Refresh-Button bekam keine neuen OFP-Daten, der Pilot sah nichts und war frustriert.
+
+v0.7.9 macht den Callsign-Check zu einem SOFT-Warning statt Hard-Block:
+
+- **DEP+ARR matchen** → OFP wird **geladen** (war vorher Hard-Block bei Callsign-Diff)
+- **Callsign weicht ab** → OFP wird trotzdem geladen, dazu gelber Warning-Notice mit konkreten Werten ("OFP-Callsign ist EWG4PY, dein aktiver Flug nutzt EWL9725 / 9725 — DEP/ARR stimmen, OFP wurde geladen")
+- **DEP oder ARR weichen ab** → Hard-Block bleibt (= klar ein anderer Flug)
+
+### Backend (Rust)
+
+- Neuer `DirectOutcome::MatchWithCallsignWarning { ofp, simbrief_callsign }` Variante zwischen `Match` und `Mismatch`
+- `try_simbrief_direct_with_match` 2-stufige Logik: erst DEP/ARR (Hard), dann Callsign (Soft)
+- Neuer `AppState::ofp_callsign_warning: Mutex<Option<OfpCallsignWarning>>` — gespiegelt nach Frontend via:
+  - `#[tauri::command] ofp_callsign_warning_get()` — Frontend liest nach Refresh
+  - `#[tauri::command] ofp_callsign_warning_dismiss()` — X-Button löscht
+- Clean-Match löscht das Warning automatisch (sonst hängt es nach neuem Refresh)
+
+### Frontend
+
+- `BidsList.tsx` `refreshAll()` pollt nach `flight_refresh_simbrief` das Warning und rendert gelben Notice
+- Neuer i18n-Key `flight.ofp_callsign_warning` in DE/EN/IT mit Placeholders `{{sb_callsign}}` + `{{active_callsigns}}`
+
+### Was bleibt unverändert
+
+- v0.7.7-Pointer-Pfad-Fallback (bei `bid_not_found`)
+- DEP+ARR-Hard-Match (nur Callsign wurde von Hard auf Soft umgestellt)
+- SimBrief-Settings-Konfiguration (Settings → SimBrief Integration)
+
+---
+
 ## [v0.7.8] — 2026-05-11
 
 🎯 **Sinkrate-Forensik im Landung-Tab — Pilot versteht warum seine Landerate so ist wie sie ist.**

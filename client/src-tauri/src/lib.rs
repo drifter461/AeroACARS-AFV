@@ -657,6 +657,26 @@ struct AppState {
     /// App-Start/Login via App.tsx zurueck-gesynct.
     /// Spec docs/spec/ofp-refresh-simbrief-direct-v0.7.8.md §4.
     simbrief_settings: Mutex<SimBriefSettings>,
+    /// v0.7.9: gesetzt vom letzten `flight_refresh_simbrief` wenn
+    /// `DirectOutcome::MatchWithCallsignWarning` zurueckkam. Frontend
+    /// rendert daraus einen gelben Warning-Notice "OFP geladen, aber
+    /// Callsign weicht ab". Wird beim naechsten erfolgreichen Refresh
+    /// (Match ohne Warning) oder durch expliziten Dismiss-Command
+    /// geloescht.
+    ofp_callsign_warning: Mutex<Option<OfpCallsignWarning>>,
+}
+
+/// v0.7.9: Warning-State wenn SimBrief-OFP DEP+ARR matched aber Callsign
+/// abweicht. Statt Hard-Block (v0.7.8) wird der OFP geladen und der Pilot
+/// sieht einen gelben Hinweis-Notice.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OfpCallsignWarning {
+    /// SimBrief-Callsign aus dem geladenen OFP, z.B. "EWG4PY".
+    pub sb_callsign: String,
+    /// Joined-Liste der akzeptierten Active-Callsigns, z.B. "EWL9725 / 9725".
+    pub active_callsigns: String,
+    /// Zeitstempel wann das Warning gesetzt wurde.
+    pub issued_at: DateTime<Utc>,
 }
 
 /// v0.7.8: SimBrief-Identifier-Settings. Beide Felder optional, aber
@@ -4564,6 +4584,27 @@ async fn phpvms_get_bids(
 /// Wir hängen am Bid (statt nur am gespeicherten ofp_id), weil der
 /// SimBrief-Sync auf phpVMS-Seite die Relation aktualisiert wenn
 /// der Pilot regeneriert — der Bid trägt dann die neue OFP-ID.
+/// v0.7.9: Read aktuelles Callsign-Mismatch-Warning. Frontend pollt das
+/// nach jedem `flight_refresh_simbrief` um zu prueefen ob das Warning-
+/// Banner gezeigt werden soll.
+#[tauri::command]
+fn ofp_callsign_warning_get(
+    state: tauri::State<AppState>,
+) -> Option<OfpCallsignWarning> {
+    state
+        .ofp_callsign_warning
+        .lock()
+        .expect("ofp_callsign_warning lock")
+        .clone()
+}
+
+/// v0.7.9: Dismisst das Callsign-Warning (Pilot hat es bestaetigt /
+/// X-Button gedrueckt).
+#[tauri::command]
+fn ofp_callsign_warning_dismiss(state: tauri::State<AppState>) {
+    *state.ofp_callsign_warning.lock().expect("ofp_callsign_warning lock") = None;
+}
+
 /// Fallback: wenn der Bid keinen SimBrief-Link mehr hat, error.
 #[tauri::command]
 async fn flight_refresh_simbrief(
@@ -4645,6 +4686,37 @@ async fn flight_refresh_simbrief(
                 // canonical OFP-ID (NICHT die phpVMS-bid.simbrief.id).
                 // Erster Pfad-Wechsel kann changed=true triggern auch bei
                 // inhaltsgleichem Plan — danach stabil. Spec §3.
+                // v0.7.9: clean Match → eventuelles altes Callsign-Warning
+                // loeschen.
+                *state.ofp_callsign_warning.lock().expect("ofp_callsign_warning lock") = None;
+                (ofp.request_id.clone(), ofp)
+            }
+            DirectOutcome::MatchWithCallsignWarning { ofp, simbrief_callsign } => {
+                // v0.7.9: DEP+ARR matchen, nur Callsign abweicht. OFP laden,
+                // aber Warning ans Frontend signalisieren via AppState-Flag.
+                // Spec docs/spec/v0.7.9-ofp-callsign-soft-warn.md.
+                let candidates = build_candidate_callsigns(
+                    &active_airline_icao,
+                    &active_flight_number,
+                    active_bid_callsign.as_deref(),
+                    active_pilot_callsign.as_deref(),
+                );
+                let active_callsigns_display = if candidates.is_empty() {
+                    format!("{}{}", active_airline_icao, active_flight_number)
+                } else {
+                    candidates.join(" / ")
+                };
+                tracing::info!(
+                    sb_callsign = %simbrief_callsign,
+                    active_callsigns = %active_callsigns_display,
+                    "SimBrief OFP geladen mit Callsign-Mismatch — Warning angezeigt"
+                );
+                *state.ofp_callsign_warning.lock().expect("ofp_callsign_warning lock") =
+                    Some(OfpCallsignWarning {
+                        sb_callsign: simbrief_callsign,
+                        active_callsigns: active_callsigns_display,
+                        issued_at: Utc::now(),
+                    });
                 (ofp.request_id.clone(), ofp)
             }
             DirectOutcome::Mismatch { simbrief_origin, simbrief_dest, simbrief_callsign } => {
@@ -4789,12 +4861,23 @@ async fn flight_refresh_simbrief(
 
 /// v0.7.8: Outcome des SimBrief-direct-Fetch + Match-Verifikation.
 /// Spec docs/spec/ofp-refresh-simbrief-direct-v0.7.8.md §5 + §6.
+/// v0.7.9 (Pilot-Feedback EWG4PY-Fall): Callsign-Match auf SOFT-WARN
+/// abgemildert. Hard-Block nur noch wenn DEP/ARR nicht matchen — sonst
+/// laden wir den OFP, zeigen aber einen Warning-Notice wenn Callsign
+/// abweicht. Real-Use-Case: VA-Operator-Code (EWL) und SimBrief-Callsign
+/// (EWG4PY) sind unterschiedlich.
 enum DirectOutcome {
-    /// SimBrief lieferte OFP, dpt/arr/callsign matchen den aktiven Flug.
+    /// SimBrief lieferte OFP, dpt+arr+callsign matchen alle.
     Match { ofp: SimBriefOfp },
-    /// SimBrief lieferte OFP, aber dpt/arr oder callsign passen NICHT —
-    /// Pilot hat zwischendurch einen OFP fuer einen anderen Flug
-    /// regeneriert. HARD-Block, kein Fallback (Spec v1.1 P1-2).
+    /// v0.7.9: dpt+arr matchen, aber Callsign abweicht. OFP wird trotzdem
+    /// geladen — Warning-Notice mit den Werten im UI rendern.
+    MatchWithCallsignWarning {
+        ofp: SimBriefOfp,
+        simbrief_callsign: String,
+    },
+    /// dpt oder arr passen NICHT — Pilot hat zwischendurch einen OFP fuer
+    /// einen ANDEREN Flughafen regeneriert. HARD-Block bleibt, weil
+    /// Route-Mismatch = ein klar anderer Flug.
     Mismatch {
         simbrief_origin: String,
         simbrief_dest: String,
@@ -4826,7 +4909,24 @@ async fn try_simbrief_direct_with_match(
         .await
     {
         Ok(ofp) => {
-            if ofp_matches_active_flight(
+            // v0.7.9: 2-stufige Match-Logik:
+            //   1. DEP/ARR matchen → OFP wird geladen
+            //   2. Callsign-Check als ZUSAETZLICHES Signal, aber kein
+            //      Hard-Block mehr.
+            let dpt_ok = ofp.ofp_origin_icao.trim().eq_ignore_ascii_case(active_dpt.trim());
+            let arr_ok = ofp.ofp_destination_icao.trim().eq_ignore_ascii_case(active_arr.trim());
+
+            if !dpt_ok || !arr_ok {
+                // Route-Mismatch = klar ein anderer Flug. Hard-Block.
+                return DirectOutcome::Mismatch {
+                    simbrief_origin: ofp.ofp_origin_icao.clone(),
+                    simbrief_dest: ofp.ofp_destination_icao.clone(),
+                    simbrief_callsign: ofp.ofp_flight_number.clone(),
+                };
+            }
+
+            // DEP+ARR matchen — pruefe Callsign nur fuer Warning.
+            let callsign_ok = ofp_matches_active_flight(
                 &ofp.ofp_origin_icao,
                 &ofp.ofp_destination_icao,
                 &ofp.ofp_flight_number,
@@ -4836,13 +4936,15 @@ async fn try_simbrief_direct_with_match(
                 active_flight_number,
                 active_bid_callsign,
                 active_pilot_callsign,
-            ) {
+            );
+
+            if callsign_ok {
                 DirectOutcome::Match { ofp }
             } else {
-                DirectOutcome::Mismatch {
-                    simbrief_origin: ofp.ofp_origin_icao.clone(),
-                    simbrief_dest: ofp.ofp_destination_icao.clone(),
-                    simbrief_callsign: ofp.ofp_flight_number.clone(),
+                let simbrief_callsign = ofp.ofp_flight_number.clone();
+                DirectOutcome::MatchWithCallsignWarning {
+                    ofp,
+                    simbrief_callsign,
                 }
             }
         }
@@ -17730,6 +17832,8 @@ pub fn run() {
             phpvms_get_bids,
             fetch_simbrief_preview,
             flight_refresh_simbrief,
+            ofp_callsign_warning_get,
+            ofp_callsign_warning_dismiss,
             flight_resume_after_disconnect,
             phpvms_get_aircraft,
             auto_start_skip_status,
