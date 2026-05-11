@@ -1,6 +1,6 @@
 # OFP-Refresh SimBrief-direct (v0.7.8 Datenpfad)
 
-**Status:** Draft v1.4 final-vor-Code (Polish-only nach 5 Redaktions-Nits)
+**Status:** Draft v1.5 (Match-Logik erweitert um Pilot-Callsign-Varianten — Release-Blocker-Fix)
 **Stand:** 2026-05-11
 **Trigger:** v0.7.7 (`608630e` auf main) loest nur die UX-Schicht. W5 (phpVMS-7 entfernt Bid nach Prefile) macht den pointer-basierten Daten-Pfad im Real-Boarding wirkungslos. Pilot kriegt eine ehrliche Notice — aber keine neuen Plan-Werte. Dieser Spec dokumentiert den **echten Daten-Pfad** der v0.7.7 abloest und beide Schichten **in einem Release** ausgeliefert werden.
 
@@ -638,6 +638,110 @@ fn ofp_matches_active_flight(
 
 **Aktiv-Callsign-Quelle:** `ActiveFlight.airline_icao + flight_number` (beide bereits in v0.7.7-State). Bei leerem `airline_icao` (= kein Airline-Match in phpVMS) faellt der Vergleich auf reinen Number-Part zurueck.
 
+### 6.1.1 v1.5: Pilot-Callsign-Varianten (Release-Blocker-Fix)
+
+**Problem (QS Thomas 2026-05-11):** Real-Pilot-Beispiel von GSG:
+
+| Quelle | Wert |
+|---|---|
+| phpVMS-Bid `airline_icao` | "CFG" |
+| phpVMS-Bid `flight_number` | "1504" (= Original-Condor-Flug) |
+| phpVMS-Profile `callsign` | "4TK" (= Pilot-personalisiert) |
+| SimBrief-OFP `<atc><callsign>` | "CFG4TK" (= Airline + Pilot-Callsign — was viele VAs operativ als ATC-Callsign nutzen) |
+
+Mit der v1.1-Logik (nur `airline_icao + flight_number` als Match-Quelle):
+- active_full = "CFG1504"
+- simbrief_norm = "CFG4TK"
+- "CFG4TK" != "CFG1504" → **MISMATCH → HARD-Block**
+
+Pilot kriegt zurecht die Notice "OFP gehoert zu anderem Flug", obwohl der OFP **fachlich legitim** ist. Das ist ein Release-Blocker fuer v0.7.8 — VAs mit Pilot-personalisierten Callsigns haetten den Refresh nie funktionierend.
+
+### 6.1.2 v1.5 Loesung: Kandidaten-Liste statt strenger Match
+
+`ofp_matches_active_flight` baut eine **Liste valider Callsign-Formen** auf — der SimBrief-Callsign muss gegen EINE davon exakt matchen:
+
+```rust
+fn build_candidate_callsigns(
+    airline_icao: &str,
+    flight_number: &str,
+    bid_callsign: Option<&str>,
+    pilot_callsign: Option<&str>,
+) -> Vec<String> {
+    let airline = airline_icao.trim().to_ascii_uppercase();
+    let flight_n = flight_number.trim();
+    let mut candidates: Vec<String> = Vec::new();
+
+    // (1) airline_icao + flight_number — bestehend
+    if !airline.is_empty() && !flight_n.is_empty() {
+        candidates.push(normalize_callsign(&format!("{}{}", airline, flight_n)));
+    }
+    // (2) flight_number allein — bestehend (number-only)
+    if !flight_n.is_empty() {
+        candidates.push(normalize_callsign(flight_n));
+    }
+    // (3) v1.5: bid.flight.callsign direkt (= z.B. "CFG4TK" wenn
+    //     phpVMS-VA das so konfiguriert hat). Robust gegen jede VA-
+    //     Konvention.
+    if let Some(cs) = bid_callsign.filter(|s| !s.trim().is_empty()) {
+        candidates.push(normalize_callsign(cs));
+    }
+    // (4) v1.5: airline + profile.callsign (= "CFG4TK"-Pattern wenn
+    //     Pilot persoenliches Suffix nutzt aber phpVMS callsign-Feld
+    //     leer ist).
+    if let Some(pc) = pilot_callsign.filter(|s| !s.trim().is_empty()) {
+        if !airline.is_empty() {
+            candidates.push(normalize_callsign(&format!("{}{}", airline, pc)));
+        }
+        // (5) v1.5: profile.callsign allein als number-only-Fallback.
+        candidates.push(normalize_callsign(pc));
+    }
+
+    candidates.into_iter().filter(|s| !s.is_empty()).collect()
+}
+```
+
+Match-Funktion vergleicht den SimBrief-Callsign (normalisiert) gegen alle Kandidaten:
+
+```rust
+let simbrief_norm = normalize_callsign(ofp_callsign);
+let candidates = build_candidate_callsigns(...);
+// Match wenn ein Kandidat exakt passt:
+candidates.contains(&simbrief_norm)
+// Oder fuer number-only SimBrief-Callsign (= ohne Airline-Prefix):
+// vergleiche gegen Number-Parts der Kandidaten
+```
+
+**Sicherheits-Anker bleibt:** `dpt + arr` muessen IMMER matchen. Auch wenn Callsign-Liste weicher ist, kann der OFP nicht zu einem anderen Flugziel gehoeren.
+
+### 6.1.3 v1.5 Edge-Case-Tabelle
+
+Pilot-Bid: `airline=CFG, flight_number=1504, profile.callsign=4TK, bid.flight.callsign=CFG4TK`
+
+| SimBrief-Callsign | v1.1 Resultat | v1.5 Resultat | Begruendung |
+|---|---|---|---|
+| `"CFG1504"` | ✓ match | ✓ match (Kandidat 1) | airline+flight_number |
+| `"1504"` | ✓ match | ✓ match (Kandidat 2) | number-only |
+| `"CFG4TK"` | ✗ MISMATCH | ✓ **match (Kandidat 3 oder 4)** | bid.flight.callsign ODER airline+pilot_callsign |
+| `"4TK"` | ✗ MISMATCH | ✓ **match (Kandidat 5)** | pilot_callsign allein |
+| `"CFG1100"` | ✗ MISMATCH | ✗ MISMATCH | Number weicht ab, kein Pilot-Callsign-Match |
+| `"ABC4TK"` | ✗ MISMATCH | ✗ MISMATCH | Andere Airline, kein Match in Kandidatenliste |
+| `"CFG200"` | ✗ MISMATCH | ✗ MISMATCH | Number weicht ab, andere Flug |
+| `"DLH1100"` vs active "DLH100" | ✗ MISMATCH (P1-3) | ✗ MISMATCH | Regression-Guard bleibt |
+
+**v1.5-Spec verhindert NICHT den v1.1 P1-3 DLH1100-vs-100-Schutz** — Kandidatenliste ist additiv, exakter Vergleich bleibt der Kern.
+
+### 6.1.4 v1.5 Empirische Klaerung (Thomas-Hinweis)
+
+Es ist nicht sicher ob phpVMS-`/api/user/bids` bei GSG-Pilot-Bids das `flight.callsign`-Feld bereits mit "4TK"/"CFG4TK" befuellt — oder ob es leer/anders ist (z.B. "CFG1504" weil phpVMS die Bid-Flight-Number copy-pasted hat).
+
+**Pragmatischer Ansatz v1.5:** AeroACARS liest **beide** Quellen additiv:
+- `Flight.callsign` aus dem Bid (existiert bereits im Parser, `api-client/lib.rs:370`)
+- `Profile.callsign` aus dem User-Profile (NEU — Spec v1.5 fuegt das Feld hinzu)
+
+Damit sind wir robust unabhaengig davon was phpVMS tatsaechlich liefert. Wenn beide leer bleiben, fallen wir zurueck auf die v1.1-Logik (= airline+flight_number-Match). Wenn entweder/beide gefuellt, kommen sie als Kandidaten dazu.
+
+Optional empirische Verifikation per Pilot-Test (`https://german-sky-group.eu/api/user/bids` im Browser eingeloggt aufrufen, `bid.flight.callsign`-Feld inspizieren) — bestaetigt welches Feld bei GSG befuellt ist. Nicht-blockierend, da Code beide Felder additiv liest.
+
 ### 6.2 Generierungs-Zeit (Optional, NICHT in v0.7.8 Scope)
 
 Spec v1.0/v1.1 hatte ueberlegt: "OFP-`generated_at` > flight_started_at" als zusaetzlichen Check. **Entscheidung v1.0-Spec:** weglassen — fuehrt zu Edge-Cases bei Pilot-Pre-Generierung vor Flight-Start. Match auf dpt/arr/callsign reicht.
@@ -812,6 +916,19 @@ Frontend (manueller Smoke):
   - §3 Failure-Modes-Tabelle robust: **BEIDE Pfade** (HTTP 400 laut Navigraph-Doku UND `<fetch><status>Error</status>` laut Live-Probe) auf `UserNotFound` mappen. HTTP 5xx → `Unavailable`, andere non-2xx → `Network`, Parse-Fehler → `ParseFailed`.
   - §3 Hinweis dass `request_id` und `bid.simbrief.id` aus phpVMS NICHT garantiert identisch sind — erster Pfad-Wechsel kann `changed=true` triggern auch bei inhaltsgleichem Plan, danach stabil.
   - §11 alle v1.2-Punkte entschieden, **keine offenen Punkte mehr** — Spec ist code-ready.
+- **v1.5 (2026-05-11):** Release-Blocker-Fix nach QS-Report Thomas (Real-Pilot-Case CFG1504 vs CFG4TK):
+  - §6.1.1 Problem-Beschreibung: Pilot mit Bid airline=CFG flight_number=1504 + persoenlichem Callsign "4TK" generiert OFP mit Callsign "CFG4TK". v1.1-Match-Logik wuerde MISMATCH liefern und HARD-Block ausloesen → fachlich falsch.
+  - §6.1.2 Loesung: Kandidaten-Liste statt strenger 1:1-Vergleich. SimBrief-Callsign muss gegen EINEN von 5 Kandidaten exakt matchen (airline+flight_number, flight_number, bid.flight.callsign, airline+pilot_callsign, pilot_callsign).
+  - §6.1.3 Edge-Case-Tabelle v1.5: CFG4TK/4TK matchen jetzt korrekt, CFG1100/ABC4TK weiter MISMATCH. v1.1-Regression-Schutz (DLH1100-vs-100) bleibt erhalten.
+  - §6.1.4 Empirik-Hinweis: AeroACARS liest BEIDE Quellen additiv (Flight.callsign existiert bereits im Parser, Profile.callsign neu). Robust gegen jede phpVMS-VA-Konfiguration.
+  - Code-Anforderungen v1.5:
+    * Profile.callsign-Feld in api-client parsen (additiv, serde(default))
+    * ActiveFlight.bid_callsign + pilot_callsign (Option<String>)
+    * PersistedFlight gleiche Felder mit serde(default) fuer legacy resume
+    * ofp_matches_active_flight Signatur erweitert um pilot_callsign + bid_callsign
+    * build_candidate_callsigns als neue Pure-Function
+    * 4+ neue Tests fuer CFG4TK-Case
+  - QS-Status v1.5: **Release-Blocker fuer v0.7.8** — Tag/Release erst nach Code-Update.
 - **v1.4 (2026-05-11):** Polish nach Thomas-QS-Approval mit 5 Redaktions-Nits:
   - §2 + §5 Begriffs-Konsistenz: `simbrief_username`-Bezuege in Pseudo-Code auf `simbrief_settings` korrigiert. localStorage-Key-Namen bleiben (sind technisch).
   - §3 + §5 + §8 Notice-Wording: "SimBrief-Username/UserID" → "SimBrief-Username/User-ID" (Bindestrich). §8 Username-unbekannt-Notice auf Identifier-neutral umgeschrieben.
