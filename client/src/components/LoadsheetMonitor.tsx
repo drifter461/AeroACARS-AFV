@@ -113,11 +113,13 @@ export function LoadsheetMonitor({ info }: Props) {
       setTimeout(() => setRefreshDone(false), 4000);
     } catch (err: unknown) {
       // v0.7.8 v1.5.2: shared Helper formattiert Mismatch-JSON +
-      // bekannte Error-Codes in lesbare Notices. Verhindert rohes
-      // JSON im Inline-Refresh-Error-Display.
+      // bekannte Error-Codes in lesbare Notices.
+      // v1.5.3: context="cockpit" damit phase_locked + no_simbrief_link
+      // lesbar werden — Loadsheet ist Cockpit-Context.
       const formatted = formatRefreshError(
         err as { code?: string; message?: string } | null,
         t,
+        "cockpit",
       );
       setRefreshErr(formatted?.text ?? String(err));
     } finally {

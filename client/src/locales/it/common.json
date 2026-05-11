@@ -847,6 +847,8 @@
     "simbrief_user_not_found": "SimBrief username/user-ID non trovato. Controlla Impostazioni → Integrazione SimBrief.",
     "simbrief_unavailable_and_bid_gone": "SimBrief attualmente non disponibile; fallback puntatore anche non riuscito. Riprova tra qualche minuto.",
     "simbrief_direct_failed": "SimBrief-diretto fallito. Anche fallback puntatore non riuscito — vedi activity log.",
+    "phase_locked": "L'aggiornamento OFP è disponibile solo fino al decollo (Preflight fino a Taxi-Out).",
+    "no_simbrief_link": "Nessun OFP SimBrief collegato per questo volo. Per favore genera prima un OFP per il volo su simbrief.com.",
     "ofp_mismatch_title": "OFP SimBrief non corrisponde alla prenotazione",
     "ofp_mismatch_detail": "Bid: {{bid}} · OFP: {{ofp}}",
     "ofp_mismatch_bid": "Bid",

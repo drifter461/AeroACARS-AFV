@@ -33,6 +33,24 @@ export interface FormattedNotice {
 }
 
 /**
+ * Welcher Aufrufer ruft den Helper? Bestimmt das Verhalten fuer
+ * benigne Codes (`phase_locked` + `no_simbrief_link`):
+ *
+ * - **bidlist**: still (null) — der Bid-Tab-"Aktualisieren"-Button
+ *   loest auch in Cruise/etc. mit den anderen Refreshes (Bids,
+ *   Sim-Resync, Profile) aus; `phase_locked` ist erwartet und soll
+ *   keinen Notice produzieren. Genauso ist `no_simbrief_link` da
+ *   Pilot-spezifisch normal.
+ *
+ * - **cockpit**: lesbare Notice — der Cockpit-/Loadsheet-Refresh-
+ *   Button ist Pilot-initiiert. Wenn er aus Race-Conditions in
+ *   `phase_locked` rennt oder fuer einen Bid ohne SimBrief klickt,
+ *   muss der Pilot eine vernuenftige Antwort sehen statt
+ *   `[object Object]` oder einer schweigenden UI.
+ */
+export type RefreshErrorContext = "bidlist" | "cockpit";
+
+/**
  * Formatiert einen `flight_refresh_simbrief`-Error in eine lokalisierte
  * Pilot-Notice. Bekannte error.codes werden ueber i18n-Templates mit
  * Parametern gerendert; unbekannte Codes fallen auf den `err.message`
@@ -46,6 +64,7 @@ export interface FormattedNotice {
 export function formatRefreshError(
   err: TauriRefreshError | null | undefined,
   t: TFunction,
+  context: RefreshErrorContext = "bidlist",
 ): FormattedNotice | null {
   if (!err) return null;
 
@@ -100,12 +119,30 @@ export function formatRefreshError(
     return { text: t(key), tone };
   }
 
-  // ─── phase_locked + no_simbrief_link → silent ──────────────────────
-  // BidsList-Refresh in einer spaeteren Phase soll keinen Notice
-  // produzieren (die Bid-Liste wird trotzdem aktualisiert). Cockpit-/
-  // Loadsheet-Button waere in diesen Phasen auch gar nicht sichtbar.
-  if (err.code === "phase_locked" || err.code === "no_simbrief_link") {
-    return null;
+  // ─── phase_locked + no_simbrief_link ───────────────────────────────
+  //
+  // v1.5.3 (Thomas-QS P2): Kontext-abhaengig.
+  //
+  // - BidsList: still (= kein Notice). Refresh kombiniert mehrere
+  //   unabhaengige Calls (Bids, Sim, Profile, evtl. OFP). `phase_locked`
+  //   ist ein erwarteter benigner Outcome in spaeteren Flugphasen — die
+  //   Bid-Liste wird trotzdem aktualisiert, also kein User-Notice noetig.
+  //   Gleiches fuer `no_simbrief_link`.
+  //
+  // - Cockpit/Loadsheet: lesbare Notice. Der Pilot hat den Refresh-
+  //   Button explizit gedrueckt. `phase_locked` koennte ueber Race-
+  //   Condition (Phase wechselt waehrend Button-Click) auftreten;
+  //   `no_simbrief_link` kann real passieren weil der Cockpit-Button
+  //   NICHT abhaengig vom SimBrief-Link gegated ist. Pilot muss
+  //   eine lesbare Antwort kriegen, sonst sieht er sonst `[object
+  //   Object]` aus dem String(err)-Fallback im Caller.
+  if (err.code === "phase_locked") {
+    if (context === "bidlist") return null;
+    return { text: t("bids.phase_locked"), tone: "info" };
+  }
+  if (err.code === "no_simbrief_link") {
+    if (context === "bidlist") return null;
+    return { text: t("bids.no_simbrief_link"), tone: "info" };
   }
 
   // ─── Unbekannte Codes: rohe message als err-Tone ───────────────────

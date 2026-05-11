@@ -146,11 +146,14 @@ export function ActiveFlightPanel({ info, simSnapshot, onEnded }: Props) {
       setRefreshMsg(t("active_flight.refresh_ofp_done"));
     } catch (err: unknown) {
       // v0.7.8 v1.5.2: shared Helper formattiert Mismatch-JSON +
-      // bekannte Error-Codes in lesbare Notices (Spec §8). Verhindert
-      // dass Pilot rohes JSON aus dem Mismatch-message-Feld sieht.
+      // bekannte Error-Codes in lesbare Notices (Spec §8).
+      // v1.5.3 (Thomas-QS): context="cockpit" damit phase_locked
+      // + no_simbrief_link lesbare Texte bekommen (statt null →
+      // String(err) → "[object Object]").
       const formatted = formatRefreshError(
         err as { code?: string; message?: string } | null,
         t,
+        "cockpit",
       );
       setError(formatted?.text ?? String(err));
     } finally {

@@ -846,6 +846,8 @@
     "simbrief_user_not_found": "SimBrief username/user-ID not found. Check Settings → SimBrief Integration.",
     "simbrief_unavailable_and_bid_gone": "SimBrief currently unavailable; pointer-fallback also failed. Try again in a few minutes.",
     "simbrief_direct_failed": "SimBrief-direct failed. Pointer fallback also failed — see activity log.",
+    "phase_locked": "OFP refresh is only available until takeoff (Preflight through Taxi-Out).",
+    "no_simbrief_link": "No SimBrief OFP linked for this flight. Please generate an OFP for the flight on simbrief.com first.",
     "ofp_mismatch_title": "SimBrief OFP doesn't match the booking",
     "ofp_mismatch_detail": "Bid: {{bid}} · OFP: {{ofp}}",
     "ofp_mismatch_bid": "Bid",
