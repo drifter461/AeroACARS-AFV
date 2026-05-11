@@ -1,6 +1,6 @@
 # OFP-Refresh SimBrief-direct (v0.7.8 Datenpfad)
 
-**Status:** Draft v1.2 nach direkter SimBrief-API-Probe (vereinfacht den Design)
+**Status:** Draft v1.3 final-vor-Code (static_id raus, request_id rein, Error-Handling robust)
 **Stand:** 2026-05-11
 **Trigger:** v0.7.7 (`608630e` auf main) loest nur die UX-Schicht. W5 (phpVMS-7 entfernt Bid nach Prefile) macht den pointer-basierten Daten-Pfad im Real-Boarding wirkungslos. Pilot kriegt eine ehrliche Notice — aber keine neuen Plan-Werte. Dieser Spec dokumentiert den **echten Daten-Pfad** der v0.7.7 abloest und beide Schichten **in einem Release** ausgeliefert werden.
 
@@ -93,12 +93,24 @@ Navigraph's "offizielles" Pattern (`?userid=X&static_id=Y`) ist nur EINE Variant
 ...
 ```
 
-### Failure-Modes (v1.2 prazisiert)
+### Failure-Modes (v1.3 robust — beide Pfade abdecken)
 
-- **HTTP 200 + `<fetch><status>Success</status>`** → valid OFP, parse weiter
-- **HTTP 200 + `<fetch><status>Error</status>`** → invalid user / fetch error. `<fetch>`-Block hat dann Detail-Tag. Spec v1.1 sagte "HTTP 400 + XML" — v1.2 korrigiert: SimBrief liefert tatsaechlich HTTP 200 + Status-Tag im XML-Body. Wir muessen den Status parsen, nicht nur den HTTP-Code.
-- **HTTP 5xx / Network-Error** → SimBrief offline / Internet weg
-- **HTTP 200 + Parse-Fehler** → unerwartetes XML
+Spec v1.1 (laut Navigraph-Doku): invalid user → HTTP 400 + XML-Error.
+Spec v1.2 (laut Live-Probe `?username=simbrief`): HTTP 200 + `<fetch><status>Error</status>` moeglich.
+
+**v1.3 Konsequenz:** Code muss **beide** Wege abdecken. Reihenfolge in der Pruefung:
+
+| Detection | Bedeutung | Direct-Error-Variante |
+|---|---|---|
+| HTTP 400 | invalid user (Navigraph-Doku-Pfad) | `UserNotFound` |
+| HTTP 5xx | SimBrief offline / maintenance | `Unavailable` |
+| HTTP andere non-2xx | unerwartet | `Network` |
+| HTTP 200 + `<fetch><status>` != "Success" | invalid user (Live-Probe-Pfad) | `UserNotFound` |
+| HTTP 200 + Status Success + Parse-Fehler | unerwartetes XML | `ParseFailed` |
+| Network/IO-Error vor Response | Internet weg | `Network` |
+| HTTP 200 + Status Success + valid OFP | Erfolg | weitermachen |
+
+Damit ist der Code robust gegen beide bekannten Failure-Pfade — und der `UserNotFound`-Code triggert die korrekte Notice ("SimBrief-Username/UserID nicht gefunden — pruefe Settings").
 
 ### Identifier-Strategie v1.2
 
@@ -109,35 +121,62 @@ Navigraph's "offizielles" Pattern (`?userid=X&static_id=Y`) ist nur EINE Variant
 
 Damit ist die v1.0/v1.1-Ueberlegung "wir brauchen userid + static_id" **falsch**. Username-only Fetch reicht — wir verifizieren Match per dpt/arr/callsign (= §6).
 
-### Was wir AeroACARS-seitig parsen muessen
+### Was wir AeroACARS-seitig parsen muessen (v1.3-final)
 
-`SimBriefOfp` bekommt zwei neue Felder:
+**v1.3 QS-Entscheidung:** `static_id` kommt **NICHT** in den Parser, **NICHT** in `FlightStats`, **NICHT** in Settings. Begruendung (aus Navigraph-Forum-Thread): `static_id` ist fuer Systeme die OFPs selber **erzeugen** ueber die API. AeroACARS fetcht nur — wir brauchen keinen Slot-Pointer.
+
+`SimBriefOfp` bekommt nur **ein** neues Feld:
 
 ```rust
 pub struct SimBriefOfp {
     // ... bestehende Felder ...
-    /// v0.7.8 (v1.2): `<params><request_id>`. Aendert sich bei JEDER
+    /// v0.7.8 (v1.3): `<params><request_id>`. Aendert sich bei JEDER
     /// Re-Generation auf simbrief.com — canonical changed-flag-Quelle.
+    /// Leer wenn Tag fehlt (sollte praktisch nie passieren laut Demo-Probe).
     pub request_id: String,
-    /// v0.7.8 (v1.2): `<params><static_id>`. KANN LEER sein
-    /// (Pilot hat keinen "save dispatch" gemacht). Optional persistieren
-    /// fuer evtl. zukuenftige spezifische OFP-Abfrage.
-    pub static_id: Option<String>,
 }
 ```
 
-Plus globale Error-Erkennung via `<fetch><status>`:
+`sequence_id` wird parser-seitig **ignoriert** (optional `tracing::debug!` mitloggen fuer evtl. spaetere Diagnose, aber NICHT in DTO/Persistenz).
+
+**v1.3 Robust-Error-Erkennung (QS-Punkt 4):** SimBrief liefert Fehler auf **zwei Wegen** — der Parser muss beide behandeln:
 
 ```rust
-let fetch_status = extract_tag(xml, "fetch")
+// 1. HTTP-Status pruefen (Navigraph-Doku sagt invalid user → HTTP 400)
+if response.status() == StatusCode::BAD_REQUEST {
+    return Err(SimBriefDirectError::UserNotFound);
+}
+if response.status().is_server_error() {
+    return Err(SimBriefDirectError::Unavailable);
+}
+if !response.status().is_success() {
+    return Err(SimBriefDirectError::Network);  // unerwarteter Code
+}
+
+let xml = response.text().await
+    .map_err(|_| SimBriefDirectError::Network)?;
+
+// 2. XML-Status pruefen (Live-Probe sah HTTP 200 + <fetch><status>Error</status>)
+let fetch_status = extract_tag(&xml, "fetch")
     .and_then(|inner| extract_tag(inner, "status"))
     .map(|s| s.trim().to_string())
     .unwrap_or_default();
 if fetch_status != "Success" {
-    // SimBrief-side error — User not found, fetch error, etc.
     return Err(SimBriefDirectError::UserNotFound);
 }
+
+// 3. Erst jetzt: OFP-Felder parsen
+let ofp = parse_simbrief_ofp(&xml)
+    .ok_or(SimBriefDirectError::ParseFailed)?;
 ```
+
+Damit faengt der Code beide moegliche Failure-Pfade ab — Navigraph-Doku-Pfad UND Live-Probe-Pfad.
+
+**v1.3 Hinweis zu `request_id` vs `bid.simbrief.id`:** Es ist NICHT garantiert dass beide identisch sind:
+- `bid.simbrief.id` aus phpVMS = was PAX Studio dort hineingeschrieben hat
+- SimBrief-direct `<params><request_id>` = was SimBrief direkt liefert
+
+Resultat: Beim **ersten** Wechsel von Pointer-Pfad zu Direct-Pfad **kann** `changed=true` triggern, auch wenn der Plan inhaltlich identisch ist. Danach (= alle nachfolgenden Direct-Refreshes) ist es stabil, weil AeroACARS persistierte ID = `request_id` vom letzten Refresh. Akzeptabel — Pilot sieht "OFP wurde aus Direct-Pfad neu geladen" und das ist informativ, nicht falsch.
 
 **Verwendete OFP-XML-Felder** (Parser-Stand `api-client/lib.rs:1492+`):
 - `<origin><icao_code>` → `ofp.ofp_origin_icao` (existing)
@@ -721,16 +760,34 @@ Frontend (manueller Smoke):
 - ✓ **`SimBriefDirectError`-Enum:** getrennt halten (Network / UserNotFound / Unavailable / ParseFailed) — Notice-Wording haengt davon ab. Sammel-Code wuerde Pilot mit weniger actionable Info versorgen.
 - ✓ **`compose_failure`-Wording:** kurz halten. Notice gibt Hauptursache + "siehe Activity-Log fuer Details".
 
-### v1.2-Punkte (neu nach API-Probe — fuer dein OK)
-- [ ] **Username-only Fetch akzeptabel?** Live-API-Probe bestaetigt `?username=X` allein liefert latest OFP. v1.0/v1.1 hatten falsche Annahme dass static_id Pflicht sei. v1.2 entscheidet: username-only ODER userid-only reicht. Bestaetigen oder Bedenken?
-- [ ] **`sequence_id` ignorieren?** Im XML gibt's neben `request_id` noch `sequence_id` (hexstring "6963c3d8ce43"). Funktion unklar. v1.2 ignoriert es. Falls du eine Vermutung hast warum es da ist, gerne notieren.
-- [ ] **Pilot-Probe-Test:** Kannst du `https://www.simbrief.com/api/xml.fetcher.php?username=DEIN_NAME` einmal aufrufen und schauen ob `<params><request_id>` deinem typischen `bid.simbrief.id`-Muster aus phpVMS gleicht? Damit wuerden wir bestaetigen ob phpVMS-Bid und SimBrief-direct die GLEICHEN IDs sehen → kein "changed=true bei Pfad-Wechsel"-False-Positive.
+### v1.2-Punkte (in v1.3 entschieden nach Thomas-QS auf Navigraph-Dev-Doku)
+- ✓ **Username-only Fetch:** offiziell erlaubt (laut Navigraph dev-Doku "Fetching a User's Latest OFP Data"). Username UND User-ID werden beide in Settings unterstuetzt, mind. eines noetig, User-ID > Username Prioritaet.
+- ✓ **`sequence_id` ignorieren:** kein Nutzen erkennbar. Optional `tracing::debug!` mitloggen, nicht in DTO/Persistenz.
+- ✓ **Pilot-Probe-Test:** nicht-blockierend. Beim ersten Wechsel Pointer → Direct kann `changed=true` triggern auch bei inhaltsgleichem Plan — danach stabilisiert sich. Akzeptabel.
+
+### v1.3-Punkte (final-vor-Code)
+**KEINE offenen Punkte mehr.** Spec ist code-ready. Alle Entscheidungen sind im Spec-Body verankert:
+1. SimBrief-direct via `?username=X` ODER `?userid=X` (eines reicht)
+2. `static_id` komplett raus — nicht Settings, nicht Parser, nicht FlightStats
+3. `request_id` aus `<params>` parser-seitig — canonical changed-flag-Quelle
+4. Error robust: HTTP-Code + `<fetch><status>`-Tag beides pruefen
+5. `sequence_id` nur trace-log, nicht persistiert
+6. Callsign-Match per normalisierter `airline_icao + flight_number`-Form (kein Suffix-Match)
+7. Mismatch = HARD-Block (kein Override)
+8. Settings: eigene Section, "Pruefen"-Button statt onBlur-Spam
+9. App-root localStorage-Sync beim Login-Mount
 
 ---
 
 ## 12. Versionierung dieser Spec
 
 - **v1.0 (2026-05-11):** Initial Draft basierend auf Thomas-Decision "SimBrief-direct, big release bundle".
+- **v1.3 (2026-05-11):** Final-vor-Code nach Thomas-QS auf Navigraph "Fetching a User's Latest OFP Data"-Doku:
+  - §3 SimBriefOfp-Parser: `static_id`-Feld komplett raus (war in v1.2 noch als Option enthalten). Begruendung Forum-Thread: `static_id` ist fuer Systeme die OFPs **erzeugen**, nicht fetchen. AeroACARS fetcht nur — wir brauchen keinen Slot-Pointer. Parser bekommt nur `request_id: String`.
+  - §3 `sequence_id` final ignoriert (kein DTO/Persistenz, optional tracing::debug nur fuer Diagnose).
+  - §3 Failure-Modes-Tabelle robust: **BEIDE Pfade** (HTTP 400 laut Navigraph-Doku UND `<fetch><status>Error</status>` laut Live-Probe) auf `UserNotFound` mappen. HTTP 5xx → `Unavailable`, andere non-2xx → `Network`, Parse-Fehler → `ParseFailed`.
+  - §3 Hinweis dass `request_id` und `bid.simbrief.id` aus phpVMS NICHT garantiert identisch sind — erster Pfad-Wechsel kann `changed=true` triggern auch bei inhaltsgleichem Plan, danach stabil.
+  - §11 alle v1.2-Punkte entschieden, **keine offenen Punkte mehr** — Spec ist code-ready.
 - **v1.2 (2026-05-11):** Nach direkter SimBrief-API-Probe (Thomas verlinkte Navigraph-Doku + Live-Demo):
   - §3 komplett ueberarbeitet — XML-Response-Struktur direkt aus `?username=simbrief`-Probe gezogen statt aus indirekter Doku-Interpretation.
   - **Vereinfachung gegenueber v1.0/v1.1:** Username-only Fetch funktioniert (Status "Success" bestaetigt). static_id ist NICHT zwingend — kann leer sein.
