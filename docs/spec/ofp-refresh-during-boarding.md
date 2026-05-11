@@ -1,6 +1,6 @@
 # OFP-Refresh waehrend Boarding — Stand-Aufnahme + Spec
 
-**Status:** Draft v1.1 nach Thomas-Review
+**Status:** Draft v1.2 nach 2. Thomas-Review (W5 erschuettert die Design-Annahme)
 **Stand:** 2026-05-11
 **Trigger:** Real-Pilot-Frust beim laufenden Flug (Tab "Meine Fluege" → "Aktualisieren" tut nicht was Pilot erwartet)
 
@@ -107,14 +107,48 @@ Cockpit-Button gated heute auf `preflight | boarding | taxi_out`. **`Pushback` f
 ### W3 — Cache-Layer? (unwahrscheinlich)
 SimBrief antwortet auf jede ID frisch. phpVMS-Cache wuerde nur greifen wenn paxstudio das so konfiguriert hat (VA-spezifisch).
 
-### W4 — PAX Studio "Laden von SB" updated nicht die OFP-ID am Bid? (extern verifizieren)
-Wenn das PAX-Studio-Modul nur Pax/Cargo aktualisiert aber NICHT die `simbrief.id` austauscht, dann ist auch `flight_refresh_simbrief` machtlos. Diese Wurzel sitzt server-side. **Entscheidung Thomas v1.1:** nicht als Blocker fuer P1 — P2 macht das fuer den Pilot sichtbar.
+### W4 — PAX Studio "Laden von SB" updated nicht die OFP-ID am Bid? (v1.2: widerlegt)
+**Update v1.2 nach QS des PAX-Studio-Repos:** PAX Studio arbeitet beim "Load/Sync from SB" korrekt — `DashboardController::sync()` nutzt `static_id`, ruft `downloadOfpCompat(...)` und bekommt ein aktualisiertes `SimBrief`-Model zurueck. Hat sogar Guards (`ofp_mismatch`) und schuetzt SimBrief-Daten waehrend ACARS-IN_PROGRESS-PIREP. Die Wurzel sitzt also **nicht** in PAX Studio.
 
-**Quick-Check fuer User:** Nach "Laden von SB" einmal `https://german-sky-group.eu/api/user/bids` aufrufen (Browser, eingeloggt) und schauen ob `simbrief.id` wirklich die neue ist.
+### W5 — Bid verschwindet aus `/api/user/bids` sobald AeroACARS prefiled hat (v1.2 NEU — kritisch)
+
+Vom PaxStudio-Changelog dokumentiert: **phpVMS 7 entfernt einen Bid sobald ACARS einen PIREP prefiled hat.** AeroACARS' `flight_start` ruft `prefile_pirep` an Position lib.rs:5322 — also sobald der Pilot "Flug starten" klickt. Resultat:
+
+```
+flight_start                 phpVMS server-side                AeroACARS local state
+─────────────                ──────────────────                ─────────────────────
+client.prefile_pirep() ───→  PIREP angelegt                    
+                             Bid wird AUTO-REMOVED             
+                                                               flight.bid_id bleibt
+                                                               (im active_flight state)
+                                                               
+[Boarding, Pilot regeneriert OFP, klickt "Laden von SB"]
+                                                               
+                             PAX Studio updated SimBrief-      
+                             record  server-side               
+                                                               
+[Pilot klickt "⟳ Aktualisieren" im Bid-Tab]                    
+                                                               
+                                                          ┌──→ flight_refresh_simbrief:
+                                                          │    client.get_bids()
+client.get_bids() ────────→  Bid-Liste OHNE den           │    .find(|b| b.id == bid_id)
+                             gefilten Bid               ──┴─→  None → bid_not_found ERR
+```
+
+**Konsequenz:** Das ganze `flight_refresh_simbrief`-Command in seiner heutigen Form ist **unbrauchbar im realen Boarding-Fall** weil es exklusiv ueber den Bid-Pointer geht, der bereits weg ist. Die in v1.0/v1.1 spezifizierte v0.7.7-Loesung (Bid-Tab ruft `flight_refresh_simbrief`) wuerde im echten Pilot-Workflow `bid_not_found` triggern und nichts veraendern.
+
+**Beleg im AeroACARS-Code:**
+- `flight_start` ruft `client.prefile_pirep` **vor** Boarding-Beginn (lib.rs:5322)
+- `flight_refresh_simbrief` ruft `client.get_bids() + .find(|b| b.id == bid_id)` ohne Fallback (lib.rs:4344-4355)
+- `consume_bid_best_effort` (AeroACARS-eigene Bid-Loeschung) feuert nur AT-FILE-TIME, nicht AT-PREFILE — der serverseitige Auto-Remove ist also unabhaengig davon
+
+**Quick-Check fuer User:** Nach "Flug starten" einmal `https://german-sky-group.eu/api/user/bids` aufrufen (Browser, eingeloggt) und schauen ob der Bid noch da ist. Wenn nein → W5 bestaetigt.
+
+**Konsequenz fuer v0.7.7-Scope:** Siehe §7 — Spec wird ehrlich umgeschnitten.
 
 ---
 
-## 6. v1.1-Refinement nach Thomas-Review
+## 6. v1.1/v1.2-Refinement nach Thomas-Reviews
 
 ### 6.1 P2 unterschaetzt — Persistenz-Feld noetig
 
@@ -123,27 +157,44 @@ Wenn das PAX-Studio-Modul nur Pax/Cargo aktualisiert aber NICHT die `simbrief.id
 **Erweiterung der Spec:**
 
 ```rust
-// FlightStats (lib.rs ~1549)
+// FlightStats (lib.rs ~1549) — runtime-state
 flight_plan_source: Option<&'static str>,
 // NEU:
 simbrief_ofp_id: Option<String>,         // "1777622821_5F3E3B3842"
-simbrief_ofp_generated_at: Option<DateTime<Utc>>, // aus OFP <times><sched_out>?
+simbrief_ofp_generated_at: Option<String>, // ISO-String aus <params><time_generated>
 ```
 
-Plus in `storage::PersistedFlightStats` (storage/src/lib.rs) das gleiche Paar mit `#[serde(default)]` damit alte Persistenz lesbar bleibt.
+**v1.2-Korrektur Punkt 1:** Plus in `PersistedFlightStats` an **lib.rs:806** (NICHT `storage/src/lib.rs` — `PersistedFlightStats` ist lokal definiert, `storage::LandingRecord` ist eine andere Struktur). Beide neue Felder bekommen `#[serde(default)]` damit alte Persistenz lesbar bleibt.
 
-`flight_start` setzt beide. `flight_refresh_simbrief` liest den alten Wert, vergleicht mit dem neuen aus dem frisch geholten OFP, und gibt das Ergebnis im Result-DTO mit zurueck:
+**v1.2-Korrektur Punkt 2:** `ofp_generated_at` ist im Parser heute **`String`** (api-client/lib.rs:444), gelesen aus `<params><time_generated>`. Spec v1.0/v1.1 hatte faelschlich `DateTime<Utc>` aus `<times><sched_out>` vorgeschlagen — das wuerde Parser-Refactor + Datums-Parsing erfordern. Fuer v0.7.7 bleiben wir bei **`Option<String>`** durchgereicht — entweder so wie der Parser liefert (Unix-Timestamp-String wenn so vorhanden) oder roher Inhalt des Tags. Datums-Display-Logik (falls noetig) kann v0.7.8 auf eine echte Time-Type umstellen.
+
+`flight_start` setzt beide. `flight_refresh_simbrief` liest den alten Wert, vergleicht mit dem neuen aus dem frisch geholten OFP, und gibt das Ergebnis im Result-DTO mit zurueck.
+
+**v1.2-Korrektur Punkt 3 (DTO-Split):** `SimBriefOfpDto` wird heute von ZWEI Commands genutzt:
+- `flight_refresh_simbrief` (lib.rs:4327) — der Refresh-Pfad
+- `fetch_simbrief_preview` (lib.rs:4437) — die Bid-Card-Vorschau **bevor** der Flight gestartet ist (also gar kein "previous_ofp_id"-Konzept moeglich)
+
+Wenn wir `previous_ofp_id` / `current_ofp_id` / `changed` direkt in `SimBriefOfpDto` einbauen, wird die Preview unnoetig komisch — der Wert waere immer `previous = None, current = id, changed = true` (Tautologie). Sauberer:
 
 ```rust
-pub struct SimBriefOfpDto {
-    // bestehende Felder...
-    pub previous_ofp_id: Option<String>, // None bei v0.7.5-Persistenz (alte PIREPs)
+// Bleibt unveraendert — fuer Preview-Pfad
+struct SimBriefOfpDto { /* bestehende Felder */ }
+
+// NEU — nur fuer Refresh-Pfad
+struct SimBriefRefreshResult {
+    pub ofp: SimBriefOfpDto,
+    pub previous_ofp_id: Option<String>,
     pub current_ofp_id: String,
-    pub changed: bool, // current != previous
+    pub changed: bool,
+}
+
+#[tauri::command]
+async fn flight_refresh_simbrief(...) -> Result<SimBriefRefreshResult, UiError> {
+    // ...
 }
 ```
 
-Frontend nutzt `changed` fuer den Toast.
+Frontend nutzt `result.changed` fuer den Toast, `result.ofp.*` fuer Plan-Werte. `fetch_simbrief_preview` bleibt bei `Option<SimBriefOfpDto>`.
 
 ### 6.2 Phase-Gate inklusive `Pushback`
 
@@ -172,7 +223,13 @@ if !matches!(current_phase,
 }
 ```
 
-Frontend-Sichtbarkeit der dedizierten Buttons synchron anpassen (Cockpit + Loadsheet).
+**v1.2-Korrektur Punkt 5 (Loadsheet nicht blind syncen):** Backend-Gate + Cockpit-Button-Sichtbarkeit auf `Preflight|Boarding|Pushback|TaxiOut` ja. ABER `LoadsheetMonitor.tsx` ist heute bewusst auf `preflight|boarding` begrenzt (lib.tsx:52) — die Begruendung "Loadsheet abgeschlossen sobald TaxiOut beginnt" ist eine eigene UX-Entscheidung. Wir aendern in v0.7.7 **NICHT** das Loadsheet-Phase-Gate mit. Konsequenz:
+
+- Cockpit-Button (ActiveFlightPanel) sichtbar in `preflight|boarding|pushback|taxi_out`
+- Loadsheet-Inline-Button (LoadsheetMonitor) sichtbar in `preflight|boarding` (unveraendert)
+- Backend `flight_refresh_simbrief` akzeptiert alle vier Phasen
+
+Falls Pilot in `Pushback` oder `TaxiOut` einen Refresh braucht, geht das via Cockpit-Button — der Loadsheet-Card ist dort eh nicht mehr offen. Loadsheet-bis-Pushback waere ein eigener UX-Schnitt (eigene Spec).
 
 ### 6.3 P3 ist Erweiterung, nicht neu
 
@@ -228,7 +285,37 @@ pub async fn fetch_simbrief_ofp(
 
 **Aufwand-Hinweis:** Diese Aenderung beruehrt auch `flight_start` und `fetch_simbrief_preview` (alle drei Caller). Migration: Caller die heute `Ok(None)` toleriert haben mappen `Err(SimBriefFetchError::*)` auf `Ok(None)` (keine Regression), neuer Caller (`flight_refresh_simbrief`) nutzt die Varianten differenziert.
 
-### 6.5 UI-Update sofort nach Refresh
+### 6.5a Toast-Infrastruktur (v1.2 Punkt 4)
+
+Im Code gibt es heute **keinen generischen `showToast`-Helper** (verifiziert via Grep). Das Pseudo-`showToast(...)` in der v1.1-Spec war eine versteckte Zusatzaufgabe.
+
+**Entscheidung v1.2:** Fuer v0.7.7 reicht ein **lokaler State im `BidsList`-Header** — kein neuer Toast-Component-Sweep. Pattern:
+
+```tsx
+// in BidsList (oder Parent if needed)
+const [refreshNotice, setRefreshNotice] = useState<{
+  text: string;
+  tone: "info" | "warn";
+} | null>(null);
+
+// auto-clear nach 6s
+useEffect(() => {
+  if (!refreshNotice) return;
+  const t = setTimeout(() => setRefreshNotice(null), 6000);
+  return () => clearTimeout(t);
+}, [refreshNotice]);
+
+// Render: kleiner Info-Pill direkt unter dem Header-Button
+{refreshNotice && (
+  <div className={`bids-refresh-notice bids-refresh-notice--${refreshNotice.tone}`}>
+    {refreshNotice.text}
+  </div>
+)}
+```
+
+Wenn spaeter ein VA-uebergreifender Toast-Bedarf entsteht (z.B. Fehler-Toasts, Score-Toasts) kann man das in v0.8.x in eine `<Toast>`-Component oder einen `useToast()`-Hook umziehen — heute waere das overengineering fuer einen einzigen Notice-Punkt.
+
+### 6.5b UI-Update sofort nach Refresh
 
 `flight_status` wird vom Cockpit-Tab 2-sekuendlich gepollt → Loadsheet sieht den neuen Plan spaetestens 2s nach Refresh. Im Bid-Tab haengt das Update vom 15s-Bid-Poll (im Boarding pausiert!) ab — also potenziell ueberhaupt nicht ohne weiteres Trigger.
 
@@ -260,88 +347,111 @@ Falls v0.7.7-Schnitt zu gross wird: §6.4 (Result-Typ) kann auf v0.7.8 verschobe
 
 ---
 
-## 7. Soll-Verhalten (Spec)
+## 7. Soll-Verhalten (Spec) — **v1.2: ehrliche Scope-Trennung wegen W5**
 
-### Was wir wollen
-1. **"Aktualisieren" im Bid-Tab macht das was es heisst** — inkl. aktiver Flug-OFP, wenn vorhanden und in refreshbarer Phase.
-2. **Discoverability:** Pilot soll nicht zwischen Tabs wechseln muessen.
-3. **Klarer Feedback-Loop:** wenn der OFP-Refresh KEINE Aenderung gebracht hat, soll der Pilot das wissen — damit er erkennt dass die phpVMS-Seite das Problem ist.
-4. **Schnelles UI-Update:** nach erfolgreichem Refresh muss das Loadsheet binnen 1s die neuen Werte zeigen, nicht erst nach 2s `flight_status`-Poll.
+W5 zwingt uns die v0.7.7-Erwartungen zu trennen. Es gibt zwei Sorten von Verbesserungen:
 
-### Was wir NICHT tun (in v0.7.7)
+### 7.1 UX-Schicht (in v0.7.7 lieferbar — auch ohne W5-Loesung)
+
+1. **"Aktualisieren" im Bid-Tab versucht** den OFP-Refresh fuer den aktiven Flug zusaetzlich. Wenn Bid noch da (= ungewoehnlicher Fall in phpVMS-7 — siehe W5): Plan-Werte werden ueberschrieben.
+2. **Wenn Bid weg** (= `bid_not_found`): kein Crash, sondern klarer Hinweis-Pill `"Bid nicht mehr verfuegbar — bitte Cockpit-OFP-Refresh nutzen oder in v0.7.8 SimBrief-direkt aktivieren"`.
+3. **Discoverability:** Pilot kriegt im Bid-Tab ein Feedback (Pill), statt schweigender Stille.
+4. **Schnelles UI-Update:** nach erfolgreichem Refresh aktualisiert sich das Loadsheet binnen 1s.
+5. **Persistenz-Foundation:** `simbrief_ofp_id` wird am `flight_start` gespeichert (= Voraussetzung fuer alles spaetere).
+
+### 7.2 Daten-Pfad-Schicht (BRAUCHT W5-Loesung — NICHT in v0.7.7)
+
+Echte fresh-OFP-Pickup waehrend Boarding ist heute aus zwei Gruenden blockiert:
+- **Bid weg nach Prefile** (W5) → Pointer-Quelle existiert nicht mehr
+- **Kein alternativer Pointer im AeroACARS-API-Set** — PIREP-Endpoint (PirepFull lib.rs:792) traegt heute kein `simbrief`-Feld; ohne zusaetzliche server-side Hilfe (PAX Studio Endpoint ODER SimBrief-direct-by-Username) kommen wir an die neue OFP-ID nicht heran.
+
+**v0.7.8** (eigene Spec, gerne kombiniert mit §11 strategischer Option):
+- Variante A: PAX Studio implementiert serverseitig `/api/paxstudio/flights/{flight_id}/simbrief` (= "latest valid briefing for active flight"). AeroACARS-Anpassung minimal.
+- Variante B: AeroACARS speichert Pilot-SimBrief-Username in Settings, holt `xml.fetcher.php?username=X` direkt, verifiziert Flight-Match. PAX-Studio-unabhaengig (= attraktiver).
+
+### 7.3 Was wir NICHT tun in v0.7.7
+
 - Kein Phase-Limit-Aufweichen nach Takeoff
 - Kein neuer Score-Logik-Pfad
-- Kein Pax-Studio-Reverse-Engineering
-- Kein Auto-Refresh-Polling (Option C — kann spaeter)
-- **Kein Architektur-Wechsel zu "SimBrief-direkt-by-username"** (siehe §11 — strategische Option, eigener Schnitt)
+- Kein Pax-Studio-Reverse-Engineering oder Server-Endpoint-Implementierung
+- Kein Auto-Refresh-Polling
+- Kein Architektur-Wechsel zu "SimBrief-direkt-by-username" (v0.7.8)
+- Kein Versuch "OFP via PirepFull" — der Endpoint traegt das Feld heute nicht, das ist ein separates Schema-Item
 
 ---
 
 ## 8. Loesungs-Optionen (Detail)
 
-### Option A1 (gewaehlt fuer v0.7.7)
+### Option A1 (gewaehlt fuer v0.7.7) — v1.2 mit W5-Fallback + TS-Type-Fix
 
-`BidsList.handleRefresh` ruft `flight_refresh_simbrief` zusaetzlich auf, Phase-Gate im Backend, Result-DTO mit `previous_ofp_id`/`changed`.
+`BidsList.handleRefresh` ruft `flight_refresh_simbrief` zusaetzlich auf, Phase-Gate im Backend, Result-DTO `SimBriefRefreshResult` (siehe §6.1 DTO-Split).
+
+**v1.2-Implementation-Hint:** `Promise<unknown>[]` verliert die Typinfo fuer `freshProfile`. Stattdessen einzelne benannte Promises oder Profile separat awaiten:
 
 ```ts
 async function handleRefresh() {
   if (refreshing) return;
   setRefreshing(true);
-  
-  const tasks: Promise<unknown>[] = [
-    fetchBids(),
-    invoke("sim_force_resync").catch(() => null),
-    invoke<Profile | null>("phpvms_refresh_profile").catch(() => null),
-  ];
-  
-  let ofpRefreshResult: SimBriefOfpDto | null = null;
-  if (hasActiveFlight) {
-    tasks.push(
-      invoke<SimBriefOfpDto>("flight_refresh_simbrief")
-        .then((dto) => { ofpRefreshResult = dto; return dto; })
-        .catch((err: { code?: string; message?: string }) => {
-          // phase_locked / no_simbrief_link → ignorieren (kein Toast)
-          // ofp_fetch_failed → in detailliertere Variante mappen (§6.4)
-          if (err?.code && err.code !== "phase_locked" && err.code !== "no_simbrief_link") {
-            // Activity-Log oder Toast je nach Variante
+
+  // Einzelne benannte Promises statt unknown[]-Array damit TypeScript
+  // die Result-Typen behaelt.
+  const bidsP = fetchBids();
+  const simP = invoke("sim_force_resync").catch(() => null);
+  const profileP = invoke<Profile | null>("phpvms_refresh_profile").catch(() => null);
+
+  // hasActiveFlight kommt aus dem Component-State / Prop
+  const refreshP: Promise<SimBriefRefreshResult | null> = hasActiveFlight
+    ? invoke<SimBriefRefreshResult>("flight_refresh_simbrief").catch(
+        (err: { code?: string; message?: string }) => {
+          // Erwartete benigne Fehler — silent, oder kleiner Pill je nach Code:
+          //   phase_locked    → silent (z.B. Pilot druckt Refresh im Cruise)
+          //   no_simbrief_link → silent (kein OFP zum Refreshen)
+          //   bid_not_found   → W5! Pilot-Hinweis-Pill (siehe unten)
+          if (err?.code === "bid_not_found") {
+            setRefreshNotice({
+              text: t("bids.ofp_bid_gone"),
+              tone: "warn",
+            });
           }
+          // ofp_fetch_failed / ofp_unusable → Activity-Log (bestehender Pfad)
           return null;
-        }),
-    );
-  }
-  
-  const [, , freshProfile] = await Promise.all(tasks);
+        },
+      )
+    : Promise.resolve(null);
+
+  const [, , freshProfile, refreshResult] = await Promise.all([
+    bidsP, simP, profileP, refreshP,
+  ]);
+
   if (freshProfile && onProfileRefreshed) onProfileRefreshed(freshProfile);
-  
-  // v0.7.7: Toast wenn OFP refresht aber unveraendert blieb
-  if (ofpRefreshResult && !ofpRefreshResult.changed) {
-    showToast(t("bids.ofp_unchanged", {
-      id: ofpRefreshResult.current_ofp_id,
-    }));
+
+  // v0.7.7: Notice wenn OFP refresht aber unveraendert blieb (W4 sichtbar machen)
+  if (refreshResult && !refreshResult.changed) {
+    setRefreshNotice({
+      text: t("bids.ofp_unchanged", { id: refreshResult.current_ofp_id }),
+      tone: "info",
+    });
   }
-  
-  // §6.5: Status-Refresh triggern damit Cockpit + Loadsheet sofort
-  // die neuen Werte sehen, nicht erst nach 2s-Poll
-  if (ofpRefreshResult?.changed) {
+
+  // §6.5b: Status-Refresh triggern damit Cockpit + Loadsheet sofort die
+  // neuen Werte sehen, nicht erst nach 2s-flight_status-Poll
+  if (refreshResult?.changed) {
     onActiveFlightUpdated?.();
   }
-  
+
   setTimeout(() => setRefreshing(false), 400);
 }
 ```
 
-Toast-Wording (v1.1 final):
+**v1.2 Notice-Wordings (3 Varianten je nach Outcome):**
 
-```
-"OFP unveraendert. phpVMS meldet weiterhin OFP-ID {id}. Bitte PAX
-Studio 'Laden von SB' pruefen."
-```
+| Outcome | Notice-Tone | Text (DE) | Text (EN) |
+|---|---|---|---|
+| Bid weg (`bid_not_found`, = W5-Fall, real-world Mehrheit) | warn | "Bid nicht mehr verfuegbar nach Prefile. Cockpit-Tab → 'OFP refreshen' nutzen, oder in v0.7.8 SimBrief-direkt aktivieren." | "Bid no longer available after prefile. Use Cockpit → 'Refresh OFP', or enable SimBrief-direct in v0.7.8." |
+| OFP refreshed, unveraendert (`changed=false`) | info | "OFP unveraendert. phpVMS meldet weiterhin OFP-ID {id}. Bitte PAX Studio 'Laden von SB' pruefen." | "OFP unchanged. phpVMS still reports OFP ID {id}. Check PAX Studio 'Load from SB'." |
+| OFP refreshed, neu (`changed=true`) | info (optional, oder kein Pill) | "OFP aktualisiert: Block {block} kg, TOW {tow} kg, LDW {ldw} kg." | "OFP refreshed: Block {block} kg, TOW {tow} kg, LDW {ldw} kg." |
 
-EN:
-```
-"OFP unchanged. phpVMS still reports OFP ID {id}. Check PAX Studio
-'Load from SB'."
-```
+**Honesty-Note:** Die `bid_not_found`-Notice ist in v0.7.7 wahrscheinlich der **haeufigste Outcome** (W5), nicht der seltene Edge-Case. Pilot kriegt damit immerhin eine klare Erklaerung statt schweigender Stille. Echtes Fix kommt in v0.7.8.
 
 ### Option B-erweitert (Toast wenn unveraendert) — siehe Option A1 oben, ist da integriert
 
@@ -349,16 +459,30 @@ EN:
 
 ---
 
-## 9. Entscheidungen aus Thomas-Review v1.1
+## 9. Entscheidungen aus Thomas-Reviews
 
+### v1.1
 | Punkt | Entscheidung |
 |---|---|
 | **W4** (PAX Studio updated `simbrief.id`?) | extern verifizieren, aber **nicht als Blocker fuer P1**. P2 macht es im Toast sichtbar. |
 | **Phase-Gate** | `Preflight \| Boarding \| Pushback \| TaxiOut` (inkl. Pushback) — Begruendung "bis Takeoff" |
-| **Toast-Wording** | `OFP unveraendert. phpVMS meldet weiterhin OFP-ID {id}. Bitte PAX Studio "Laden von SB" pruefen.` |
-| **v0.7.7-Scope** | P1 (Bid-Tab-Refresh) + Backend-Gate + Persistenz-Feld + unveraendert-Feedback (Toast) + UI-Update-Trigger |
+| **v0.7.7-Scope** | P1 + Backend-Gate + Persistenz-Feld + Toast + UI-Update-Trigger |
 | **Auto-Refresh** | weiter spaeter (eigene v0.8.x-Diskussion) |
-| **Result-Typ-Refactor in `fetch_simbrief_ofp`** | als Stretch-Goal v0.7.7. Kann auf v0.7.8 wenn der Schnitt zu gross wird. |
+| **Result-Typ-Refactor in `fetch_simbrief_ofp`** | Stretch-Goal v0.7.7 |
+
+### v1.2 (nach 2. QS-Review)
+| Punkt | Entscheidung |
+|---|---|
+| **W4 widerlegt** | PAX Studio arbeitet beim Sync korrekt — kein server-side Bug dort |
+| **W5 kritisch** | Bid weg nach Prefile → `flight_refresh_simbrief` ist im Real-World-Fall ohne Bid-Pointer |
+| **v0.7.7-Honest-Scope-Trennung** | UX-Schicht (Notice + Persistenz-Foundation + UI-Update) JA. Daten-Pfad-Fix (echter fresh-OFP-Pickup) NEIN — braucht v0.7.8 |
+| **Persistenz-Ort** | `PersistedFlightStats` lokal in `lib.rs:806`, nicht `storage`-Crate |
+| **Typ von `simbrief_ofp_generated_at`** | `Option<String>` — Parser liefert String aus `<params><time_generated>`, kein DateTime-Refactor in v0.7.7 |
+| **DTO-Split** | Neues `SimBriefRefreshResult` fuer Refresh-Pfad. `SimBriefOfpDto` bleibt fuer Preview unveraendert |
+| **Toast-Infrastruktur** | Lokales `refreshNotice`-State im Bid-Tab-Header. Keine Toast-Component-Investition fuer v0.7.7 |
+| **Loadsheet-Phase-Gate** | unveraendert `preflight\|boarding`. Pushback-Sichtbarkeit waere eigener UX-Schnitt |
+| **Promise-Typing** | benannte Promises statt `Promise<unknown>[]` damit TS die Typen behaelt |
+| **v0.7.8-Plan** | SimBrief-direct-by-username (= §11, frueher als v0.8.x) — bekommt eigene Spec |
 
 ---
 
@@ -366,14 +490,16 @@ EN:
 
 Backend (Rust):
 - `flight_refresh_simbrief_returns_phase_locked_after_takeoff`
-- `flight_refresh_simbrief_marks_changed_false_when_ofp_id_identical`
+- `flight_refresh_simbrief_returns_bid_not_found_when_phpvms_removed_bid` (W5-Real-World-Case)
+- `flight_refresh_simbrief_marks_changed_false_when_ofp_id_identical` (= wenn Bid noch da)
 - `flight_refresh_simbrief_marks_changed_true_when_ofp_id_new`
-- `flight_stats_persists_simbrief_ofp_id_across_save_load`
+- `simbrief_ofp_id_persists_across_persisted_flight_stats_save_load`
 - (falls Result-Typ-Refactor in v0.7.7): `simbrief_fetch_maps_404_to_not_found_variant`, `simbrief_fetch_maps_network_to_unreachable`
 
 Frontend (manuell oder per Playwright-Smoke):
-- Bid-Tab "Aktualisieren" im Boarding bei neuer OFP-ID → Loadsheet zeigt neue Werte ohne Tab-Wechsel
-- Bid-Tab "Aktualisieren" im Boarding bei UNVERAENDERTER OFP-ID → Toast erscheint
+- Bid-Tab "Aktualisieren" im Boarding, Bid noch da, neue OFP-ID → Loadsheet zeigt neue Werte ohne Tab-Wechsel
+- Bid-Tab "Aktualisieren" im Boarding, Bid weg (W5) → Notice "Bid nicht mehr verfuegbar, Cockpit-Refresh nutzen oder v0.7.8 SimBrief-direkt"
+- Bid-Tab "Aktualisieren" im Boarding bei UNVERAENDERTER OFP-ID → Info-Notice mit OFP-ID
 - Bid-Tab "Aktualisieren" im Cruise → kein Crash, Bid-Liste wird trotzdem aktualisiert (`phase_locked` still ignoriert)
 
 ---
@@ -434,21 +560,39 @@ SimBrief-API-Endpoint dafuer: `GET https://www.simbrief.com/api/xml.fetcher.php?
 - Bid-Pax/Cargo (Subfleet) braucht weiter phpVMS — wir koennen PAX Studio nicht komplett rausnehmen, nur bei der OFP-ID-Quelle
 - VAs ohne PAX Studio (manche andere phpVMS-Themes) bekommen heute schon den phpVMS-Pointer-Pfad — bei SimBrief-direkt muessten wir Default-Fallback dokumentieren
 
-### Empfehlung der Spec
+### Empfehlung der Spec (v1.2 — wegen W5 nach vorne gezogen)
 
-**v0.7.7:** P1+P2+P3 wie in §6 — adressiert den akuten Pilot-Frust ohne Architektur-Wechsel.
+**v0.7.7:** UX-Schicht-Fix (siehe §7.1). Adressiert Discoverability + macht W5 fuer den Piloten sichtbar (Bid-weg-Notice). KEIN echter Daten-Pfad-Fix — dafuer braucht es W5-Loesung.
 
-**v0.8.x (eigene Diskussion + Spec):** SimBrief-direkt als zusaetzlicher Pfad mit Settings-Toggle "Quelle: PAX-Studio-Pointer / SimBrief-direkt / Auto (SimBrief mit phpVMS-Fallback)". Default `Auto`, sodass:
-- Pilot mit SimBrief-Username konfiguriert → SimBrief-direkt zuerst, phpVMS-Fallback bei Mismatch
-- Pilot ohne SimBrief-Username → wie heute (phpVMS-Pointer)
+**v0.7.8 (NEU — eigene Spec):** SimBrief-direkt-by-username als zusaetzlicher Pfad. Damit ist der Bid-Pointer-Pfad nicht mehr die einzige Quelle und W5 ist umgangen. Spec-Punkte fuer v0.7.8:
+- Settings-Feld "SimBrief Username" (optional)
+- Neuer Command `fetch_simbrief_latest_by_user(username)` (api-client + Tauri-side)
+- Flight-Match-Verifikation: SimBrief-OFP.origin/destination/callsign muss zum aktiven AeroACARS-Flug passen
+- `flight_refresh_simbrief` neu: Pfad-Auswahl
+  1. wenn `simbrief_username` gesetzt → SimBrief-direct zuerst, Flight-Match pruefen
+  2. wenn (1) fehlt oder Mismatch → bestehender Bid-Pointer-Pfad (greift wenn Bid noch da, sonst `bid_not_found`)
+  3. wenn beides leer → klare Fehler-Notice
+- Backward-Compat: Pilot ohne SimBrief-Username verhaelt sich wie heute (= Bid-Pointer-Pfad mit W5-Limit)
 
-Damit beide Workflows nebeneinander leben koennen, ohne dass irgendein VA-Setup brechen wird.
+**Alternative v0.7.8 (Variante A aus §7.2):** PAX Studio Server-Endpoint `GET /api/paxstudio/flights/{flight_id}/simbrief`. AeroACARS-seitig nur 10 Zeilen Pfad-Aenderung. Aber: braucht koordinierte PAX-Studio-Release — nicht in AeroACARS-Kontrolle.
+
+**Empfohlen: Variante B (SimBrief-direct-by-username)** weil rein AeroACARS-internal und PAX-Studio-unabhaengig.
 
 ---
 
 ## 12. Versionierung dieser Spec
 
 - **v1.0 (2026-05-11):** Initial Stand-Aufnahme + Loesungs-Optionen
+- **v1.2 (2026-05-11):** Nach 2. QS-Review von Thomas:
+  - §5 W4 widerlegt (PAX Studio sync ist korrekt) + **W5 NEU** dokumentiert (Bid weg nach Prefile via phpVMS-7 = Hauptbloeker fuer den Daten-Pfad-Fix)
+  - §6.1 v1.2-Korrekturen: PersistedFlightStats liegt in `lib.rs:806` (nicht storage-Crate); `simbrief_ofp_generated_at` als `Option<String>` (Parser-Realitaet, kein DateTime-Refactor)
+  - §6.1 DTO-Split: `SimBriefRefreshResult` neu, `SimBriefOfpDto` bleibt unveraendert fuer Preview-Pfad
+  - §6.2 Loadsheet-Phase-Gate NICHT mitziehen (eigener UX-Schnitt)
+  - §6.5a Toast-Infrastruktur: lokaler `refreshNotice`-State statt nicht-existentem `showToast`
+  - §7 Honest-Scope-Trennung in UX-Schicht (v0.7.7) vs Daten-Pfad-Schicht (v0.7.8)
+  - §8 Code-Beispiel mit TS-Type-Fix (benannte Promises) + W5-Fallback (`bid_not_found`-Notice)
+  - §9 zweite Entscheidungs-Tabelle fuer v1.2-Punkte
+  - §11 Empfehlung verschoben: SimBrief-direct-by-username jetzt **v0.7.8** statt v0.8.x — wegen W5 fruher noetig
 - **v1.1 (2026-05-11):** Refinement nach Thomas-Review:
   - §6.1 P2 Persistenz-Feld `simbrief_ofp_id` + `_generated_at` ergaenzt (war Unter-Punkt, jetzt Erstklassig)
   - §6.2 Phase-Gate auf `Preflight | Boarding | Pushback | TaxiOut` korrigiert (Pushback war vorher implizit ausgeschlossen)
