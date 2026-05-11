@@ -1,6 +1,6 @@
 # OFP-Refresh waehrend Boarding — Stand-Aufnahme + Spec
 
-**Status:** Draft v1.3 nach 3. Thomas-Review (Notice-Text + flight_id-Foundation + Settings-Feld)
+**Status:** Draft v1.4 nach 4. Thomas-Review (Struktur-Placement + Snippet-Korrektur + Tests-Pflicht)
 **Stand:** 2026-05-11
 **Trigger:** Real-Pilot-Frust beim laufenden Flug (Tab "Meine Fluege" → "Aktualisieren" tut nicht was Pilot erwartet)
 
@@ -73,7 +73,7 @@ SimBrief direkt   ←─────  GET  https://www.simbrief.com/
 | 7 | klickt **PAX Studio "Laden von SB"** auf phpVMS-Site | phpVMS-Bid bekommt neue `simbrief.id` (server-side) | ✓ |
 | 8 | klickt **AeroACARS "⟳ Aktualisieren"** im Bid-Tab | `phpvms_get_bids` zieht neue Bid-Liste (mit neuer `simbrief.id`), aber **`planned_*` im aktiven Flug bleiben alt** | ❌ Pilot erwartet aktualisierten OFP |
 | 9 | sieht: Loadsheet-Werte sind weiter falsch | — | (frustrierter Pilot) |
-| 10 | **wenn Glueck**: findet Cockpit-Refresh-Button oder Loadsheet-Inline-Refresh-Button | `flight_refresh_simbrief` zieht neue OFP → `planned_*` ueberschrieben | ✓ |
+| 10 | **wenn Glueck**: findet Cockpit-Refresh-Button oder Loadsheet-Inline-Refresh-Button — UND der Bid existiert noch (= seltener phpVMS-Zustand vor Prefile, siehe W5) | `flight_refresh_simbrief` zieht neue OFP → `planned_*` ueberschrieben | ✓ |
 
 **Ergebnis:** Der prominente Button im Tab "Meine Fluege" (= dort wo der Pilot zuerst schaut) macht NICHT was er erwartet, und der wirksame Button ist in einem anderen Tab versteckt.
 
@@ -160,13 +160,15 @@ client.get_bids() ────────→  Bid-Liste OHNE den           │ 
 // FlightStats (lib.rs ~1549) — runtime-state
 flight_plan_source: Option<&'static str>,
 // NEU:
-simbrief_ofp_id: Option<String>,         // "1777622821_5F3E3B3842"
-simbrief_ofp_generated_at: Option<String>, // ISO-String aus <params><time_generated>
+simbrief_ofp_id: Option<String>,           // "1777622821_5F3E3B3842"
+simbrief_ofp_generated_at: Option<String>, // raw SimBrief <params><time_generated>
 ```
 
 **v1.2-Korrektur Punkt 1:** Plus in `PersistedFlightStats` an **lib.rs:806** (NICHT `storage/src/lib.rs` — `PersistedFlightStats` ist lokal definiert, `storage::LandingRecord` ist eine andere Struktur). Beide neue Felder bekommen `#[serde(default)]` damit alte Persistenz lesbar bleibt.
 
-**v1.2-Korrektur Punkt 2:** `ofp_generated_at` ist im Parser heute **`String`** (api-client/lib.rs:444), gelesen aus `<params><time_generated>`. Spec v1.0/v1.1 hatte faelschlich `DateTime<Utc>` aus `<times><sched_out>` vorgeschlagen — das wuerde Parser-Refactor + Datums-Parsing erfordern. Fuer v0.7.7 bleiben wir bei **`Option<String>`** durchgereicht — entweder so wie der Parser liefert (Unix-Timestamp-String wenn so vorhanden) oder roher Inhalt des Tags. Datums-Display-Logik (falls noetig) kann v0.7.8 auf eine echte Time-Type umstellen.
+**v1.2/v1.4-Korrektur Punkt 2:** `ofp_generated_at` ist im Parser heute **`String`** (api-client/lib.rs:444), gelesen 1:1 aus `<params><time_generated>`. Spec v1.0/v1.1 hatte faelschlich `DateTime<Utc>` aus `<times><sched_out>` vorgeschlagen — das wuerde Parser-Refactor + Datums-Parsing erfordern.
+
+Fuer v0.7.7 persistieren wir den **raw SimBrief `time_generated` string** als `Option<String>` (was der Parser eben liefert — typisch Unix-Timestamp-String, aber wir machen keine Annahmen ueber Format). Spec v1.3 nannte das faelschlich "ISO-String" — das ist nicht garantiert, korrigiert in v1.4. Falls v0.7.8 ein normalisiertes Display braucht, kann der Parser dann bewusst auf `DateTime<Utc>` umgestellt werden.
 
 **v1.3-Korrektur (Punkt 2): `flight_id` als Foundation in v0.7.7 mitnehmen.**
 
@@ -179,32 +181,53 @@ Konsequenz wenn wir das nicht in v0.7.7 mitnehmen:
 
 Daher: **AeroACArS soll `flight_id` AT FLIGHT_START aus dem Bid extrahieren und persistieren**, solange der Bid noch da ist (vor dem `prefile_pirep`-Call).
 
+**v1.4-Korrektur (Punkt 1): Struktur-Placement.**
+
+`flight_id` gehoert **top-level in `ActiveFlight` + `PersistedFlight`**, nicht in `PersistedFlightStats`. Begruendung:
+- `PersistedFlight` (lib.rs:775) traegt schon `bid_id: i64` top-level
+- `stats: PersistedFlightStats` ist Telemetrie + FSM-State (distance, fuel, phase) — `flight_id` ist Identifier, nicht Telemetrie
+- Analogie zu `bid_id` macht das Mapping selbstverstaendlich
+
 ```rust
-// ActiveFlight (lib.rs ~691)
+// ActiveFlight (lib.rs:691) — runtime state
 struct ActiveFlight {
     bid_id: i64,
-    flight_id: String,         // NEU v0.7.7 — phpVMS-Flight-Identifier
+    flight_id: String,    // NEU v0.7.7 — Sibling von bid_id, NICHT in stats
     flight_number: String,
     // ...
 }
 
-// PersistedFlightStats (lib.rs:806) — parallel persistiert
-struct PersistedFlightStats {
+// PersistedFlight (lib.rs:775) — disk-snapshot
+struct PersistedFlight {
+    pirep_id: String,
     bid_id: i64,
     #[serde(default)]
-    flight_id: String,         // NEU v0.7.7
+    flight_id: String,    // NEU v0.7.7 — Sibling von bid_id
+    started_at: DateTime<Utc>,
     // ...
+    stats: PersistedFlightStats,  // hier KEINE Aenderung
 }
+
+// PersistedFlightStats (lib.rs:806) — bleibt unveraendert
+// (nur simbrief_ofp_id + simbrief_ofp_generated_at kommen dazu)
 ```
 
-`flight_start` (lib.rs:5131) extrahiert vor dem `prefile_pirep`-Call:
+**v1.4-Korrektur (Punkt 3): Snippet nutzt `bid` direkt.**
+
+Im `flight_start` (lib.rs:5152) ist nach dem Bid-Lookup die Variable `bid: Bid` (kein Option — der `ok_or_else` an Z. 5155 erzwingt das). Also:
+
 ```rust
-let flight_id = matching_bid
-    .map(|b| b.flight_id.clone())
-    .unwrap_or_default();
+// flight_start (lib.rs:5152) — NACH Bid-Lookup, VOR prefile_pirep
+let bid = bids
+    .into_iter()
+    .find(|b| b.id == bid_id)
+    .ok_or_else(|| UiError::new("bid_not_found", ...))?;
+
+let flight_id = bid.flight_id.clone();
+// Im ActiveFlight-Init weiter unten als bid.flight_id.clone() durchreichen.
 ```
 
-Damit hat v0.7.8 die Identifier-Foundation gesetzt, egal ob Variante A oder B umgesetzt wird.
+Die `matching_bid.map(...)`-Version aus v1.3 stammte versehentlich aus dem Resume-/Adopt-Pfad (lib.rs:5005) wo `matching_bid: Option<&Bid>` ist — anderer Code-Pfad, anderes Pattern. `flight_start` selbst hat `bid` direkt.
 
 `flight_start` setzt beide. `flight_refresh_simbrief` liest den alten Wert, vergleicht mit dem neuen aus dem frisch geholten OFP, und gibt das Ergebnis im Result-DTO mit zurueck.
 
@@ -532,27 +555,39 @@ async function handleRefresh() {
 | Punkt | Entscheidung |
 |---|---|
 | **`bid_not_found`-Notice-Text** | korrigiert — der frueher empfohlene "Cockpit-Refresh"-Hinweis war falsch, weil Cockpit-Button denselben toten Pfad nutzt. Neuer Text ist ehrlich dass der pointer-basierte Pfad in diesem Zustand grundsaetzlich tot ist. |
-| **`flight_id` als v0.7.7-Foundation** | `ActiveFlight` + `PersistedFlightStats` bekommen `flight_id: String` (aus `Bid.flight_id`). Muss VOR `prefile_pirep`-Call extrahiert werden, sonst spaeter verloren. Voraussetzung fuer beide v0.7.8-Varianten (PAX-Studio-Endpoint ODER SimBrief-direct). |
+| **`flight_id` als v0.7.7-Foundation** | `ActiveFlight` + `PersistedFlight` bekommen `flight_id: String` (aus `Bid.flight_id`). Muss VOR `prefile_pirep`-Call extrahiert werden, sonst spaeter verloren. Voraussetzung fuer beide v0.7.8-Varianten (PAX-Studio-Endpoint ODER SimBrief-direct). |
 | **`simbrief_username`-Settings-Feld** | v0.7.8 braucht eigene Settings-UI + Persistenz (B1) — phpVMS-Profile traegt das heute nicht und ist nicht in AeroACARS-Kontrolle. B2 (phpVMS-API-Erweiterung) waere VA-side Optimierung fuer spaeter. |
 | **§12 Reihenfolge** | chronologisch korrigiert (v1.0 → v1.1 → v1.2 → v1.3 latest-last) |
+
+### v1.4 (nach 4. QS-Review)
+| Punkt | Entscheidung |
+|---|---|
+| **`flight_id` Struktur-Placement** | top-level in `ActiveFlight` + `PersistedFlight` (Sibling von `bid_id`), NICHT verschachtelt in `PersistedFlightStats`. Letzteres ist Telemetrie/FSM-State, nicht Identifier. |
+| **`simbrief_ofp_generated_at`-Wording** | "raw SimBrief `time_generated` string" statt "ISO-String" — Parser macht heute keine Format-Annahme, wir auch nicht. |
+| **flight_start-Snippet** | `let flight_id = bid.flight_id.clone();` — `bid: Bid` ist direkt verfuegbar nach Bid-Lookup in `flight_start` (lib.rs:5152), kein `Option::map` noetig. Die v1.3-`matching_bid.map(...)`-Form stammte aus dem Resume-/Adopt-Pfad (lib.rs:5005), nicht aus `flight_start`. |
+| **§10 Tests-Wording** | Notice-Text aus §8 1:1 in Test-Beschreibung uebernommen (kein "Cockpit-Refresh nutzen" mehr). |
+| **Pflicht-Tests v0.7.7** | NEU: `flight_start_persists_flight_id_before_prefile` + `resume_flight_preserves_flight_id` + `flight_refresh_simbrief_accepts_pushback` + `..._returns_phase_locked_in_takeoff_roll`. Phase-Gate-Pushback/TakeoffRoll-Boundary explizit getestet. |
 
 ---
 
 ## 10. Test-Vorschlaege
 
-Backend (Rust):
-- `flight_refresh_simbrief_returns_phase_locked_after_takeoff`
+Backend (Rust) — Pflicht in v0.7.7:
+- `flight_refresh_simbrief_returns_phase_locked_in_takeoff_roll` (TakeoffRoll explizit abgelehnt)
+- `flight_refresh_simbrief_accepts_pushback` (Pushback explizit erlaubt — v1.1 Phase-Gate-Erweiterung)
 - `flight_refresh_simbrief_returns_bid_not_found_when_phpvms_removed_bid` (W5-Real-World-Case)
 - `flight_refresh_simbrief_marks_changed_false_when_ofp_id_identical` (= wenn Bid noch da)
 - `flight_refresh_simbrief_marks_changed_true_when_ofp_id_new`
+- **`flight_start_persists_flight_id_before_prefile`** (v1.4 Pflicht: `flight_id` muss VOR `prefile_pirep` in `ActiveFlight` gespeichert werden, damit W5-Bid-Entfernung den Schluessel nicht klaut)
+- **`resume_flight_preserves_flight_id`** (v1.4 Pflicht: nach Tauri-Restart muss `flight_id` aus `PersistedFlight` zurueck in `ActiveFlight` kommen)
 - `simbrief_ofp_id_persists_across_persisted_flight_stats_save_load`
 - (falls Result-Typ-Refactor in v0.7.7): `simbrief_fetch_maps_404_to_not_found_variant`, `simbrief_fetch_maps_network_to_unreachable`
 
 Frontend (manuell oder per Playwright-Smoke):
 - Bid-Tab "Aktualisieren" im Boarding, Bid noch da, neue OFP-ID → Loadsheet zeigt neue Werte ohne Tab-Wechsel
-- Bid-Tab "Aktualisieren" im Boarding, Bid weg (W5) → Notice "Bid nicht mehr verfuegbar, Cockpit-Refresh nutzen oder v0.7.8 SimBrief-direkt"
+- Bid-Tab "Aktualisieren" im Boarding, Bid weg (W5) → Notice **mit ehrlichem Text** "Bid nicht mehr verfuegbar nach Prefile. OFP-Refresh ueber phpVMS-Pointer ist in diesem Flugzustand nicht moeglich. SimBrief-direkt kommt mit v0.7.8." (v1.3-Korrektur: kein Hinweis auf Cockpit-Refresh — der nutzt denselben toten Pfad)
 - Bid-Tab "Aktualisieren" im Boarding bei UNVERAENDERTER OFP-ID → Info-Notice mit OFP-ID
-- Bid-Tab "Aktualisieren" im Cruise → kein Crash, Bid-Liste wird trotzdem aktualisiert (`phase_locked` still ignoriert)
+- Bid-Tab "Aktualisieren" in `TakeoffRoll`/`Cruise` → kein Crash, Bid-Liste wird trotzdem aktualisiert (`phase_locked` still ignoriert, kein Notice)
 
 ---
 
@@ -680,3 +715,11 @@ SimBrief-API-Endpoint dafuer: `GET https://www.simbrief.com/api/xml.fetcher.php?
   - §11 `simbrief_username`-Feld explizit als **eigenes Settings-Feld** spezifiziert (nicht aus phpVMS-Profile uebernehmbar). Zwei Varianten B1 (AeroACARS-local) vs B2 (phpVMS-API-Erweiterung), Empfehlung B1.
   - §9 dritte Entscheidungs-Tabelle fuer v1.3-Punkte (Notice-Text, flight_id, simbrief_username, §12-Reihenfolge)
   - §12 chronologische Reihenfolge fixiert (v1.0 → v1.1 → v1.2 → v1.3 latest-last)
+- **v1.4 (2026-05-11):** Nach 4. QS-Review von Thomas (Struktur-Placement + Snippet + Tests):
+  - §6.1 v1.4-Korrektur Punkt 1: `flight_id` gehoert **top-level in `ActiveFlight` + `PersistedFlight`** (Sibling von `bid_id`), NICHT verschachtelt in `PersistedFlightStats` (= Telemetrie/FSM, nicht Identifier). v1.3-Vorschlag war falsch platziert.
+  - §6.1 v1.4-Korrektur Punkt 2: `simbrief_ofp_generated_at`-Wording von "ISO-String" auf "raw SimBrief `time_generated` string" — Parser macht heute keine Format-Annahme.
+  - §6.1 v1.4-Korrektur Punkt 3: Snippet nutzt `bid.flight_id.clone()` direkt (in `flight_start` ist `bid: Bid` nach `ok_or_else`, kein Option). Die `matching_bid.map(...)`-Form aus v1.3 stammte versehentlich aus dem Resume-/Adopt-Pfad.
+  - §10 v1.4-Korrektur Punkt 4: Notice-Text aus §8 1:1 in Tests-Beschreibung uebernommen — kein "Cockpit-Refresh nutzen" mehr (war noch aus v1.2 stehengeblieben).
+  - §10 NEU 4 Pflicht-Tests: `flight_start_persists_flight_id_before_prefile`, `resume_flight_preserves_flight_id`, `flight_refresh_simbrief_accepts_pushback`, `..._returns_phase_locked_in_takeoff_roll`. Phase-Gate-Boundary Pushback/TakeoffRoll explizit getestet.
+  - §9 vierte Entscheidungs-Tabelle fuer v1.4-Punkte.
+  - §3 Z.76 (Workflow-Schritt 10) klargestellt dass Cockpit-Refresh nur greift wenn der Bid noch existiert (= seltener pre-Prefile-Zustand).
