@@ -275,6 +275,14 @@ pub struct Profile {
     pub airline: Option<Airline>,
     #[serde(default)]
     pub rank: Option<Rank>,
+    /// v0.7.8 (v1.5): Pilot-personalisierter Callsign-Suffix
+    /// (z.B. "4TK"). Kombiniert mit `airline.icao` ergibt das
+    /// typische ATC-Callsign-Muster "CFG4TK" das viele VAs operativ
+    /// nutzen — abweichend von der Bid-`flight_number`-Form "CFG1504".
+    /// Spec docs/spec/ofp-refresh-simbrief-direct-v0.7.8.md §6.1.
+    /// Falls Pilot-Profile das Feld nicht hat: None, kein Schaden.
+    #[serde(default)]
+    pub callsign: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

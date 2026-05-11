@@ -632,6 +632,12 @@ struct AppState {
     /// AeroACARS-Session. Wenn kein Profile geladen → `None`, der
     /// Discord-Embed fällt auf "AeroACARS Pilot" zurück.
     cached_pilot: Mutex<Option<(String, String)>>,
+    /// v0.7.8 v1.5: gecachter Pilot-personalisierter Callsign-Suffix
+    /// (`Profile.callsign`, z.B. "4TK"). Wird beim Login + jedem
+    /// `phpvms_refresh_profile` aktualisiert. Von `flight_start` gelesen
+    /// und in `ActiveFlight.pilot_callsign` durchgereicht fuer die
+    /// SimBrief-direct-Match-Verifikation (Spec §6.1).
+    cached_pilot_callsign: Mutex<Option<String>>,
     /// v0.5.11: MQTT live-tracking publisher handle. Connects to
     /// the aeroacars-live VPS (live.kant.ovh) via auto-provisioning
     /// the first time AeroACARS sees a logged-in pilot's API key.
@@ -729,6 +735,16 @@ struct ActiveFlight {
     /// Fall als "legacy active flight, direct refresh unavailable"
     /// behandeln. Spec docs/spec/ofp-refresh-during-boarding.md §6.1.
     flight_id: String,
+    /// v0.7.8 v1.5: `Bid.flight.callsign` falls phpVMS das fuellt
+    /// (z.B. "CFG4TK"). Match-Kandidat 3 in
+    /// `ofp_matches_active_flight`. None wenn phpVMS-VA das Feld nicht
+    /// nutzt. Spec §6.1.2.
+    bid_callsign: Option<String>,
+    /// v0.7.8 v1.5: `Profile.callsign` des Piloten (= persoenliches
+    /// Suffix wie "4TK"). Match-Kandidaten 4 ("CFG4TK") + 5 ("4TK") in
+    /// `ofp_matches_active_flight`. None wenn pre-2024-phpVMS-Profile
+    /// ohne callsign-Feld. Spec §6.1.2.
+    pilot_callsign: Option<String>,
     started_at: DateTime<Utc>,
     /// ICAO of the operating airline (e.g. "DLH"). Combined with
     /// `flight_number` to produce the full callsign on the dashboard
@@ -818,6 +834,14 @@ struct PersistedFlight {
     /// deserialisierbar bleiben — Default ist `String::new()`.
     #[serde(default)]
     flight_id: String,
+    /// v0.7.8 v1.5: Bid.flight.callsign Persistenz fuer Resume.
+    /// serde(default) → None bei pre-v0.7.8-Resume-Files.
+    #[serde(default)]
+    bid_callsign: Option<String>,
+    /// v0.7.8 v1.5: Profile.callsign Persistenz fuer Resume.
+    /// serde(default) → None bei pre-v0.7.8-Resume-Files.
+    #[serde(default)]
+    pilot_callsign: Option<String>,
     started_at: DateTime<Utc>,
     #[serde(default)]
     airline_icao: String,
@@ -3948,6 +3972,9 @@ fn cache_pilot(state: &tauri::State<'_, AppState>, profile: &api_client::Profile
         *state.cached_pilot.lock().expect("cached_pilot lock") =
             Some((ident, profile.name.clone()));
     }
+    // v0.7.8 v1.5: Profile.callsign cachen fuer SimBrief-direct-Match.
+    *state.cached_pilot_callsign.lock().expect("cached_pilot_callsign lock") =
+        profile.callsign.clone().filter(|s| !s.trim().is_empty());
 }
 
 // ---- v0.5.11: MQTT live-tracking auto-provisioning --------------------
@@ -4557,6 +4584,8 @@ async fn flight_refresh_simbrief(
         active_arr,
         active_airline_icao,
         active_flight_number,
+        active_bid_callsign,
+        active_pilot_callsign,
     ) = {
         let guard = state.active_flight.lock().expect("active_flight lock");
         let flight = guard
@@ -4571,6 +4600,8 @@ async fn flight_refresh_simbrief(
             flight.arr_airport.clone(),
             flight.airline_icao.clone(),
             flight.flight_number.clone(),
+            flight.bid_callsign.clone(),
+            flight.pilot_callsign.clone(),
         )
     };
 
@@ -4606,6 +4637,8 @@ async fn flight_refresh_simbrief(
             &active_arr,
             &active_airline_icao,
             &active_flight_number,
+            active_bid_callsign.as_deref(),
+            active_pilot_callsign.as_deref(),
         ).await {
             DirectOutcome::Match { ofp } => {
                 // v0.7.8: Im Direct-Pfad ist `request_id` aus dem XML die
@@ -4753,6 +4786,8 @@ async fn try_simbrief_direct_with_match(
     active_arr: &str,
     active_airline_icao: &str,
     active_flight_number: &str,
+    active_bid_callsign: Option<&str>,
+    active_pilot_callsign: Option<&str>,
 ) -> DirectOutcome {
     match client
         .fetch_simbrief_direct(
@@ -4770,6 +4805,8 @@ async fn try_simbrief_direct_with_match(
                 active_arr,
                 active_airline_icao,
                 active_flight_number,
+                active_bid_callsign,
+                active_pilot_callsign,
             ) {
                 DirectOutcome::Match { ofp }
             } else {
@@ -5114,6 +5151,8 @@ fn save_active_flight(app: &AppHandle, flight: &ActiveFlight) {
         pirep_id: flight.pirep_id.clone(),
         bid_id: flight.bid_id,
         flight_id: flight.flight_id.clone(),
+        bid_callsign: flight.bid_callsign.clone(),
+        pilot_callsign: flight.pilot_callsign.clone(),
         started_at: flight.started_at,
         airline_icao: flight.airline_icao.clone(),
         airline_logo_url: flight.airline_logo_url.clone(),
@@ -5518,6 +5557,15 @@ async fn flight_adopt(
         flight_id: matching_bid
             .map(|b| b.flight_id.clone())
             .unwrap_or_default(),
+        // v0.7.8 v1.5: Match-Kandidaten — Adopt-Pfad, Bid kann weg sein.
+        bid_callsign: matching_bid
+            .and_then(|b| b.flight.callsign.clone())
+            .filter(|s| !s.trim().is_empty()),
+        pilot_callsign: state
+            .cached_pilot_callsign
+            .lock()
+            .expect("cached_pilot_callsign lock")
+            .clone(),
         // We don't know the original prefile time; treat "now" as the start
         // for our counters. The PIREP's actual times are intact server-side.
         started_at: Utc::now(),
@@ -5973,6 +6021,18 @@ async fn flight_start(
         // Bid-Snapshot ist daher zuverlaessig — egal was server-side
         // mit dem Bid passiert.
         flight_id: bid.flight_id.clone(),
+        // v0.7.8 v1.5: Bid.flight.callsign + cached Profile.callsign
+        // fuer SimBrief-direct Match-Kandidatenliste (Spec §6.1.2).
+        bid_callsign: bid
+            .flight
+            .callsign
+            .clone()
+            .filter(|s| !s.trim().is_empty()),
+        pilot_callsign: state
+            .cached_pilot_callsign
+            .lock()
+            .expect("cached_pilot_callsign lock")
+            .clone(),
         started_at: Utc::now(),
         airline_icao: bid
             .flight
@@ -6574,6 +6634,17 @@ async fn flight_start_manual(
         bid_id,
         // v0.7.7: flight_id aus Bid (Manual-Mode-Variante).
         flight_id: bid.flight_id.clone(),
+        // v0.7.8 v1.5: Match-Kandidaten (Manual-Mode-Variante).
+        bid_callsign: bid
+            .flight
+            .callsign
+            .clone()
+            .filter(|s| !s.trim().is_empty()),
+        pilot_callsign: state
+            .cached_pilot_callsign
+            .lock()
+            .expect("cached_pilot_callsign lock")
+            .clone(),
         started_at: Utc::now(),
         airline_icao: airline.map(|a| a.icao.clone()).unwrap_or_default(),
         airline_logo_url: airline.and_then(|a| a.logo.clone()).filter(|s| !s.is_empty()),
@@ -7165,17 +7236,73 @@ pub fn split_callsign(cs: &str) -> (String, String) {
     (prefix.to_string(), number.to_string())
 }
 
-/// v0.7.8: Verifiziert ob ein SimBrief-OFP zum aktiven AeroACARS-Flug passt.
-/// Match-Regeln:
-///   1. Origin/Destination ICAO: case-insensitive exakt
-///   2. Callsign: airline_icao + flight_number normalisiert ==
-///      SimBrief-Callsign normalisiert. SimBrief-side "number-only"
-///      (z.B. "100" statt "DLH100") wird gegen die aktive Number
-///      verglichen. Empty SimBrief-Callsign → toleranter Match (= dpt+arr
-///      genuegen).
+/// v0.7.8 v1.5: Baut eine Liste von Kandidaten-Callsigns auf gegen die
+/// der SimBrief-OFP-Callsign matchen darf. Spec §6.1.2.
 ///
-/// **Wichtig (Spec v1.1 P1-3):** KEIN blinder Suffix-Match — sonst wuerde
-/// "DLH1100" mit "100" matchen weil 100 Suffix von 1100 ist.
+/// Real-World-Beispiel (GSG):
+///   - airline_icao = "CFG", flight_number = "1504" (Bid)
+///   - bid_callsign = Some("CFG4TK") oder None
+///   - pilot_callsign = Some("4TK") (aus Profile)
+///
+/// Kandidaten:
+///   1. "CFG1504"  (airline + flight_number)
+///   2. "1504"     (number-only)
+///   3. "CFG4TK"   (bid.flight.callsign wenn vorhanden)
+///   4. "CFG4TK"   (airline + pilot_callsign)
+///   5. "4TK"      (pilot_callsign allein)
+///
+/// SimBrief-Callsign muss gegen EINEN davon exakt matchen (nach
+/// Normalisierung). Leere Strings werden ausgefiltert.
+pub fn build_candidate_callsigns(
+    airline_icao: &str,
+    flight_number: &str,
+    bid_callsign: Option<&str>,
+    pilot_callsign: Option<&str>,
+) -> Vec<String> {
+    let airline = airline_icao.trim().to_ascii_uppercase();
+    let flight_n = flight_number.trim();
+    let mut candidates: Vec<String> = Vec::new();
+
+    // (1) airline_icao + flight_number
+    if !airline.is_empty() && !flight_n.is_empty() {
+        candidates.push(normalize_callsign(&format!("{}{}", airline, flight_n)));
+    }
+    // (2) flight_number allein (number-only-mode)
+    if !flight_n.is_empty() {
+        candidates.push(normalize_callsign(flight_n));
+    }
+    // (3) v1.5: bid.flight.callsign direkt
+    if let Some(cs) = bid_callsign.filter(|s| !s.trim().is_empty()) {
+        candidates.push(normalize_callsign(cs));
+    }
+    // (4) v1.5: airline + pilot_callsign
+    if let Some(pc) = pilot_callsign.filter(|s| !s.trim().is_empty()) {
+        if !airline.is_empty() {
+            candidates.push(normalize_callsign(&format!("{}{}", airline, pc)));
+        }
+        // (5) v1.5: pilot_callsign allein
+        candidates.push(normalize_callsign(pc));
+    }
+
+    // Dedupe + Leere entfernen.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    candidates
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .filter(|s| seen.insert(s.clone()))
+        .collect()
+}
+
+/// v0.7.8: Verifiziert ob ein SimBrief-OFP zum aktiven AeroACARS-Flug passt.
+/// Match-Regeln (v1.5 — Kandidaten-Liste statt strenger 1:1-Vergleich):
+///   1. Origin/Destination ICAO: case-insensitive exakt
+///   2. Callsign: SimBrief-Callsign (normalisiert) muss gegen EINEN von
+///      mehreren validen Kandidaten exakt matchen. Siehe
+///      `build_candidate_callsigns` fuer die volle Liste.
+///   3. Empty SimBrief-Callsign → toleranter Match (= dpt+arr genuegen).
+///
+/// **Wichtig (Spec v1.1 P1-3):** KEIN blinder Suffix-Match — Kandidaten
+/// muessen exakt sein. "DLH1100" matched NICHT mit Kandidat "100".
 ///
 /// Spec docs/spec/ofp-refresh-simbrief-direct-v0.7.8.md §6.1.
 pub fn ofp_matches_active_flight(
@@ -7186,6 +7313,8 @@ pub fn ofp_matches_active_flight(
     active_arr: &str,
     active_airline_icao: &str,
     active_flight_number: &str,
+    active_bid_callsign: Option<&str>,
+    active_pilot_callsign: Option<&str>,
 ) -> bool {
     // 1. Origin / Destination MUESSEN matchen (case-insensitive).
     let dpt_ok = ofp_origin.trim().eq_ignore_ascii_case(active_dpt.trim());
@@ -7194,34 +7323,40 @@ pub fn ofp_matches_active_flight(
         return false;
     }
 
-    // 2. Callsign-Match: aktive Form bauen aus airline_icao + flight_number.
-    let active_full = format!(
-        "{}{}",
-        active_airline_icao.trim(),
-        active_flight_number.trim(),
-    );
-    let active_norm = normalize_callsign(&active_full);
-    let (_, active_number) = split_callsign(&active_norm);
-
     let simbrief_norm = normalize_callsign(ofp_callsign);
-
     if simbrief_norm.is_empty() {
         // SimBrief liefert kein Callsign → toleranter Mode: dpt+arr genuegen.
         // Real selten — SimBrief-OFP traegt typisch immer einen Callsign.
         return true;
     }
 
+    // 2. v1.5: Kandidaten-Liste bauen aus allen verfuegbaren Quellen.
+    let candidates = build_candidate_callsigns(
+        active_airline_icao,
+        active_flight_number,
+        active_bid_callsign,
+        active_pilot_callsign,
+    );
+
+    // 3. Exakter Match gegen Kandidat (= verhindert "DLH1100 vs 100"-
+    //    False-Positive). split_callsign-Number-Vergleich nur fuer den
+    //    Number-only-Fall (SimBrief liefert "1504" oder "4TK" ohne
+    //    Airline-Prefix, dann werden gegen die number-Part-Kandidaten
+    //    verglichen).
     let (simbrief_prefix, simbrief_number) = split_callsign(&simbrief_norm);
 
     if simbrief_prefix.is_empty() {
-        // SimBrief hat NUR die Number (z.B. "100") → mit aktiver Number
-        // vergleichen. Verhindert "DLH1100"-False-Positive aus v1.0.
-        return simbrief_number == active_number;
+        // SimBrief number-only: vergleiche gegen number-Parts aller
+        // Kandidaten. "1504" matcht "CFG1504" (number "1504"), "4TK"
+        // matcht "CFG4TK" (number "4TK").
+        return candidates.iter().any(|c| {
+            let (_, c_number) = split_callsign(c);
+            !c_number.is_empty() && c_number == simbrief_number
+        });
     }
 
-    // SimBrief hat full callsign mit Prefix → exakter Vergleich mit
-    // konstruiertem Aktiv-Callsign.
-    simbrief_norm == active_norm
+    // SimBrief mit Prefix: exakter Match gegen Kandidaten-Liste.
+    candidates.contains(&simbrief_norm)
 }
 
 /// v0.7.1 Helper: actual_trip_burn = takeoff_fuel - landing_fuel
@@ -16658,6 +16793,11 @@ async fn try_resume_flight(
         // serde(default)) — v0.7.8 muss diesen Fall als "legacy active
         // flight, direct refresh unavailable" behandeln.
         flight_id: persisted.flight_id.clone(),
+        // v0.7.8 v1.5: Callsign-Felder aus PersistedFlight. None bei
+        // pre-v0.7.8-Resume — Match faellt auf airline+flight_number
+        // zurueck.
+        bid_callsign: persisted.bid_callsign.clone(),
+        pilot_callsign: persisted.pilot_callsign.clone(),
         started_at: persisted.started_at,
         airline_icao,
         // Resume-Pfad: Airline-Logo-URL aus der persisted Bid wieder
@@ -18525,6 +18665,8 @@ mod v0_7_7_ofp_refresh_tests {
             pirep_id: "abc123".to_string(),
             bid_id: 42,
             flight_id: "1234567".to_string(),
+            bid_callsign: None,
+            pilot_callsign: None,
             started_at: Utc::now(),
             airline_icao: "DLH".to_string(),
             airline_logo_url: None,
@@ -18667,6 +18809,7 @@ mod v0_7_8_simbrief_direct_match_tests {
         assert!(ofp_matches_active_flight(
             "EDDM", "LFPG", "DLH100",
             "EDDM", "LFPG", "DLH", "100",
+            None, None,
         ));
     }
 
@@ -18676,6 +18819,7 @@ mod v0_7_8_simbrief_direct_match_tests {
         assert!(ofp_matches_active_flight(
             "EDDM", "LFPG", "100",
             "EDDM", "LFPG", "DLH", "100",
+            None, None,
         ));
     }
 
@@ -18684,16 +18828,19 @@ mod v0_7_8_simbrief_direct_match_tests {
         assert!(ofp_matches_active_flight(
             "eddm", "lfpg", "DLH100",
             "EDDM", "LFPG", "DLH", "100",
+            None, None,
         ));
         assert!(ofp_matches_active_flight(
             "EDDM", "LFPG", "DLH100",
             "eddm", "LfPg", "DLH", "100",
+            None, None,
         ));
     }
 
     /// KRITISCHER v1.1-Regression-Test: "DLH1100" darf NICHT mit "100"
     /// matchen weil die Numbers verschieden sind (1100 != 100).
-    /// v1.0-Suffix-Match haette das faelschlich als Match akzeptiert.
+    /// v1.5: bleibt korrekt — Kandidatenliste enthaelt "DLH100"/"100"
+    /// aber NICHT "1100".
     #[test]
     fn ofp_rejects_when_callsign_numbers_overlap_but_differ() {
         // SimBrief-OFP = "DLH1100" fuer einen anderen Flug
@@ -18701,16 +18848,19 @@ mod v0_7_8_simbrief_direct_match_tests {
         assert!(!ofp_matches_active_flight(
             "EDDM", "LFPG", "DLH1100",
             "EDDM", "LFPG", "DLH", "100",
+            None, None,
         ));
         // Auch umgekehrt
         assert!(!ofp_matches_active_flight(
             "EDDM", "LFPG", "DLH100",
             "EDDM", "LFPG", "DLH", "1100",
+            None, None,
         ));
         // Und auch wenn SimBrief number-only liefert
         assert!(!ofp_matches_active_flight(
             "EDDM", "LFPG", "1100",
             "EDDM", "LFPG", "DLH", "100",
+            None, None,
         ));
     }
 
@@ -18719,6 +18869,7 @@ mod v0_7_8_simbrief_direct_match_tests {
         assert!(!ofp_matches_active_flight(
             "EDDM", "LFPG", "AFR300",
             "EDDM", "LFPG", "DLH", "100",
+            None, None,
         ));
     }
 
@@ -18727,6 +18878,7 @@ mod v0_7_8_simbrief_direct_match_tests {
         assert!(!ofp_matches_active_flight(
             "EDDF", "LFPG", "DLH100",
             "EDDM", "LFPG", "DLH", "100",
+            None, None,
         ));
     }
 
@@ -18735,6 +18887,7 @@ mod v0_7_8_simbrief_direct_match_tests {
         assert!(!ofp_matches_active_flight(
             "EDDM", "LFRS", "DLH100",
             "EDDM", "LFPG", "DLH", "100",
+            None, None,
         ));
     }
 
@@ -18744,6 +18897,7 @@ mod v0_7_8_simbrief_direct_match_tests {
         assert!(ofp_matches_active_flight(
             "EDDM", "LFPG", "",
             "EDDM", "LFPG", "DLH", "100",
+            None, None,
         ));
     }
 
@@ -18754,6 +18908,7 @@ mod v0_7_8_simbrief_direct_match_tests {
         assert!(ofp_matches_active_flight(
             "EDDM", "LFPG", "DLH100",
             "EDDM", "LFPG", "DLH", "-100",  // Pilot hat Bindestrich getippt
+            None, None,
         ));
     }
 
@@ -18763,7 +18918,110 @@ mod v0_7_8_simbrief_direct_match_tests {
         assert!(ofp_matches_active_flight(
             "EDDM", "LFPG", "DLH 100",
             "EDDM", "LFPG", "DLH", "100",
+            None, None,
         ));
+    }
+
+    // ─── v1.5 NEU: Pilot-Callsign-Kandidaten (CFG4TK-Case) ─────────────
+    // Spec §6.1.2 — Real-Pilot-Beispiel von Thomas/GSG.
+
+    /// CRITICAL v1.5: Pilot mit Bid CFG1504 und persoenlichem Callsign "4TK"
+    /// generiert OFP "CFG4TK" → muss matchen via Kandidat 4 (airline +
+    /// pilot_callsign).
+    #[test]
+    fn ofp_matches_pilot_callsign_with_airline_prefix() {
+        assert!(ofp_matches_active_flight(
+            "EDDF", "GCTS", "CFG4TK",
+            "EDDF", "GCTS", "CFG", "1504",
+            None,                  // bid_callsign leer
+            Some("4TK"),           // pilot_callsign aus Profile
+        ));
+    }
+
+    /// CRITICAL v1.5: SimBrief liefert nur "4TK" (number-only-mode) →
+    /// muss matchen via Kandidat 5 (pilot_callsign allein).
+    #[test]
+    fn ofp_matches_pilot_callsign_number_only() {
+        assert!(ofp_matches_active_flight(
+            "EDDF", "GCTS", "4TK",
+            "EDDF", "GCTS", "CFG", "1504",
+            None,
+            Some("4TK"),
+        ));
+    }
+
+    /// v1.5: phpVMS-Bid.flight.callsign = "CFG4TK" → muss matchen
+    /// via Kandidat 3 (bid.flight.callsign direkt). Pilot_callsign-Quelle
+    /// optional/leer (= manche VAs nutzen die nicht).
+    #[test]
+    fn ofp_matches_bid_callsign_directly() {
+        assert!(ofp_matches_active_flight(
+            "EDDF", "GCTS", "CFG4TK",
+            "EDDF", "GCTS", "CFG", "1504",
+            Some("CFG4TK"),        // bid.flight.callsign befuellt
+            None,                  // pilot_callsign leer
+        ));
+    }
+
+    /// v1.5: SimBrief-OFP fuer einen ANDEREN Pilot-Flug (CFG mit anderer
+    /// Number) darf trotz Pilot-Callsign nicht matchen — Sicherheits-Anker.
+    #[test]
+    fn ofp_rejects_other_flight_even_with_pilot_callsign() {
+        // Pilot fliegt CFG1504, hat "4TK"-Callsign. SimBrief-OFP
+        // gehoert zu CFG2000 (anderer Flug, gleiche Airline, KEIN
+        // 4TK-Callsign) → MISMATCH.
+        assert!(!ofp_matches_active_flight(
+            "EDDF", "GCTS", "CFG2000",
+            "EDDF", "GCTS", "CFG", "1504",
+            None,
+            Some("4TK"),
+        ));
+    }
+
+    /// v1.5: Andere Airline mit zufaellig gleichem Suffix darf nicht matchen.
+    #[test]
+    fn ofp_rejects_other_airline_with_same_pilot_suffix() {
+        // Pilot "4TK" bei CFG, aber SimBrief-OFP fuer Lufthansa mit "4TK" →
+        // MISMATCH weil airline-prefix in den Kandidaten "CFG4TK"/"4TK"
+        // ist, NICHT "DLH4TK".
+        assert!(!ofp_matches_active_flight(
+            "EDDF", "GCTS", "DLH4TK",
+            "EDDF", "GCTS", "CFG", "1504",
+            None,
+            Some("4TK"),
+        ));
+    }
+
+    /// v1.5: build_candidate_callsigns-Test direkt.
+    #[test]
+    fn build_candidate_callsigns_full_set() {
+        let candidates = build_candidate_callsigns(
+            "CFG",
+            "1504",
+            Some("CFG4TK"),
+            Some("4TK"),
+        );
+        // Sollte enthalten: CFG1504, 1504, CFG4TK (Kand 3+4 dedupe), 4TK
+        assert!(candidates.contains(&"CFG1504".to_string()));
+        assert!(candidates.contains(&"1504".to_string()));
+        assert!(candidates.contains(&"CFG4TK".to_string()));
+        assert!(candidates.contains(&"4TK".to_string()));
+        // Dedupe: "CFG4TK" sollte nur einmal vorkommen
+        assert_eq!(
+            candidates.iter().filter(|c| *c == "CFG4TK").count(),
+            1,
+            "candidates must dedupe duplicate forms",
+        );
+    }
+
+    /// v1.5: Bei leerer Pilot-Callsign-Quelle faellt die Liste auf
+    /// v1.1-Kandidaten (airline+flight_number, flight_number) zurueck.
+    #[test]
+    fn build_candidate_callsigns_v1_1_fallback() {
+        let candidates = build_candidate_callsigns("CFG", "1504", None, None);
+        assert!(candidates.contains(&"CFG1504".to_string()));
+        assert!(candidates.contains(&"1504".to_string()));
+        assert_eq!(candidates.len(), 2, "no pilot callsign → only 2 candidates");
     }
 }
 
