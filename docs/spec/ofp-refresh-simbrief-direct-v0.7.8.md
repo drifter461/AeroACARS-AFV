@@ -1,6 +1,6 @@
 # OFP-Refresh SimBrief-direct (v0.7.8 Datenpfad)
 
-**Status:** Draft v1.0 for QS Review
+**Status:** Draft v1.1 nach QS-Review (5 Findings + Identifier-Klaerung)
 **Stand:** 2026-05-11
 **Trigger:** v0.7.7 (`608630e` auf main) loest nur die UX-Schicht. W5 (phpVMS-7 entfernt Bid nach Prefile) macht den pointer-basierten Daten-Pfad im Real-Boarding wirkungslos. Pilot kriegt eine ehrliche Notice — aber keine neuen Plan-Werte. Dieser Spec dokumentiert den **echten Daten-Pfad** der v0.7.7 abloest und beide Schichten **in einem Release** ausgeliefert werden.
 
@@ -69,61 +69,194 @@ Mismatch → klare Notice mit Erklaerung
   - Network-Error → Internet weg
   - Parse-Fehler → unerwartetes XML
 
-**Verwendete OFP-XML-Felder fuer Flight-Match** (alle bereits im Parser, `api-client/lib.rs:1492+`):
+**Verwendete OFP-XML-Felder** (Parser-Stand `api-client/lib.rs:1492+`):
 - `<origin><icao_code>` → `ofp.ofp_origin_icao` (existing)
 - `<destination><icao_code>` → `ofp.ofp_destination_icao` (existing)
 - `<atc><callsign>` → `ofp.ofp_flight_number` (existing, callsign)
+- `<params><time_generated>` → `ofp.ofp_generated_at` (existing)
 
-Parser muss NICHT erweitert werden — alle benoetigten Felder sind schon vorhanden.
+**v1.1-Korrektur Punkt 1 (P1):** Parser MUSS erweitert werden um `<params><request_id>`:
+
+```rust
+// api-client/lib.rs: SimBriefOfp struct
+pub struct SimBriefOfp {
+    // ... bestehende Felder ...
+    /// v0.7.8: SimBrief-OFP-ID aus <params><request_id>. Aendert sich
+    /// bei jeder Re-Generation auf simbrief.com. Brauchen wir fuer
+    /// den changed-Flag-Vergleich (`current_ofp_id` im
+    /// `SimBriefRefreshResult`) und um die `simbrief_ofp_id` in
+    /// `FlightStats` zu setzen.
+    /// Leerer String wenn das Tag fehlt (sollte nicht passieren).
+    pub ofp_id: String,
+}
+```
+
+Parser-Erweiterung in `parse_simbrief_ofp()`:
+
+```rust
+let ofp_id = extract_tag(xml, "params")
+    .and_then(|inner| extract_tag(inner, "request_id"))
+    .map(|s| s.trim().to_string())
+    .unwrap_or_default();
+```
+
+**Wichtig:** Spec v1.0 sagte "Parser muss NICHT erweitert werden" — das war **falsch**. Ohne `request_id` haetten wir keinen Vergleichs-Anker fuer den changed-Flag.
+
+**v1.1-Korrektur Punkt 5 (P2 — SimBrief-Failure-Codes):** Laut Navigraph Developer Portal (`developers.navigraph.com/docs/simbrief/fetching-ofp-data`) liefert SimBrief bei invalid user / fetch-error **HTTP 400 mit kleinem XML-Error-Body**, nicht primaer 404 oder leerer Response. Failure-Mode-Liste daher korrigiert:
+
+| HTTP Status | Body | Bedeutung | Handling |
+|---|---|---|---|
+| 200 + valid OFP XML | OFP-Plan | Erfolg | parse + return |
+| 400 + small XML error | `<OFP><fetch><status>Error: ...</status></fetch></OFP>` | invalid user / fetch error | spezifischer "user_not_found"-Error |
+| 5xx | (variabel) | SimBrief offline / maintenance | "simbrief_unavailable"-Error |
+| Network-Error | — | Internet weg | "network_error" |
+| 200 + Parse-Fehler | irgendwas was nicht parsed | Unerwartetes XML | "ofp_parse_failed" |
+
+Diese Differenzierung speist in §5 Pfad-Auswahl (Fehler-Priorisierung) und §8 Notice-Tabelle ein.
 
 ---
 
 ## 4. Settings-Architektur
 
-### 4.1 Storage-Modell
+### 4.1 SB-Identifier: Username oder User-ID? (v1.1 Klaerung)
+
+**SimBrief unterstuetzt beide Identifier-Typen** (Quelle: Navigraph Developer Portal):
+- `xml.fetcher.php?username={username}` — z.B. "thomaskant"
+- `xml.fetcher.php?userid={numeric_id}` — z.B. "612345"
+
+Eigenschaften im Vergleich:
+
+| Aspekt | Username | User-ID |
+|---|---|---|
+| Wo zu finden | SimBrief Profile-URL (sichtbar) | SimBrief Account Settings (versteckter) |
+| Stabilitaet | aenderbar (selten, aber moeglich) | unveraenderlich |
+| Lesbarkeit fuer Pilot | hoch ("thomaskant") | gering ("612345") |
+| Robustheit fuer Tool | gut | besser |
+| URL-Encoding noetig | ja (kann Sonderzeichen) | nein (nur Ziffern) |
+
+**Entscheidung v1.1:** Zwei separate Felder. Pilot muss **mindestens eines** ausfuellen. Wenn beide gefuellt → User-ID hat Vorrang (robuster).
+
+```rust
+// AppState — beides separat persistiert
+pub struct SimBriefSettings {
+    pub username: Option<String>,  // z.B. "thomaskant"
+    pub user_id:  Option<String>,  // z.B. "612345" (numerisch als String)
+}
+```
+
+URL-Encoding: `urlencoding::encode(username)` fuer den Username-Query-Param — siehe `api-client/lib.rs:1152` (bestehendes Pattern `urlencoding_escape`).
+
+### 4.2 Storage-Modell
 
 **Frontend (React/TS):**
-- localStorage-Key `simbrief_username` (analog `auto_file`, `debug_mode`, `auto_start`)
-- Settings-Panel: Text-Input + Hint "Optional — fuer OFP-Refresh ohne PAX Studio Sync"
-- On mount + on save: `invoke("set_simbrief_username", { value })`
+- 2 localStorage-Keys: `simbrief_username` + `simbrief_user_id`
+- Settings-Panel: 2 Text-Inputs + "Prüfen"-Button (siehe §4.4)
 
 **Backend (Rust):**
-- `AppState.simbrief_username: Mutex<Option<String>>` (analog zu `airports`-Cache, nicht persistent disk-side)
+- `AppState.simbrief_settings: Mutex<SimBriefSettings>`
 - Tauri-Commands:
-  - `get_simbrief_username() -> Option<String>`
-  - `set_simbrief_username(value: Option<String>) -> Result<(), UiError>`
-- Persistenz: rein Frontend (localStorage). Bei App-Restart wird der Wert vom Frontend zurueck-gepusht (gleicher Mechanismus wie `set_minimize_to_tray`).
+  - `get_simbrief_settings() -> SimBriefSettings`
+  - `set_simbrief_settings(username: Option<String>, user_id: Option<String>) -> Result<(), UiError>`
+- Persistenz: rein Frontend (localStorage). Beim App-Start wird zurueck-gepusht.
 
-**Rationale (nicht disk-side persistieren in Backend):**
+**v1.1-Korrektur Punkt 4 (P2 — App-root Sync):** Spec v1.0 sagte "On mount + on save invoken". Das ist **nicht ausreichend** — wenn der Pilot Settings nach App-Restart nicht oeffnet, bleibt das Backend leer und der Refresh nutzt unverschuldet den Pointer-Pfad.
+
+Korrektur: **`App.tsx` lest localStorage beim Login (oder app-mount) einmal und pusht zurueck**. Pattern:
+
+```tsx
+// App.tsx — direkt nach erfolgreichem Login
+useEffect(() => {
+  if (status.kind !== "loggedIn") return;
+  const username = localStorage.getItem("simbrief_username") ?? null;
+  const userId = localStorage.getItem("simbrief_user_id") ?? null;
+  if (username || userId) {
+    void invoke("set_simbrief_settings", {
+      username: username || null,
+      userId: userId || null,
+    }).catch(() => null);
+  }
+}, [status.kind]);
+```
+
+Damit ist Backend sofort nach Login synchron mit dem letzten gespeicherten Wert — auch wenn Pilot Settings nie oeffnet.
+
+### 4.3 Rationale (nicht disk-side persistieren in Backend)
 - Konsistenz mit bestehenden Settings (`auto_file` etc.)
-- Pro VA-Setup: nutzt jeder Pilot eigenen Username — keine Inter-Pilot-Sharing-Logik noetig
-- SimBrief-Username ist semi-public (steht im Profile-URL) — keine besondere Geheimhaltung noetig (anders als Passwords). Wuerde aber dennoch nicht in `tauri-store` mit klartext-Logs landen.
+- Pro VA-Setup: nutzt jeder Pilot eigene Identifier — keine Inter-Pilot-Sharing-Logik noetig
+- SimBrief-Identifier sind semi-public (Username im Profile-URL) — keine besondere Geheimhaltung noetig
+- Persistenz via localStorage vermeidet `tauri-store`-Klartext-Logs
 
-### 4.2 Settings-UI
+### 4.4 Settings-UI (eigene Section, v1.1 Entscheidung)
 
-In `SettingsPanel.tsx` neuer Block:
+In `SettingsPanel.tsx` **eigene Section** "SimBrief Integration" (= nicht unter "Allgemein"):
 
 ```tsx
 <section className="settings-section">
   <h3>{t("settings.simbrief.title")}</h3>
-  <label>
-    {t("settings.simbrief.username_label")}
+  <p className="settings-hint settings-hint--intro">
+    {t("settings.simbrief.intro")}
+  </p>
+
+  <label className="settings-row">
+    <span>{t("settings.simbrief.username_label")}</span>
     <input
       type="text"
-      value={simbriefUsername}
-      onChange={(e) => setSimbriefUsername(e.target.value)}
-      onBlur={() => persistSimbriefUsername(simbriefUsername.trim())}
+      value={username}
+      onChange={(e) => setUsername(e.target.value)}
+      onBlur={() => persist({ username: username.trim() || null, user_id: userId.trim() || null })}
       placeholder="z.B. thomaskant"
       autoComplete="off"
       spellCheck={false}
     />
+    <small>{t("settings.simbrief.username_hint")}</small>
   </label>
-  <p className="settings-hint">{t("settings.simbrief.hint")}</p>
+
+  <label className="settings-row">
+    <span>{t("settings.simbrief.userid_label")}</span>
+    <input
+      type="text"
+      inputMode="numeric"
+      value={userId}
+      onChange={(e) => setUserId(e.target.value.replace(/[^0-9]/g, ""))}
+      onBlur={() => persist({ username: username.trim() || null, user_id: userId.trim() || null })}
+      placeholder="z.B. 612345"
+      autoComplete="off"
+      spellCheck={false}
+    />
+    <small>{t("settings.simbrief.userid_hint")}</small>
+  </label>
+
+  <div className="settings-row settings-row--actions">
+    <button
+      type="button"
+      onClick={handleVerify}
+      disabled={verifying || (!username.trim() && !userId.trim())}
+    >
+      {verifying ? "…" : t("settings.simbrief.verify_button")}
+    </button>
+    {verifyStatus && (
+      <span className={`settings-verify-status settings-verify-status--${verifyStatus.tone}`}>
+        {verifyStatus.icon} {verifyStatus.text}
+      </span>
+    )}
+  </div>
 </section>
 ```
 
-Hint-Text (DE):
-> "Wenn dein SimBrief-Username hier eingetragen ist, kann AeroACARS einen neu generierten OFP direkt von simbrief.com holen — auch wenn der Bid in phpVMS schon entfernt wurde (= regulaerer Zustand waehrend Boarding). Ohne Username bleibt der OFP-Refresh auf den phpVMS-Pointer-Pfad beschraenkt, der nach Prefile typisch nicht mehr greift."
+**v1.1 Username-Validierung (P2-Entscheidung — kein hartes onBlur-Fetch):**
+- "Prüfen"-Button macht den Test-Fetch (= ein expliziter Pilot-Klick statt jedem Tippen)
+- Status-Anzeige darunter: `✓ Username 'thomaskant' gefunden` oder `⚠ Kein Profil`
+- onBlur persistiert nur (kein Netz-Request)
+- Persist beim Tippen ist OK — Verbindungs-Test ist separate Aktion
+
+Hint-Texte (DE):
+- `settings.simbrief.title`: "SimBrief Integration"
+- `settings.simbrief.intro`: "Wenn dein SimBrief-Identifier hier eingetragen ist, kann AeroACARS einen neu generierten OFP direkt von simbrief.com holen — auch wenn der Bid in phpVMS schon entfernt wurde (regulaerer Zustand waehrend Boarding). Du kannst Username oder User-ID nutzen (oder beides). User-ID ist robuster, Username einfacher zu finden."
+- `settings.simbrief.username_label`: "SimBrief-Username"
+- `settings.simbrief.username_hint`: "Sichtbar in simbrief.com/dashboard/?username=..."
+- `settings.simbrief.userid_label`: "SimBrief-User-ID (optional)"
+- `settings.simbrief.userid_hint`: "Aus SimBrief Account Settings, rein numerisch"
+- `settings.simbrief.verify_button`: "Verbindung pruefen"
 
 ---
 
@@ -196,51 +329,187 @@ async fn flight_refresh_simbrief(...) -> Result<SimBriefRefreshResult, UiError> 
 ```
 
 **Wichtig:**
-- **Username gesetzt + Match-OK** → SimBrief-direct gewinnt, Pointer-Pfad wird NICHT versucht
-- **Username gesetzt + Mismatch** → klare Fehler-Notice (kein Fallback zu Pointer — Pilot soll Bewusstsein darueber haben)
-- **Username gesetzt + SimBrief offline/unbekannt** → SOFT-Fallback zu Pointer-Pfad mit Warnung im Activity-Log
-- **Kein Username** → bestehender Pointer-Pfad (v0.7.7 Verhalten) — Backward-Compat
+- **Identifier gesetzt + Match-OK** → SimBrief-direct gewinnt, Pointer-Pfad wird NICHT versucht
+- **Identifier gesetzt + Mismatch** → klare Fehler-Notice (HARD-Block per v1.1 Entscheidung, kein "trotzdem ueberschreiben")
+- **Identifier gesetzt + SimBrief offline/unbekannt** → SOFT-Fallback zu Pointer-Pfad. **Direct-Fehler muss gemerkt werden** und in Notice priorisiert werden falls Pointer auch scheitert (v1.1 P1-2-Korrektur).
+- **Kein Identifier** → bestehender Pointer-Pfad (v0.7.7 Verhalten) — Backward-Compat
+
+### 5.1 v1.1 P1-2 Korrektur: Fehler-Priorisierung im Fallback
+
+Spec v1.0-Pseudocode hatte `fetch_via_pointer_path(...)?` — bei Bid-weg-Szenario hat der den Direct-Fehler ueberschrieben mit `bid_not_found`, sodass der Pilot nicht wusste dass sein **Username falsch konfiguriert** war.
+
+Korrektur — Direct-Fehler explizit tracken und composite Notice ausgeben:
+
+```rust
+async fn flight_refresh_simbrief(...) -> Result<SimBriefRefreshResult, UiError> {
+    // ... Phase-Gate + Snapshot wie v1.0 ...
+
+    let settings = state.simbrief_settings.lock().clone();
+    let has_identifier = settings.username.is_some() || settings.user_id.is_some();
+
+    if has_identifier {
+        // Pfad A: SimBrief-direct
+        match fetch_and_verify_simbrief_direct(
+            &settings, &dpt, &arr, &airline_icao, &flight_number,
+        ).await {
+            Ok(DirectOutcome::Match { sb_id, ofp }) => {
+                // Erfolg → wir verlassen den Direct-Pfad mit dem Match.
+                proceed_with_ofp(sb_id, ofp).await
+            }
+            Ok(DirectOutcome::Mismatch { simbrief_origin, simbrief_dest, simbrief_callsign }) => {
+                // HARD-Block per v1.1-Entscheidung — kein Fallback.
+                Err(UiError::new(
+                    "ofp_does_not_match_active_flight",
+                    format!("Latest SimBrief OFP belongs to {} → {} ({}). \
+                             Please regenerate the OFP for the current flight on simbrief.com.",
+                             simbrief_origin, simbrief_dest, simbrief_callsign),
+                ))
+            }
+            Err(direct_err) => {
+                // SOFT-Fallback zu Pointer-Pfad, ABER Direct-Error merken.
+                tracing::warn!(error = ?direct_err, "SimBrief-direct fetch failed, attempting pointer fallback");
+                match fetch_via_pointer_path(client, bid_id).await {
+                    Ok((sb_id, ofp)) => proceed_with_ofp(sb_id, ofp).await,
+                    Err(pointer_err) => {
+                        // Beide Pfade tot — composite Notice:
+                        // Direct-Fehler priorisieren (= actionable fuer Pilot).
+                        Err(compose_failure(direct_err, pointer_err))
+                    }
+                }
+            }
+        }
+    } else {
+        // Pfad B: kein Identifier → nur Pointer
+        let (sb_id, ofp) = fetch_via_pointer_path(client, bid_id).await?;
+        proceed_with_ofp(sb_id, ofp).await
+    }
+}
+
+/// v1.1: composite Failure mit Direct-Priorisierung. Pilot soll wissen
+/// wenn die Direct-Konfiguration (Username/UserID) der Grund ist, dass
+/// Refresh nicht klappt — nicht nur "Bid weg" als irrefuehrender
+/// Sekundaer-Effekt.
+fn compose_failure(direct: SimBriefDirectError, pointer: UiError) -> UiError {
+    match direct {
+        SimBriefDirectError::UserNotFound => UiError::new(
+            "simbrief_user_not_found",
+            "SimBrief-Username/UserID nicht gefunden. Pruefe Settings → SimBrief Integration.",
+        ),
+        SimBriefDirectError::Unavailable => UiError::new(
+            "simbrief_unavailable_and_bid_gone",
+            "SimBrief gerade nicht erreichbar UND Bid ist nach Prefile weg. \
+             Versuche es in ein paar Minuten erneut.",
+        ),
+        SimBriefDirectError::ParseFailed | SimBriefDirectError::Network => UiError::new(
+            "simbrief_direct_failed",
+            format!("SimBrief-direct schlug fehl ({:?}). Pointer-Pfad zusaetzlich: {}",
+                    direct, pointer.message),
+        ),
+    }
+}
+```
+
+Damit ist die Notice-Hierarchie:
+1. Direct-Fehler ist primaer → "Username falsch" beats "Bid weg"
+2. Pilot weiss sofort wo das Problem sitzt (Settings vs server-side)
 
 ---
 
 ## 6. Flight-Match-Verifikation
 
-### 6.1 Match-Regeln
+### 6.1 Match-Regeln (v1.1 P1-3 verschaerft)
+
+**Problem mit v1.0 Suffix-Match:** `DLH1100` endet auch auf `100` → false-positive Match wenn Pilot zwischendurch einen anderen Flug (mit ueberlapenden Suffix-Ziffern) regeneriert hat.
+
+**v1.1 Loesung: Normalisierter Airline+Number-Vergleich.**
+
+AeroACARS hat `airline_icao` UND `flight_number` als getrennte Felder in `ActiveFlight` — das ist die saubere Quelle. Wir konstruieren beide Seiten zur Vergleichs-Form:
 
 ```rust
+/// v1.1: Normalisiert Callsign-Strings auf ein vergleichbares Format.
+/// Entfernt Whitespace + Bindestrich + Underscore, uppercase.
+/// "DLH-100" → "DLH100", "GSG 100" → "GSG100", "dlh100" → "DLH100".
+fn normalize_callsign(s: &str) -> String {
+    s.chars()
+        .filter(|c| !c.is_whitespace() && *c != '-' && *c != '_')
+        .collect::<String>()
+        .to_ascii_uppercase()
+}
+
+/// v1.1: Trennt eine normalisierte Callsign-Form in Airline-Prefix (alpha)
+/// und Flight-Number (numeric/alphanumeric Rest). Liefert (prefix, number).
+/// "DLH100" → ("DLH", "100"), "100" → ("", "100"), "GSG100A" → ("GSG", "100A").
+fn split_callsign(cs: &str) -> (String, String) {
+    let split_at = cs.find(|c: char| c.is_ascii_digit()).unwrap_or(cs.len());
+    let (prefix, number) = cs.split_at(split_at);
+    (prefix.to_string(), number.to_string())
+}
+
 fn ofp_matches_active_flight(
     ofp: &SimBriefOfp,
     active_dpt: &str,
     active_arr: &str,
+    active_airline_icao: &str,
     active_flight_number: &str,
 ) -> bool {
-    // Origin / Destination MUESSEN matchen (case-insensitive).
+    // 1. Origin / Destination MUESSEN matchen (case-insensitive).
     let dpt_ok = ofp.ofp_origin_icao
+        .trim()
         .eq_ignore_ascii_case(active_dpt.trim());
     let arr_ok = ofp.ofp_destination_icao
+        .trim()
         .eq_ignore_ascii_case(active_arr.trim());
+    if !dpt_ok || !arr_ok {
+        return false;
+    }
 
-    // Callsign-Match ist SOFT: SimBrief Callsign vs phpVMS
-    // flight_number koennen wegen "DLH100" vs "100" abweichen.
-    // Match akzeptieren wenn entweder identisch (case-insensitive)
-    // ODER ein Suffix-Match (z.B. "100" ist Suffix von "DLH100").
-    // Hauptanker bleiben dpt+arr.
-    let cs_a = ofp.ofp_flight_number.trim().to_ascii_uppercase();
-    let cs_b = active_flight_number.trim().to_ascii_uppercase();
-    let cs_soft_ok = cs_a == cs_b
-        || cs_a.ends_with(&cs_b)
-        || cs_b.ends_with(&cs_a)
-        || (cs_a.is_empty() || cs_b.is_empty()); // einer fehlt → tolerieren
+    // 2. Callsign-Match: AeroACARS hat airline_icao + flight_number als
+    //    getrennte Felder. Wir bauen daraus die kanonische Form, und
+    //    vergleichen mit dem SimBrief-OFP-Callsign nach Normalisierung.
+    //
+    //    Variante A: SimBrief enthaelt das volle Callsign "DLH100"
+    //                → wir konstruieren "DLH" + "100" = "DLH100" und vergleichen exakt.
+    //    Variante B: SimBrief enthaelt nur die Nummer "100"
+    //                (kann passieren je nach Pilot-Profile-Setup auf simbrief.com)
+    //                → wir vergleichen NUR die Number-Part.
+    //
+    //    KEINE blinde ends_with-Logik → kein "DLH1100" matched "100"-Fehler.
+    let active_full = format!("{}{}", active_airline_icao.trim(), active_flight_number.trim());
+    let active_norm = normalize_callsign(&active_full);
+    let (_, active_number) = split_callsign(&active_norm);
 
-    dpt_ok && arr_ok && cs_soft_ok
+    let simbrief_norm = normalize_callsign(&ofp.ofp_flight_number);
+
+    if simbrief_norm.is_empty() {
+        // SimBrief liefert kein Callsign → toleranter Mode: dpt+arr genuegen.
+        // Real selten — SimBrief-OFP traegt typisch immer einen Callsign.
+        return true;
+    }
+
+    let (simbrief_prefix, simbrief_number) = split_callsign(&simbrief_norm);
+
+    if simbrief_prefix.is_empty() {
+        // SimBrief hat NUR die Number (z.B. "100") → mit aktiver Number vergleichen.
+        return simbrief_number == active_number;
+    }
+
+    // SimBrief hat full callsign mit Prefix → exakter Vergleich mit
+    // konstruiertem Aktiv-Callsign.
+    simbrief_norm == active_norm
 }
 ```
 
-**Begruendung der Soft-Match-Logik fuer Callsign:**
-- phpVMS-`flight_number` kann je VA-Konvention sein: "100", "DLH100", "GSG-100"
-- SimBrief-OFP-Callsign ist was der Pilot in SimBrief eingetragen hat
-- Beide muessen NICHT byte-identisch sein — Hauptsache dpt+arr passen UND Callsign ist plausibel verwandt
-- Voll-Block: wenn Pilot offensichtlich einen anderen Flug regeneriert hat (z.B. "DLH200" statt "100"), faellt das beim Suffix-Match durch → Mismatch-Fehler
+**Was die Regel jetzt richtig macht:**
+- `active="DLH100"` vs simbrief `"DLH100"` → match (exakt)
+- `active="DLH100"` vs simbrief `"100"` → match (number-only-mode)
+- `active="DLH100"` vs simbrief `"DLH1100"` → **MISMATCH** (number "100" != "1100")
+- `active="DLH100"` vs simbrief `"DLH200"` → **MISMATCH** (number "100" != "200")
+- `active="DLH-100"` vs simbrief `"DLH100"` → match (Bindestrich wird normalisiert)
+- `active="GSG100A"` vs simbrief `"GSG100A"` → match
+
+**Begruendung gegen v1.0 Suffix-Match:** Die Suffix-Logik (`ends_with`) konnte Pilot-Fehler verschleiern. Mit der neuen Logik gibt es eine klare Mismatch-Notice ("OFP gehoert zu DLH1100, aktiv ist DLH100"), und der Pilot regeneriert sauber.
+
+**Aktiv-Callsign-Quelle:** `ActiveFlight.airline_icao + flight_number` (beide bereits in v0.7.7-State). Bei leerem `airline_icao` (= kein Airline-Match in phpVMS) faellt der Vergleich auf reinen Number-Part zurueck.
 
 ### 6.2 Generierungs-Zeit (Optional, NICHT in v0.7.8 Scope)
 
@@ -313,25 +582,36 @@ Spec v1.0/v1.1 hatte ueberlegt: "OFP-`generated_at` > flight_started_at" als zus
 
 Backend (Rust):
 
-**Match-Verifikation:**
-- `ofp_matches_active_flight_accepts_exact_match`
-- `ofp_matches_active_flight_accepts_callsign_suffix_match` (z.B. "DLH100" vs "100")
-- `ofp_matches_active_flight_accepts_case_insensitive`
-- `ofp_matches_active_flight_rejects_wrong_dpt`
-- `ofp_matches_active_flight_rejects_wrong_arr`
-- `ofp_matches_active_flight_rejects_unrelated_callsign`
-- `ofp_matches_active_flight_tolerates_empty_callsign`
+**Match-Verifikation (v1.1 verschaerft — keine Suffix-Logik):**
+- `normalize_callsign_strips_hyphens_and_uppercases` ("DLH-100" → "DLH100", "gsg 100" → "GSG100")
+- `split_callsign_separates_prefix_and_number` ("DLH100" → ("DLH", "100"))
+- `ofp_matches_when_callsigns_exact` ("DLH100" + "DLH100")
+- `ofp_matches_when_simbrief_callsign_is_number_only` (active "DLH100" + simbrief "100" → match)
+- `ofp_matches_case_insensitive_icao` (DPT/ARR Variants)
+- **`ofp_rejects_when_callsign_numbers_overlap_but_differ` (KRITISCHER v1.1-Test: active "DLH100" + simbrief "DLH1100" → MISMATCH)**
+- `ofp_rejects_when_callsign_completely_different` ("DLH100" + "AFR300")
+- `ofp_rejects_when_dpt_wrong`
+- `ofp_rejects_when_arr_wrong`
+- `ofp_tolerates_empty_simbrief_callsign` (dpt+arr genuegen wenn SB-Callsign leer)
+- `ofp_matches_with_hyphen_in_active` ("DLH-100" vs "DLH100")
 
-**Pfad-Auswahl:**
-- `flight_refresh_simbrief_uses_direct_when_username_set_and_match`
-- `flight_refresh_simbrief_returns_mismatch_error_when_username_set_and_no_match`
-- `flight_refresh_simbrief_falls_back_to_pointer_when_simbrief_offline`
-- `flight_refresh_simbrief_uses_pointer_when_no_username`
+**OFP-ID-Parsing (v1.1 NEU):**
+- `simbrief_parser_extracts_request_id_from_params`
+- `simbrief_parser_handles_missing_request_id_with_empty_string`
+
+**Pfad-Auswahl (v1.1 erweitert um composite-Fehler):**
+- `flight_refresh_simbrief_uses_direct_when_identifier_set_and_match`
+- `flight_refresh_simbrief_hard_blocks_when_identifier_set_and_mismatch` (HARD-Block, kein Fallback)
+- `flight_refresh_simbrief_soft_falls_back_to_pointer_when_simbrief_unavailable`
+- `flight_refresh_simbrief_uses_pointer_when_no_identifier`
+- **`flight_refresh_simbrief_composite_error_prioritizes_user_not_found_over_bid_not_found` (v1.1 P1-2)**
 
 **Settings:**
-- `set_simbrief_username_persists_in_state`
-- `get_simbrief_username_returns_none_when_unset`
-- `simbrief_username_empty_string_treated_as_none`
+- `set_simbrief_settings_persists_both_fields`
+- `get_simbrief_settings_returns_none_when_unset`
+- `simbrief_identifier_empty_string_treated_as_none`
+- `user_id_priority_when_both_filled` (User-ID gewinnt ueber Username wenn beide da)
+- `username_url_encoded_in_request` (Sonderzeichen / Spaces escaped)
 
 Frontend (manueller Smoke):
 - Settings-Tab: Username eingeben, App neu starten, Wert wieder da
@@ -340,16 +620,32 @@ Frontend (manueller Smoke):
 
 ---
 
-## 11. Offene Punkte fuer Thomas-Review
+## 11. Entscheidungs-Log
 
-- [ ] **Username-Validierung:** soll AeroACARS am `onBlur` einen Test-Fetch machen (= Pilot kriegt sofort Bestaetigung "ja, Username ist gueltig"), oder warten bis zum naechsten Refresh? Tendenz: bei Save mit Test-Fetch (= bessere UX).
-- [ ] **Callsign-Match strictness:** der "Suffix-Match"-Ansatz (oben) toleriert "DLH100" vs "100". Reicht das, oder gibt es VA-Konventionen die noch toleranter sein muessen? z.B. "GSG-100" vs "GSG100" (mit Bindestrich)?
-- [ ] **Mismatch-Verhalten:** Bei Mismatch HARD-Block (= Pilot muss regenerieren) oder SOFT-Confirm (= Pilot kann "trotzdem ueberschreiben" klicken)? Tendenz: HARD-Block fuer v0.7.8, weil falscher OFP = falscher Plan = falsche Loadsheet.
-- [ ] **Settings-Tab-Platzierung:** als eigene Section "SimBrief Integration", oder unter "Allgemein"? Tendenz: eigene Section.
-- [ ] **Test-Strategie:** SimBrief-API-Mocking in Tests — gibt es Pattern dafuer im Repo? Falls nicht, testen wir nur die pure-functions (Match) + integration-tests via env-flag manuell.
+### v1.0-Punkte (in v1.1 entschieden)
+- ✓ **Username-Validierung:** **"Pruefen"-Button** (= ein expliziter Pilot-Klick), kein hartes onBlur-Fetch. Status-Anzeige darunter.
+- ✓ **Callsign-Match-Strictness:** **Suffix-Match raus**, statt dessen normalisierter `airline_icao + flight_number`-Vergleich. Verhindert "DLH1100 matched 100"-Fehler.
+- ✓ **Mismatch-Verhalten:** **HARD-Block** in v0.7.8. Pilot muss regenerieren — kein "trotzdem ueberschreiben"-Override (= falscher Plan + falsche Loadsheet ist nicht hilfreich).
+- ✓ **Settings-Tab-Platzierung:** **eigene Section "SimBrief Integration"**.
+- ✓ **Test-Strategie:** primaer pure-function-Tests (Match-Logik, Settings-Storage) + manuelle Smoke-Tests fuer SimBrief-API-Interaktion (kein Mocking-Sweep in v0.7.8).
+
+### v1.1-Punkte (offen fuer 2. QS)
+- [ ] **OFP-ID-Quelle bestaetigen:** `<params><request_id>` = das was wir wollen (= aendert sich bei jeder Re-Generation). Alternative `<params><static_id>` (= Pilot-OFP-Profile-stabil, aendert sich nur bei Plan-Wechsel). PAX Studio nutzt `static_id` — ob das in der phpVMS-Bid-`simbrief.id` landet wissen wir nicht. v1.1 setzt auf `request_id` aus dem XML; falls bei Pfadwechsel zwischen Pointer (= PAX-Studio-ID) und Direct (= `request_id`) immer `changed=true` triggert, das ist akzeptabel (= Pilot weiss "OFP-Quelle wechselte").
+- [ ] **`SimBriefDirectError`-Enum:** muss `Network` von `ParseFailed` getrennt sein, oder reicht `simbrief_direct_failed` als Sammel-Code? v1.1-Spec hat sie getrennt — wenn nicht noetig, koennen wir zusammenfassen.
+- [ ] **`compose_failure`-Wording:** der Notice-Text fuer `simbrief_unavailable_and_bid_gone` darf laenger sein? Tendenz: kurz halten, Activity-Log liefert die Details.
 
 ---
 
 ## 12. Versionierung dieser Spec
 
 - **v1.0 (2026-05-11):** Initial Draft basierend auf Thomas-Decision "SimBrief-direct, big release bundle".
+- **v1.1 (2026-05-11):** Nach 1. QS-Review von Thomas:
+  - §3 P1: Parser-Erweiterung um `<params><request_id>` als `ofp.ofp_id` — Spec v1.0 sagte faelschlich "Parser muss NICHT erweitert werden". OHNE OFP-ID kein sauberer `changed`-Flag-Vergleich.
+  - §3 P2: SimBrief-Failure-Mode-Liste korrigiert auf laut Navigraph-Doku: HTTP 400 + small XML error fuer invalid user / fetch error (nicht primaer 404/empty).
+  - §4 NEU 4.1: Identifier-Klaerung Username vs User-ID. Beide werden unterstuetzt — zwei separate Felder in Settings, User-ID gewinnt wenn beide gesetzt. URL-Encoding fuer Username.
+  - §4 P2 (App-root Sync): localStorage-Push beim App-Start/Login in App.tsx, nicht nur on-SettingsPanel-mount. Sonst nach Restart leer.
+  - §4 Settings-UI: "Pruefen"-Button statt hartem onBlur-Fetch (= explizite Pilot-Aktion). Eigene Section "SimBrief Integration".
+  - §5.1 NEU P1: Fehler-Priorisierung beim Fallback. Direct-Fehler wird gemerkt, wenn Pointer auch scheitert composite Notice mit Direct-Priorisierung (= "Username falsch" beats "Bid weg" als Hinweis fuer den Piloten).
+  - §6 P1: Callsign-Suffix-Match raus. Statt dessen normalisierter `airline_icao + flight_number`-Vergleich. `normalize_callsign` + `split_callsign` als Pure-Functions, getestet pro Edge-Case (insbesondere "DLH1100 vs 100"-False-Positive aus v1.0 verhindert).
+  - §10 Tests aktualisiert: Suffix-Match-Tests raus, dafuer neue Edge-Cases (DLH1100, leerer Callsign, Hyphen-Variants). OFP-ID-Parsing-Tests neu. Settings-Tests um User-ID + URL-Encoding erweitert.
+  - §11 Entscheidungs-Log: 5 v1.0-Punkte entschieden, 3 neue v1.1-Punkte fuer 2. QS.
