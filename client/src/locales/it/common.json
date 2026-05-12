@@ -289,6 +289,38 @@
       "impact_g_500ms": "G di picco post-touchdown (500 ms)",
       "impact_g_1000ms": "G di picco post-touchdown (1 s)",
       "trace_caption": "Istantanee dal buffer del touchdown — non base del punteggio, solo per visualizzare l'andamento."
+    },
+    "gforce_forensik": {
+      "title": "💪 Forensica forza-G",
+      "intro_header": "Qual è la forza-G giusta?",
+      "intro_body": "AeroACARS campiona il carico G al touchdown a 50 Hz. Volanta e G-meter del cockpit mostrano una media livellata su ~250 ms — quello che il pilota sente. Picchi G elevati dalla compressione del carrello sono simulati fisicamente, ma su aerei GA piccoli il sim spesso modella i carrelli più duri della realtà. Se la tua velocità verticale era morbida, guida il master score — il picco G è quindi un artefatto del sim, non un errore del pilota.",
+      "tool_section_title": "Andamento G attorno al touchdown",
+      "tool_section_subtitle": "Edge = frame del touchdown, poi compressione del carrello. Confronta con le statistiche robuste sotto.",
+      "robust_section_title": "Statistiche robuste (resistenti ai picchi)",
+      "robust_section_subtitle": "Mediana e 95° percentile filtrano picchi singoli del sim. Se sono notevolmente sotto al picco, il picco era uno spike — non un impatto reale.",
+      "score_section_title": "Cosa valuta AeroACARS",
+      "score_section_subtitle": "Il master score privilegia la velocità verticale rispetto al G — V/S è ciò che le regole di manutenzione definiscono.",
+      "tile_edge": "Edge (frame touchdown)",
+      "tile_250ms": "Media 250 ms",
+      "tile_500ms": "500 ms (picco)",
+      "tile_1000ms": "1 s (picco)",
+      "tile_median": "Mediana 500 ms",
+      "tile_p95": "95° percentile",
+      "tile_volanta_hint": "Smoothing di default Volanta",
+      "tile_peak_hint": "valore max",
+      "tile_na_tooltip": "Valore non registrato — buffer del sampler non pieno al touchdown",
+      "spike_detected": "Picco ({{peak}} G) ben sopra al 95° percentile ({{p95}} G) — sembra uno spike singolo del sim, non una vera compressione del carrello.",
+      "score_basis_label": "Picco G valutato",
+      "score_basis_sublabel": "Picco G (500 ms post-edge)",
+      "score_strut_force": "Forza normale carrello: {{force}} N",
+      "score_vs_leads": "Velocità verticale morbida (< 200 fpm) — master score non viene abbassato dal G. Errore pilota improbabile.",
+      "tip": {
+        "sim_strut": "G elevato per compressione carrello del sim. La tua velocità verticale era morbida — nessun errore del pilota. Frequente su aerei GA piccoli dove il modello della molla del carrello è più duro della realtà.",
+        "real_impact": "Impatto reale duro: V/S e G concordano entrambi su un valore alto. Flare prima, riduci la manetta prima.",
+        "clean": "Andamento G pulito — nessuna anomalia al touchdown.",
+        "airborne_spike": "Picco G senza corrispondente forza carrello — sembra stuttering del frame del sim o rumore di campionamento, non un impatto reale.",
+        "outlier_filtered": "Spike G singolo rilevato — mediana e 95° percentile mostrano valori tranquilli. Il picco è stato probabilmente causato da uno spike di frame (rimbalzo del carrello o anomalia numerica)."
+      }
     }
   },
   "about": {
@@ -346,8 +378,10 @@
       "sync": "SYNC",
       "offline": "OFFLINE",
       "stale": "ERRORE",
-      "idle": "ATTESA"
+      "idle": "ATTESA",
+      "blocked": "BLOCCATO"
     },
+    "blocked_detail": "Account bloccato — contatta l'admin VA",
     "no_post_yet": "non ancora inviato",
     "last_send_secs": "inviato {{secs}}s fa",
     "sync_pending_one": "{{count}} posizione in sincronia",
@@ -437,10 +471,6 @@
     "filing_section": "Invio PIREP",
     "auto_file_label": "Invia PIREP automaticamente",
     "auto_file_hint": "Invia il PIREP automaticamente quando il volo raggiunge la fase „Arrivato\" (al gate, motori spenti, freno di parcheggio inserito). Se la validazione fallisce il pulsante „Termina volo\" rimane disponibile.",
-    "beta_section": "Funzionalità beta",
-    "fenix_beta_intro": "Beta opt-in per piloti Fenix. Attivare solo se voli con il Fenix A319/A320/A321 e vuoi contribuire al feedback. Senza attivazione tutto resta identico a v0.7.15 — sia per Fenix che per altri velivoli.",
-    "fenix_beta_label": "Fenix A32x Beta",
-    "fenix_beta_hint": "Legge ulteriori LVAR Fenix per le luci di atterraggio / muso / ali direttamente dal cockpit. Solo lettura, niente FSUIPC, nessuna modifica alla cartella Community. Disattivato di default.",
     "developer_section": "Opzioni sviluppatore",
     "debug_mode_label": "Modalità debug",
     "debug_mode_hint": "Mostra nel dashboard la telemetria completa (posizione, quota, velocità, assetto, carico G). Non necessario nell'uso normale.",

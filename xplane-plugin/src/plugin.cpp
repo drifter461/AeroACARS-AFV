@@ -627,7 +627,10 @@ PLUGIN_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
     std::strncpy(outSig,  PLUGIN_SIG,  255); outSig[255]  = '\0';
     std::strncpy(outDesc, PLUGIN_DESC, 255); outDesc[255] = '\0';
 
-    log_msgf("starting AeroACARS X-Plane Plugin v0.5.0 (SDK 4.3.0)");
+    // v0.7.17 (N-004): version comes from CMake project() so the
+    // log matches the actual built binary. Before this we hardcoded
+    // "v0.5.0" while the code drifted through 0.5.3 → 0.5.13.
+    log_msgf("starting AeroACARS X-Plane Plugin v" AEROACARS_PLUGIN_VERSION " (SDK 4.3.0)");
 
     // Resolve all DataRef handles. NULL is acceptable for any of these
     // — the read_*-helpers fall back to a sensible default. We log

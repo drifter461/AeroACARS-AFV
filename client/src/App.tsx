@@ -439,7 +439,13 @@ function App() {
               queuedCount={activeFlight.queued_position_count}
               positionCount={activeFlight.position_count}
               connectionState={
-                activeFlight.connection_state === "failing" ? "failing" : "live"
+                // v0.7.17 (B-007): "blocked" durchreichen so dass der
+                // LiveRecordingIndicator den Pilot warnen kann.
+                activeFlight.connection_state === "blocked"
+                  ? "blocked"
+                  : activeFlight.connection_state === "failing"
+                    ? "failing"
+                    : "live"
               }
             />
           )}

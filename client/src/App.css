@@ -762,6 +762,16 @@ button:disabled {
   color: var(--text-muted);
 }
 
+/* v0.7.17 (B-007): Account-Sperre — am alarmierendsten dargestellt
+   damit Pilot sofort merkt dass Position-Streaming gestoppt wurde
+   und er VA-Admin kontaktieren muss. */
+.live-rec--blocked {
+  color: var(--danger);
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 22%, var(--surface-2));
+  font-weight: 700;
+}
+
 /* ===== Phase timeline (Cockpit) — animated SVG plane on a track ===== */
 
 .phase-timeline {

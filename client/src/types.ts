@@ -364,11 +364,13 @@ export interface ActiveFlightInfo {
   /** v0.6.2 — Connection-Health vom phpVMS-Worker:
    *  - "live"    → letzter POST war Erfolg (auch wenn queued > 0 = nur Sync-Pause)
    *  - "failing" → letzter POST scheiterte (echter Connection-Loss)
+   *  - "blocked" → v0.7.17 (B-007) phpVMS lehnt mit 401/403 ab — Account
+   *                gesperrt / inaktiv / API-Key revoked. Worker hat
+   *                terminiert, kein Endless-Retry-Spam mehr.
    *  - undefined → IPC-Payload von einer pre-v0.6.2 App (= Migration)
-   *  Frontend nutzt das + queued_position_count für die 3 Status-Anzeige
-   *  (Live / Sync / Offline). Optional damit pre-v0.6.2-IPC-Payloads
-   *  noch deserialisieren (z.B. wenn Tauri-IPC-Schema gecached ist). */
-  connection_state?: "live" | "failing";
+   *  Frontend nutzt das + queued_position_count für die Status-Anzeige.
+   *  Optional damit pre-v0.6.2-IPC-Payloads noch deserialisieren. */
+  connection_state?: "live" | "failing" | "blocked";
   /** v0.4.1: ISO-8601 UTC-Timestamp wann der Streamer den Sim-
    *  Disconnect detektiert und den Flug pausiert hat. `null` =
    *  normaler Flug; `string` = Cockpit-Tab zeigt Resume-Banner. */

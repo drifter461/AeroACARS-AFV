@@ -3,7 +3,8 @@ import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { useConfirm } from "./ConfirmDialog";
 import { ForensicsBadge } from "./ForensicsBadge";
-import { SinkrateForensik } from "./SinkrateForensik";
+import { SinkrateForensik, scoreBasisVs } from "./SinkrateForensik";
+import { GForceForensik } from "./GForceForensik";
 // v0.5.47 — Score-Modul ist jetzt zentral, identisch zu webapp/src/
 // components/landingScoring.ts. Dieselben Schwellen, Bands, Coach-Tipps
 // für Pilot-App und Live-Monitor.
@@ -100,6 +101,12 @@ export interface LandingRecord {
   vs_smoothed_1500ms_fpm?: number | null;
   peak_g_post_500ms?: number | null;
   peak_g_post_1000ms?: number | null;
+  // v0.7.17 (B-009): G-Force-Forensik (analog vs_smoothed_*)
+  g_at_edge?: number | null;
+  g_smoothed_250ms_post?: number | null;
+  g_median_post_500ms?: number | null;
+  g_p95_post_500ms?: number | null;
+  max_gear_force_n?: number | null;
   peak_vs_pre_flare_fpm?: number | null;
   vs_at_flare_end_fpm?: number | null;
   flare_reduction_fpm?: number | null;
@@ -255,7 +262,17 @@ function getSubScores(r: LandingRecord): SubScore[] {
     });
   }
   // Legacy-Pfad fuer pre-v0.7.1-PIREPs (forward-compat)
-  const peakVs = r.landing_peak_vs_fpm ?? r.landing_rate_fpm;
+  // v0.7.17 (B-015): vs_at_edge_fpm bevorzugen — der 50-Hz-Edge-Wert
+  // ist der echte FAR-25.473-Engineering-Standard. Ohne diesen Fix
+  // zog der Pilot-Client den Streamer-Tick-Wert (-311 fpm in
+  // EIN799-Fall), waehrend die Webapp den Edge-Wert nutzte (-265).
+  // Pilot konnte die Diskrepanz nicht erklaeren.
+  const peakVs =
+    (r.vs_at_edge_fpm != null && r.vs_at_edge_fpm < 0
+      ? r.vs_at_edge_fpm
+      : null) ??
+    r.landing_peak_vs_fpm ??
+    r.landing_rate_fpm;
   const subs: LibSubScore[] = libComputeSubScores({
     vs_fpm: peakVs,
     peak_g_load: r.landing_peak_g_force,
@@ -1114,7 +1131,13 @@ function QuickFlags({ record }: { record: LandingRecord }) {
 
   // HARD LANDING — V/S oder Peak-G erreichen Hard/Severe-Schwellen
   // (gespiegelt aus landingScoring.ts T_VS_HARD_FPM / T_G_HARD).
-  const peakVs = record.landing_peak_vs_fpm ?? record.landing_rate_fpm;
+  // v0.7.17 (B-015): vs_at_edge_fpm bevorzugen — siehe scoreBasisVs Doc.
+  const peakVs =
+    (record.vs_at_edge_fpm != null && record.vs_at_edge_fpm < 0
+      ? record.vs_at_edge_fpm
+      : null) ??
+    record.landing_peak_vs_fpm ??
+    record.landing_rate_fpm;
   const isHardVs = Math.abs(peakVs) >= 600;
   const isHardG = (record.landing_peak_g_force ?? 0) >= 1.7;
   if (isHardVs || isHardG) {
@@ -1440,7 +1463,16 @@ function LandingDetail({
                 Aufprall-Werte. Kein Werte-Dschungel mehr. */}
             <div>
               <dt>{t("landing.landing_rate")}</dt>
-              <dd>{fmtNumber(record.landing_rate_fpm, 0, "fpm")}</dd>
+              {/* v0.7.17 (B-015): Edge-Wert bevorzugen — Touchdown-Card
+                  zeigte bisher `landing_rate_fpm` (Streamer-Tick), was
+                  meist 30-50 fpm vom echten Aufsetz-Moment abwich. */}
+              <dd>
+                {fmtNumber(
+                  scoreBasisVs(record),
+                  0,
+                  "fpm",
+                )}
+              </dd>
             </div>
             <div>
               <dt>{t("landing.g_force")}</dt>
@@ -1503,6 +1535,12 @@ function LandingDetail({
           explainability.md. Rendert nur wenn 50-Hz-Forensik-Felder
           vorhanden sind (hasForensics()), sonst kompakter Legacy-Hinweis. */}
       <SinkrateForensik record={record} />
+
+      {/* v0.7.17 (B-009): G-Force-Forensik — analog zur Sinkrate-Forensik.
+          Erklaert warum AeroACARS bei butterweichen Landungen manchmal hohe
+          G-Werte misst (Sim-Strut-Compression statt echtem Pilot-Impact)
+          und der Master-Score trotzdem als „Smooth" klassifiziert wird. */}
+      <GForceForensik record={record} />
 
       {/* v0.5.43: Flare-Quality — als eigene Section im gleichen Stil wie
           Approach-Stability. Nur sichtbar wenn die 50-Hz-Forensik-Felder

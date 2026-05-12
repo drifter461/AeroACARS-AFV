@@ -259,6 +259,24 @@ const HOLDING_BANK_THRESHOLD_DEG: f32 = 15.0;
 const HOLDING_VS_THRESHOLD_FPM: f32 = 200.0;
 /// Sustained climb time required before we classify a Go-Around.
 const GO_AROUND_DWELL_SECS: i64 = 8;
+/// v0.7.17 (B-010): Sustained sink-rate dwell before Climb → Descent.
+///
+/// Quelle: GSG 105 Cessna LDDU→LDSP zeigte 6 sec Descent-Phase weil
+/// ein Trim-/Turbulenz-Spike single-tick die FSM kippte. 15 s ist
+/// laenger als jede plausible Trim-Korrektur oder Turbulenz-Pause,
+/// aber kurz genug damit ein echter Top-of-Descent nicht spuerbar
+/// verzoegert wird (-500 fpm × 15 s = 125 ft Verlust, vernachlaessigbar
+/// gegen typische 25.000-ft-TOD-Strecken).
+const DESCENT_DWELL_SECS: i64 = 15;
+/// v0.7.17 (B-010): Gewichts-Schwelle Light-GA vs. Medium/Heavy.
+///
+/// 5700 kg = MTOM-Grenze EASA CS-23/CS-25 (Single/Twin-Prop GA vs.
+/// Regional/Airline). Light-GA-Flugzeuge fliegen Patterns / Local
+/// Sightseeing oft komplett unter 3000 ft AGL — die Standard-
+/// Schwellen `lost_from_peak > 500/800` triggern Spurious-Descent
+/// bei jedem Pattern-Leg. Light-GA bekommt deshalb groesszuegigere
+/// Werte.
+const LIGHT_GA_MTOM_KG: f32 = 5700.0;
 /// Minimum positive V/S at which the GA detector accepts a sample
 /// as "actually climbing" (filters out flare round-out / level-off).
 ///
@@ -853,6 +871,12 @@ struct ActiveFlight {
 /// Connection-State-Konstanten für ActiveFlight.connection_state.
 const CONN_STATE_LIVE: u8 = 0;
 const CONN_STATE_FAILING: u8 = 1;
+/// v0.7.17 (B-007): phpVMS hat 401/403 geliefert — Pilot-Account ist
+/// gesperrt, inaktiv, oder der API-Key wurde server-side revoked. Der
+/// Worker stoppt nach diesem State (kein endloses Retry-Spam mehr),
+/// die UI zeigt einen klaren Hinweis. Pilot muss VA-Admin kontaktieren
+/// und sich danach neu einloggen.
+const CONN_STATE_BLOCKED: u8 = 2;
 
 /// On-disk representation of an active flight, used for resume after a client
 /// crash. Not the same as `ActiveFlight` because we only persist serializable,
@@ -1062,6 +1086,10 @@ struct PersistedFlightStats {
     lowest_agl_during_approach_ft: Option<f32>,
     #[serde(default)]
     go_around_climb_pending_since: Option<DateTime<Utc>>,
+    // v0.7.17 (B-010): Descent-Dwell-Timer persistieren damit Resume
+    // mitten in einem Climb-Trim-Spike nicht den Timer verliert.
+    #[serde(default)]
+    descent_pending_since: Option<DateTime<Utc>>,
     // v0.5.11 holding-pattern tracking
     #[serde(default)]
     holding_pending_since: Option<DateTime<Utc>>,
@@ -1177,6 +1205,7 @@ impl PersistedFlightStats {
             go_around_count: stats.go_around_count,
             lowest_agl_during_approach_ft: stats.lowest_agl_during_approach_ft,
             go_around_climb_pending_since: stats.go_around_climb_pending_since,
+            descent_pending_since: stats.descent_pending_since,
             holding_pending_since: stats.holding_pending_since,
             holding_exit_pending_since: stats.holding_exit_pending_since,
             previous_phase_before_holding: stats.previous_phase_before_holding,
@@ -1268,6 +1297,7 @@ impl PersistedFlightStats {
         stats.go_around_count = self.go_around_count;
         stats.lowest_agl_during_approach_ft = self.lowest_agl_during_approach_ft;
         stats.go_around_climb_pending_since = self.go_around_climb_pending_since;
+        stats.descent_pending_since = self.descent_pending_since;
         stats.holding_pending_since = self.holding_pending_since;
         stats.holding_exit_pending_since = self.holding_exit_pending_since;
         stats.previous_phase_before_holding = self.previous_phase_before_holding;
@@ -1930,6 +1960,17 @@ struct FlightStats {
     /// climb-correction during a normal approach would count as a GA.
     go_around_climb_pending_since: Option<DateTime<Utc>>,
 
+    /// v0.7.17 (B-010): Dwell-Timer fuer Climb → Descent.
+    ///
+    /// Bug-Symptom: GSG 105 (X-Plane 12 Cessna 1.000 kg, LDDU→LDSP)
+    /// zeigte 6-Sekunden-Phase Descent (17:49:35 Climb→Descent,
+    /// 17:49:41 Descent→Approach) — ein einzelner Turbulenz-/Trim-
+    /// Spike loeste single-tick Phase-Wechsel aus, AGL stieg sogar
+    /// zwischen den Phasen. Fix: Descent-Bedingungen muessen
+    /// `DESCENT_DWELL_SECS` durchgehend halten bevor wir umschalten.
+    /// Cleared sobald die Bedingungen wieder brechen.
+    descent_pending_since: Option<DateTime<Utc>>,
+
     // ---- v0.5.11 holding-pattern tracking ----
     /// Timestamp of the first tick where the aircraft satisfied
     /// holding-pattern conditions (banked turn at constant altitude).
@@ -1954,6 +1995,13 @@ struct FlightStats {
     /// each successful POST. Keeps the FSM decoupled from the HTTP
     /// client.
     pending_acars_logs: Vec<String>,
+
+    /// v0.7.17 (B-004): One-shot flag damit die „Aircraft fliegt nach
+    /// ARRIVED"-Warnung pro Flug nur einmal gefeuert wird (kein Spam,
+    /// kein redundantes flight.stop-Setzen). FlightStats ist nicht
+    /// persisted (PersistedFlightStats ist die Persistenz-Schicht);
+    /// `Default::default()` setzt es auf false.
+    arrived_stale_warning_logged: bool,
 
     // ---- Landing Analyzer (Stage 2): SimBrief OFP plan ----
     /// Planned block (= ramp) fuel from the SimBrief OFP, in kg.
@@ -2866,6 +2914,68 @@ fn check_go_around(
         stats.go_around_climb_pending_since = None;
     }
     None
+}
+
+/// v0.7.17 (B-010): Climb → Descent Transition Decision.
+///
+/// Bug-Symptom (GSG 105 Cessna LDDU→LDSP, X-Plane 12):
+/// ```text
+/// 17:49:35  Climb→Descent    AGL 3575 ft
+/// 17:49:41  Descent→Approach AGL 3540 ft   (nur 6 s Descent!)
+/// ```
+/// Ein einzelner Turbulenz-/Trim-Spike kippte single-tick die FSM.
+/// AGL stieg sogar zwischen zwei Phasen-Wechseln — physikalisch
+/// unmoeglich fuer einen echten Descent.
+///
+/// **Fix:** zwei orthogonale Anpassungen:
+///
+/// 1. **Dwell-Timer:** Descent-Bedingung muss `DESCENT_DWELL_SECS`
+///    durchgehend halten bevor wir die FSM umschalten. Bricht die
+///    Bedingung zwischendrin → Timer reset.
+///
+/// 2. **Light-GA-Schwellen:** Wenn `total_weight_kg < LIGHT_GA_MTOM_KG`
+///    (= unter 5700 kg, CS-23-Klasse) → groesszuegigere
+///    `lost_from_peak`-Schwellen (1000/1200 statt 500/800 ft). Cessna
+///    im 1500-ft-Pattern verliert leicht 300-500 ft auf einem Sightseeing-
+///    Leg — das ist kein Descent.
+///
+/// Returns `Some(FlightPhase::Descent)` wenn beide Bedingungen erfuellt
+/// sind (Triggerung + Dwell durchgehalten). Side-effect: setzt /
+/// loescht `stats.descent_pending_since`.
+fn check_descent_transition(
+    stats: &mut FlightStats,
+    snap: &SimSnapshot,
+    now: DateTime<Utc>,
+    lost_from_peak: f32,
+) -> Option<FlightPhase> {
+    let is_light_ga = snap
+        .total_weight_kg
+        .map(|w| w < LIGHT_GA_MTOM_KG)
+        .unwrap_or(false);
+    let low_alt_thresh = if is_light_ga { 1000.0 } else { 500.0 };
+    let near_ground_thresh = if is_light_ga { 1200.0 } else { 800.0 };
+    let standard_tod = snap.vertical_speed_fpm < -500.0
+        && lost_from_peak > 200.0;
+    let low_altitude_descent = snap.vertical_speed_fpm < -100.0
+        && snap.altitude_agl_ft < 3000.0
+        && lost_from_peak > low_alt_thresh;
+    let near_ground_descent = snap.altitude_agl_ft < 2000.0
+        && lost_from_peak > near_ground_thresh
+        && snap.vertical_speed_fpm < 0.0;
+    let descent_conds = standard_tod || low_altitude_descent || near_ground_descent;
+    if descent_conds {
+        let pending = stats.descent_pending_since.get_or_insert(now);
+        if (now - *pending).num_seconds() >= DESCENT_DWELL_SECS {
+            stats.descent_pending_since = None;
+            return Some(FlightPhase::Descent);
+        }
+        None
+    } else {
+        // Bedingung gebrochen — Timer reset damit der naechste sustained
+        // Sink-Run einen frischen 15-s-Countdown bekommt.
+        stats.descent_pending_since = None;
+        None
+    }
 }
 
 /// v0.5.11: detect entry into a holding pattern.
@@ -3867,6 +3977,28 @@ fn activity_log_clear(state: tauri::State<'_, AppState>) {
     save_activity_log(&log);
 }
 
+/// v0.7.17 (B-006): Append an Activity-Log-Entry from the frontend.
+///
+/// Bisher waren Activity-Log-Eintraege nur backend-seitig moeglich
+/// (`log_activity(...)`). Manche Frontend-State-Wechsel (z.B. Auto-File-
+/// Failure) brauchen einen sichtbaren Eintrag im Log — sonst sieht der
+/// Pilot nicht was schief lief. `level` ist "info" | "warn" | "error".
+#[tauri::command]
+fn activity_log_add(
+    state: tauri::State<'_, AppState>,
+    level: String,
+    message: String,
+    detail: Option<String>,
+) {
+    let parsed_level = match level.as_str() {
+        "info" => ActivityLevel::Info,
+        "warn" => ActivityLevel::Warn,
+        "error" => ActivityLevel::Error,
+        _ => ActivityLevel::Info,
+    };
+    log_activity(&state, parsed_level, message, detail);
+}
+
 // ---- Landing-history commands (Landing tab) ----
 
 /// List every persisted landing record, newest first. Used by the
@@ -3904,7 +4036,23 @@ fn landing_get_current(
         SimKind::Msfs2020 | SimKind::Msfs2024 => Some("MSFS"),
         SimKind::XPlane11 | SimKind::XPlane12 => Some("X-PLANE"),
     };
-    let aircraft_icao = snapshot.as_ref().and_then(|s| s.aircraft_icao.as_deref());
+    // v0.7.17 (B-015b QS-Fix): Aircraft-ICAO mit Bid-Fallback — identische
+    // Logik wie der Final-Filing-Pfad in `record_landing_for_filed_flight`
+    // (siehe lib.rs:~8510). Vorher: Live-Vorschau nutzte nur Snapshot-
+    // Aircraft → bei Sim-Disconnect oder X-Plane Web API aus war
+    // `aircraft_icao=None` → sub_rollout fiel auf Light-GA-Schwellen
+    // zurueck → Pilot sah inkonsistente Cockpit-Vorschau-Scores gegenueber
+    // dem spaeter persistierten LandingRecord. QS-Round-1 Befund.
+    let bid_icao = flight.aircraft_icao.trim();
+    let bid_icao_opt: Option<&str> = if bid_icao.is_empty() {
+        None
+    } else {
+        Some(bid_icao)
+    };
+    let aircraft_icao = snapshot
+        .as_ref()
+        .and_then(|s| s.aircraft_icao.as_deref())
+        .or(bid_icao_opt);
     let aircraft_title = snapshot.as_ref().and_then(|s| s.aircraft_title.as_deref());
     build_landing_record(&flight, &stats, sim_label, aircraft_icao, aircraft_title)
 }
@@ -4307,9 +4455,23 @@ async fn phpvms_load_session(
             Ok(Some(LoginResult { profile, base_url }))
         }
         // Stored key was rejected — drop it so the next login goes via the form.
-        Err(ApiError::Unauthenticated) => {
+        Err(ApiError::Unauthenticated) | Err(ApiError::Forbidden) => {
+            // v0.7.17 (B-007): Account-Sperre / inaktiv / revoked API-Key.
+            // Vorher: API-Key stumm geloescht, Pilot landete auf Login-Form
+            // ohne Erklaerung. Jetzt: klarer Activity-Log-Eintrag damit
+            // der Pilot sofort versteht warum er ausgeloggt wurde und was
+            // er tun muss (VA-Admin kontaktieren).
             let _ = secrets::delete_api_key(KEYRING_ACCOUNT);
             let _ = clear_site_config(&app);
+            log_activity_handle(
+                &app,
+                ActivityLevel::Warn,
+                "phpVMS hat dich abgemeldet — Account gesperrt, inaktiv oder API-Key revoked",
+                Some(
+                    "Bitte VA-Admin kontaktieren. Nach Freigabe einfach neu einloggen."
+                        .to_string(),
+                ),
+            );
             Ok(None)
         }
         Err(other) => Err(other.into()),
@@ -5693,6 +5855,7 @@ fn flight_info(flight: &ActiveFlight) -> ActiveFlightInfo {
         queued_position_count: stats.queued_position_count,
         connection_state: match flight.connection_state.load(Ordering::Relaxed) {
             CONN_STATE_FAILING => "failing".to_string(),
+            CONN_STATE_BLOCKED => "blocked".to_string(),
             _ => "live".to_string(),
         },
         paused_since: stats.paused_since.map(|t| t.to_rfc3339()),
@@ -6388,7 +6551,95 @@ async fn flight_start(
     // heute: Flug hatte OFP, aber Landung-Tab zeigte trotzdem keine SOLL-
     // Werte → Fetch war silently fehlgeschlagen, niemand merkte was. Mit
     // Activity-Log-Eintrag sieht der Pilot's beim nächsten Mal sofort.
-    let planned_ofp = if let Some(sb) = bid.flight.simbrief.as_ref() {
+    //
+    // v0.7.17 (N-001): SimBrief-Direct-First. Wenn der Pilot in Settings
+    // einen SimBrief-Identifier (User-ID oder Username) hat, holen wir
+    // zuerst den AKTUELLSTEN SimBrief-OFP direkt von simbrief.com.
+    // Damit greift die "Aktualisieren"-Geste in My-Flights wirklich —
+    // bisher hat flight_start die alte Bid-OFP-ID aus phpVMS gezogen,
+    // selbst wenn der Pilot in SimBrief gerade einen neuen Plan
+    // generiert hatte. Fallback auf den Bid-Pointer wenn Direct
+    // fehlschlaegt oder kein Identifier konfiguriert ist.
+    let simbrief_settings = state
+        .simbrief_settings
+        .lock()
+        .expect("simbrief_settings lock")
+        .clone();
+    let mut planned_ofp: Option<api_client::SimBriefOfp> = None;
+    if has_simbrief_identifier(&simbrief_settings) {
+        let active_dpt = bid.flight.dpt_airport_id.clone();
+        let active_arr = bid.flight.arr_airport_id.clone();
+        let active_airline_icao = bid
+            .flight
+            .airline
+            .as_ref()
+            .map(|a| a.icao.clone())
+            .unwrap_or_default();
+        let active_flight_number = bid.flight.flight_number.clone();
+        let active_bid_callsign = bid.flight.callsign.clone();
+        let active_pilot_callsign = state
+            .cached_pilot_callsign
+            .lock()
+            .expect("cached_pilot_callsign lock")
+            .clone();
+        match try_simbrief_direct_with_match(
+            &client,
+            &simbrief_settings,
+            &active_dpt,
+            &active_arr,
+            &active_airline_icao,
+            &active_flight_number,
+            active_bid_callsign.as_deref(),
+            active_pilot_callsign.as_deref(),
+        )
+        .await
+        {
+            DirectOutcome::Match { ofp }
+            | DirectOutcome::MatchWithCallsignWarning { ofp, .. } => {
+                tracing::info!(
+                    sb_id = %ofp.request_id,
+                    plan_burn_kg = ofp.planned_burn_kg,
+                    plan_tow_kg = ofp.planned_tow_kg,
+                    "SimBrief direct OFP fetched at flight_start",
+                );
+                log_activity(
+                    &state,
+                    ActivityLevel::Info,
+                    "SimBrief OFP geladen (direct, aktueller Stand)".to_string(),
+                    Some(format!(
+                        "Plan-Block {:.0} kg · Trip {:.0} kg · TOW {:.0} kg · OFP {}",
+                        ofp.planned_block_fuel_kg,
+                        ofp.planned_burn_kg,
+                        ofp.planned_tow_kg,
+                        ofp.request_id
+                    )),
+                );
+                planned_ofp = Some(ofp);
+            }
+            DirectOutcome::Mismatch { .. } => {
+                // Direct lieferte einen OFP, aber der ist fuer einen
+                // anderen Flug (DEP/ARR-Mismatch). Bid-Pointer als
+                // Fallback nutzen — ist wahrscheinlich der richtige
+                // Plan fuer diesen konkreten Flug.
+                tracing::warn!(
+                    "SimBrief direct returned mismatching DEP/ARR — falling back to phpVMS bid pointer"
+                );
+            }
+            DirectOutcome::Error(_) => {
+                // Netzwerk/Auth-Fehler bei direct — Bid-Pointer als
+                // Fallback. Pilot kriegt unten den Pointer-Activity-
+                // Log-Eintrag, der reicht.
+                tracing::warn!(
+                    "SimBrief direct fetch failed at flight_start — falling back to phpVMS bid pointer"
+                );
+            }
+        }
+    }
+    // Fallback (Direct nicht versucht oder fehlgeschlagen): klassischer
+    // Bid-Pointer-Pfad. Identisches Verhalten wie vor v0.7.17.
+    let planned_ofp = if planned_ofp.is_some() {
+        planned_ofp
+    } else if let Some(sb) = bid.flight.simbrief.as_ref() {
         match client.fetch_simbrief_ofp(&sb.id).await {
             Ok(Some(ofp)) => {
                 tracing::info!(
@@ -7797,6 +8048,36 @@ pub fn ofp_matches_active_flight(
     candidates.contains(&simbrief_norm)
 }
 
+/// v0.7.17 (B-015a QS-Fix): Single-Source-of-Truth fuer den Score-V/S.
+///
+/// QS-Round-1 Befund: Frontend `scoreBasisVs()` priorisierte bereits
+/// `vs_at_edge_fpm`, aber die im Record GESPEICHERTEN sub_scores wurden
+/// im Backend mit `landing_peak_vs_fpm.or(landing_rate_fpm)` gebaut —
+/// ohne den Edge-Wert. Bei `ux_version >= 1` zeigt der Frontend die
+/// gespeicherten Werte direkt (nicht den scoreBasisVs-Pfad), also war
+/// die Korrektur dort wirkungslos.
+///
+/// Cascade-Reihenfolge (matched `scoreBasisVs()` im TS-Frontend):
+///   1. `vs_at_edge_fpm` aus `stats.landing_analysis` (50-Hz-Buffer-
+///      Edge, FAR 25.473 Engineering-Standard) — wenn `< 0`
+///   2. `stats.landing_peak_vs_fpm` (Touchdown-Window-Peak, Streamer-
+///      Tick-Cadence)
+///   3. `stats.landing_rate_fpm` (Streamer-Tick-Snapshot am TD-Frame)
+fn score_basis_vs_fpm(stats: &FlightStats) -> Option<f32> {
+    if let Some(edge) = stats
+        .landing_analysis
+        .as_ref()
+        .and_then(|v| v.get("vs_at_edge_fpm"))
+        .and_then(|v| v.as_f64())
+    {
+        let edge_f32 = edge as f32;
+        if edge_f32 < 0.0 {
+            return Some(edge_f32);
+        }
+    }
+    stats.landing_peak_vs_fpm.or(stats.landing_rate_fpm)
+}
+
 /// v0.7.1 Helper: actual_trip_burn = takeoff_fuel - landing_fuel
 /// (1:1 wie in build_landing_record line 6527-6530). Damit sub_scores
 /// + aggregate_master_score den gleichen Wert nutzen.
@@ -7817,10 +8098,15 @@ fn actual_burn_for_record(stats: &FlightStats) -> Option<f32> {
 /// Returns None wenn keine Sub-Scores berechnet werden konnten
 /// (= Touchdown-Daten fehlen voellig). Caller sollte dann auf
 /// stats.landing_score.numeric() fallback'en.
-fn compute_aggregate_master_score(stats: &FlightStats) -> Option<u8> {
+fn compute_aggregate_master_score(
+    stats: &FlightStats,
+    aircraft_icao: Option<&str>,
+) -> Option<u8> {
     let actual_burn = actual_burn_for_record(stats);
     let scoring_input = landing_scoring::LandingScoringInput {
-        vs_fpm: stats.landing_peak_vs_fpm.or(stats.landing_rate_fpm),
+        // v0.7.17 (B-015a QS-Fix): Edge-Wert hat Vorrang — siehe
+        // `score_basis_vs_fpm()` Doc.
+        vs_fpm: score_basis_vs_fpm(stats),
         peak_g_load: stats.landing_peak_g_force,
         // v0.7.6 P2-B: zentraler Helper statt direkten Read.
         bounce_count: Some(scored_bounce_count_for_score(stats)),
@@ -7831,6 +8117,10 @@ fn compute_aggregate_master_score(stats: &FlightStats) -> Option<u8> {
         actual_trip_burn_kg: actual_burn,
         planned_zfw_kg: stats.planned_zfw_kg,
         planned_tow_kg: stats.planned_tow_kg,
+        // v0.7.17 (N-002): Aircraft-ICAO fuer den aircraft-category-
+        // sensitiven Bahn-Auslastung-Score. None → Light-Default-
+        // Schwellen (konservativ).
+        aircraft_icao: aircraft_icao.map(str::to_string),
         ..Default::default()
     };
     let subs = landing_scoring::compute_sub_scores(&scoring_input);
@@ -7987,7 +8277,9 @@ fn build_landing_record(
     // Fallback auf Touchdown-Klassifikation wenn keine Sub-Scores
     // berechnet werden konnten (Edge-Case Schutz).
     let scoring_input = landing_scoring::LandingScoringInput {
-        vs_fpm: stats.landing_peak_vs_fpm.or(stats.landing_rate_fpm),
+        // v0.7.17 (B-015a QS-Fix): Edge-Wert hat Vorrang — siehe
+        // `score_basis_vs_fpm()` Doc.
+        vs_fpm: score_basis_vs_fpm(stats),
         peak_g_load: stats.landing_peak_g_force,
         // v0.7.6 P2-B: zentraler Helper statt direkten Read.
         bounce_count: Some(scored_bounce_count_for_score(stats)),
@@ -7998,6 +8290,8 @@ fn build_landing_record(
         actual_trip_burn_kg: actual_burn_for_record(stats),
         planned_zfw_kg: stats.planned_zfw_kg,
         planned_tow_kg: stats.planned_tow_kg,
+        // v0.7.17 (N-002): Aircraft-Category aware rollout-Score.
+        aircraft_icao: aircraft_icao.map(str::to_string),
         ..Default::default()
     };
     let computed_sub_scores = landing_scoring::compute_sub_scores(&scoring_input);
@@ -8166,6 +8460,12 @@ fn build_landing_record(
         vs_smoothed_1500ms_fpm: ana_f32(&stats.landing_analysis, "vs_smoothed_1500ms_fpm"),
         peak_g_post_500ms: ana_f32(&stats.landing_analysis, "peak_g_post_500ms"),
         peak_g_post_1000ms: ana_f32(&stats.landing_analysis, "peak_g_post_1000ms"),
+        // v0.7.17 (B-009): G-Force-Forensik
+        g_at_edge: ana_f32(&stats.landing_analysis, "g_at_edge"),
+        g_smoothed_250ms_post: ana_f32(&stats.landing_analysis, "g_smoothed_250ms_post"),
+        g_median_post_500ms: ana_f32(&stats.landing_analysis, "g_median_post_500ms"),
+        g_p95_post_500ms: ana_f32(&stats.landing_analysis, "g_p95_post_500ms"),
+        max_gear_force_n: ana_f32(&stats.landing_analysis, "max_gear_force_n"),
         peak_vs_pre_flare_fpm: ana_f32(&stats.landing_analysis, "peak_vs_pre_flare_fpm"),
         vs_at_flare_end_fpm: ana_f32(&stats.landing_analysis, "vs_at_flare_end_fpm"),
         flare_reduction_fpm: ana_f32(&stats.landing_analysis, "flare_reduction_fpm"),
@@ -8241,7 +8541,24 @@ fn record_landing_for_filed_flight(
         SimKind::Msfs2020 | SimKind::Msfs2024 => Some("MSFS"),
         SimKind::XPlane11 | SimKind::XPlane12 => Some("X-PLANE"),
     };
-    let aircraft_icao = snapshot.as_ref().and_then(|s| s.aircraft_icao.as_deref());
+    // v0.7.17 (B-015): Snapshot kann beim Filing None sein (Sim
+    // disconnected, X-Plane Web API aus, etc.). Vorher: aircraft_icao
+    // fiel dann ebenfalls None → sub_rollout-Score nutzte konservative
+    // Light-GA-Schwellen → A320 mit 1096 m Rollout bekam fälschlich
+    // 80 PTS (good_stop) statt 100 PTS (excellent_stop). Fallback auf
+    // Bid-Wert (`flight.aircraft_icao`) der beim Flugstart aus dem
+    // phpVMS-Bid persistiert wurde und über die gesamte Flight-Dauer
+    // stabil bleibt. Webapp benutzt denselben Wert → konsistent.
+    let bid_icao = flight.aircraft_icao.trim();
+    let bid_icao_opt: Option<&str> = if bid_icao.is_empty() {
+        None
+    } else {
+        Some(bid_icao)
+    };
+    let aircraft_icao = snapshot
+        .as_ref()
+        .and_then(|s| s.aircraft_icao.as_deref())
+        .or(bid_icao_opt);
     let aircraft_title = snapshot.as_ref().and_then(|s| s.aircraft_title.as_deref());
 
     let Some(record) = build_landing_record(
@@ -8533,6 +8850,56 @@ fn spawn_phpvms_position_worker(
                         &app,
                         &flight,
                         "phpvms-worker POST",
+                    );
+                    flight.phpvms_worker_spawned.store(false, Ordering::SeqCst);
+                    return;
+                }
+                Ok(Err(e @ ApiError::Unauthenticated)) | Ok(Err(e @ ApiError::Forbidden)) => {
+                    // v0.7.17 (B-007): phpVMS hat 401/403 zurueckgegeben.
+                    // Typische Ursachen:
+                    //   * VA-Admin hat den Pilot-Account gesperrt
+                    //     (suspended) oder inaktiv gesetzt
+                    //   * API-Key wurde server-side rotated/revoked
+                    //   * VA-Permissions wurden geaendert und der Pilot
+                    //     hat den ACARS-Endpunkt nicht mehr
+                    //
+                    // Vor v0.7.17 wurde der Batch endlos requeued —
+                    // phpVMS bekam 30 s Takt Spam von einem Account der
+                    // gar nicht mehr posten darf. Jetzt: Outbox leeren,
+                    // Connection-State BLOCKED, Worker terminieren,
+                    // klarer Activity-Log-Eintrag. Pilot kontaktiert
+                    // VA-Admin und re-logged-in nach Klaerung.
+                    let http_code = match e {
+                        ApiError::Unauthenticated => 401,
+                        _ => 403,
+                    };
+                    // Schmeisse den Batch und die noch in der Outbox
+                    // wartenden Items weg — retry sinnlos.
+                    {
+                        let mut outbox = flight.position_outbox.lock()
+                            .expect("position_outbox lock");
+                        outbox.clear();
+                    }
+                    {
+                        let mut stats = flight.stats.lock().expect("flight stats");
+                        stats.queued_position_count = 0;
+                    }
+                    flight.connection_state.store(CONN_STATE_BLOCKED, Ordering::Relaxed);
+                    tracing::error!(
+                        pirep_id = %flight.pirep_id,
+                        http_code = http_code,
+                        batch_size = batch.len(),
+                        "phpvms-worker terminating: account blocked (401/403). \
+                         outbox cleared, no more retries"
+                    );
+                    log_activity_handle(
+                        &app,
+                        ActivityLevel::Error,
+                        "phpVMS lehnt deine Anfragen ab — Account gesperrt oder inaktiv",
+                        Some(format!(
+                            "HTTP {http_code}: VA-Admin kontaktieren und nach Freigabe neu einloggen. \
+                             Position-Streaming wurde gestoppt."
+                        )),
                     );
                     flight.phpvms_worker_spawned.store(false, Ordering::SeqCst);
                     return;
@@ -8960,7 +9327,7 @@ async fn flight_end(
         // "60/100" — Score-Vertragsbruch.
         // Fallback: stats.landing_score.numeric() wenn Crate keinen
         // Aggregate liefert (z.B. komplett leerer Sub-Score-Vec).
-        let score = compute_aggregate_master_score(&stats)
+        let score = compute_aggregate_master_score(&stats, Some(&flight.aircraft_icao))
             .map(|m| m as i32)
             .or_else(|| stats.landing_score.map(|s| s.numeric()));
         let distance_nm = stats.distance_nm;
@@ -9236,9 +9603,8 @@ async fn flight_end(
                         // als landing_score (gewichteter Aggregate) nutzen.
                         let actual_burn = actual_burn_for_record(&stats);
                         let scoring_input = landing_scoring::LandingScoringInput {
-                            vs_fpm: stats
-                                .landing_peak_vs_fpm
-                                .or(stats.landing_rate_fpm),
+                            // v0.7.17 (B-015a QS-Fix): Edge-Wert hat Vorrang.
+                            vs_fpm: score_basis_vs_fpm(&stats),
                             peak_g_load: stats.landing_peak_g_force,
                             // v0.7.6 P2-B: zentraler Helper statt direkten Read.
                             bounce_count: Some(scored_bounce_count_for_score(&stats)),
@@ -9251,6 +9617,8 @@ async fn flight_end(
                             actual_trip_burn_kg: actual_burn,
                             planned_zfw_kg: stats.planned_zfw_kg,
                             planned_tow_kg: stats.planned_tow_kg,
+                            // v0.7.17 (N-002): aircraft-aware rollout score
+                            aircraft_icao: Some(flight.aircraft_icao.clone()),
                             ..Default::default()
                         };
                         let payload_sub_scores =
@@ -10453,6 +10821,84 @@ fn compute_landing_analysis(
     let pg_500 = peak_g_window(500);
     let pg_1000 = peak_g_window(1000);
 
+    // v0.7.17 (B-009): G-Force-Forensik — analog Sinkrate-Forensik.
+    //
+    // Sample-basierte robuste Statistiken statt naivem max(), damit
+    // Sim-Strut-Compression-Spikes (X-Plane + MSFS) nicht den Score
+    // zerschiessen.
+
+    // G im interpolierten Edge-Frame (analog vs_at_edge).
+    let g_at_edge: Option<f32> = match (last_air, first_ground) {
+        (Some(a), Some(g)) => {
+            let t_a = a.at.timestamp_millis() as f64;
+            let t_g = g.at.timestamp_millis() as f64;
+            let t_edge = edge_ms as f64;
+            if (t_g - t_a).abs() < 1e-6 {
+                Some(a.g_force)
+            } else {
+                let alpha = ((t_edge - t_a) / (t_g - t_a)).clamp(0.0, 1.0);
+                Some((a.g_force as f64 + (g.g_force as f64 - a.g_force as f64) * alpha) as f32)
+            }
+        }
+        _ => None,
+    };
+
+    // Hilfsfunktion: G-Samples im Post-Edge-Fenster sammeln.
+    let collect_g_post = |window_ms: i64| -> Vec<f32> {
+        let hi = edge_ms + window_ms;
+        samples
+            .iter()
+            .filter_map(|s| {
+                let ts = s.at.timestamp_millis();
+                if ts >= edge_ms && ts <= hi {
+                    Some(s.g_force)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
+
+    // Mean / Median / 95p — robuste Statistiken.
+    fn mean_of(xs: &[f32]) -> Option<f32> {
+        if xs.is_empty() { return None; }
+        let sum: f64 = xs.iter().map(|x| *x as f64).sum();
+        Some((sum / xs.len() as f64) as f32)
+    }
+    fn percentile_of(xs: &[f32], p: f32) -> Option<f32> {
+        if xs.is_empty() { return None; }
+        let mut sorted: Vec<f32> = xs.to_vec();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let idx = ((sorted.len() as f32 - 1.0) * p).round() as usize;
+        Some(sorted[idx.min(sorted.len() - 1)])
+    }
+
+    let g_250_samples = collect_g_post(250);
+    let g_500_samples = collect_g_post(500);
+    let g_smoothed_250ms_post = mean_of(&g_250_samples);
+    let g_median_post_500ms = percentile_of(&g_500_samples, 0.5);
+    let g_p95_post_500ms = percentile_of(&g_500_samples, 0.95);
+
+    // Max Gear-Normal-Force im Post-Edge-Fenster (Strut-Compression-Mass).
+    // gear_normal_force_n ist Option<f32> (X-Plane liefert es, MSFS None).
+    let max_gear_force_n: Option<f32> = {
+        let hi = edge_ms + 1000; // 1 s nach Edge
+        let mut peak = 0.0_f32;
+        let mut found = false;
+        for s in samples {
+            let ts = s.at.timestamp_millis();
+            if ts >= edge_ms && ts <= hi {
+                if let Some(f) = s.gear_normal_force_n {
+                    if f > peak {
+                        peak = f;
+                        found = true;
+                    }
+                }
+            }
+        }
+        if found { Some(peak) } else { None }
+    };
+
     // --- Flare-Analyse ---
     // Window: [-2000 ms, -100 ms] vor Edge. Suche steepste Sinkrate +
     // VS-Wert kurz vor Edge.
@@ -10598,6 +11044,12 @@ fn compute_landing_analysis(
         "vs_smoothed_1500ms_fpm": vs_1500,
         "peak_g_post_500ms": pg_500,
         "peak_g_post_1000ms": pg_1000,
+        // v0.7.17 (B-009): G-Force-Forensik
+        "g_at_edge": g_at_edge,
+        "g_smoothed_250ms_post": g_smoothed_250ms_post,
+        "g_median_post_500ms": g_median_post_500ms,
+        "g_p95_post_500ms": g_p95_post_500ms,
+        "max_gear_force_n": max_gear_force_n,
         "peak_vs_pre_flare_fpm": peak_vs_pre,
         "vs_at_flare_end_fpm": vs_at_flare_end,
         "flare_reduction_fpm": flare_reduction,
@@ -11853,9 +12305,16 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                         let rwy_match = stats.runway_match.as_ref();
                         aeroacars_mqtt::TouchdownPayload {
                             ts: landing_at.timestamp_millis(),
-                            vs_fpm: stats
-                                .landing_rate_fpm
-                                .or(stats.landing_peak_vs_fpm)
+                            // v0.7.17 (B-015a QS-Round-2): Edge-Wert hat
+                            // Vorrang — siehe `score_basis_vs_fpm()` Doc.
+                            // Live-Touchdown-MQTT-Top-Level-Wert war
+                            // bisher der einzige verbleibende Pfad mit
+                            // der alten `landing_rate_fpm.or(peak)`-
+                            // Cascade. Konsumenten (Recorder-DB
+                            // `touchdowns.vs_fpm`, Discord-Touchdown-
+                            // Posts, Live-Hardlanding-Notifications)
+                            // bekommen jetzt durchgaengig den Edge-Wert.
+                            vs_fpm: score_basis_vs_fpm(&stats)
                                 .map(|v| v.round() as i32)
                                 .unwrap_or(0),
                             ias_kt: stats
@@ -11888,6 +12347,12 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                             heading_mag_deg: stats.landing_heading_deg,
                             landing_weight_kg: stats.landing_weight_kg.map(|w| w as f32),
                             landing_fuel_kg: stats.landing_fuel_kg,
+                            // v0.7.17 (B-015d): OFP-Plan-Werte ans MQTT-
+                            // Touchdown-Payload anhängen damit die Webapp
+                            // den Loadsheet-Sub-Score genauso berechnen
+                            // kann wie der Pilot-Client.
+                            planned_zfw_kg: stats.planned_zfw_kg,
+                            planned_tow_kg: stats.planned_tow_kg,
                             rollout_distance_m: stats.rollout_distance_m.map(|d| d as f32),
                             approach_vs_stddev_fpm: stats.approach_vs_stddev_fpm,
                             approach_bank_stddev_deg: stats.approach_bank_stddev_deg,
@@ -12007,6 +12472,12 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                             vs_smoothed_1500ms_fpm: ana_f32(&stats.landing_analysis, "vs_smoothed_1500ms_fpm"),
                             peak_g_post_500ms: ana_f32(&stats.landing_analysis, "peak_g_post_500ms"),
                             peak_g_post_1000ms: ana_f32(&stats.landing_analysis, "peak_g_post_1000ms"),
+                            // v0.7.17 (B-009): G-Force-Forensik
+                            g_at_edge: ana_f32(&stats.landing_analysis, "g_at_edge"),
+                            g_smoothed_250ms_post: ana_f32(&stats.landing_analysis, "g_smoothed_250ms_post"),
+                            g_median_post_500ms: ana_f32(&stats.landing_analysis, "g_median_post_500ms"),
+                            g_p95_post_500ms: ana_f32(&stats.landing_analysis, "g_p95_post_500ms"),
+                            max_gear_force_n: ana_f32(&stats.landing_analysis, "max_gear_force_n"),
                             peak_vs_pre_flare_fpm: ana_f32(&stats.landing_analysis, "peak_vs_pre_flare_fpm"),
                             vs_at_flare_end_fpm: ana_f32(&stats.landing_analysis, "vs_at_flare_end_fpm"),
                             flare_reduction_fpm: ana_f32(&stats.landing_analysis, "flare_reduction_fpm"),
@@ -13119,16 +13590,10 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
             //       AND below 2000 ft AGL — robust catchall for
             //       low-altitude operations where neither (a) nor
             //       (b) clearly fires (helicopter ops, bush flying).
-            let standard_tod = snap.vertical_speed_fpm < -500.0
-                && lost_from_peak > 200.0;
-            let low_altitude_descent = snap.vertical_speed_fpm < -100.0
-                && snap.altitude_agl_ft < 3000.0
-                && lost_from_peak > 500.0;
-            let near_ground_descent = snap.altitude_agl_ft < 2000.0
-                && lost_from_peak > 800.0
-                && snap.vertical_speed_fpm < 0.0;
-            if standard_tod || low_altitude_descent || near_ground_descent {
-                next_phase = FlightPhase::Descent;
+            // v0.7.17 (B-010): Descent-Transition mit Dwell + Light-GA-
+            // Schwellen. Siehe check_descent_transition() Doc.
+            if let Some(p) = check_descent_transition(&mut stats, snap, now, lost_from_peak) {
+                next_phase = p;
             } else if snap.vertical_speed_fpm.abs() < 200.0
                 && snap.altitude_agl_ft > 5000.0
             {
@@ -13239,6 +13704,20 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
                 // gets a clean per-attempt picture.
                 stats.low_agl_vs_min_fpm = None;
                 stats.last_low_agl_vs_fpm = None;
+            } else if snap.vertical_speed_fpm.abs() < 200.0
+                && snap.altitude_agl_ft > 5000.0
+            {
+                // v0.7.17 (B-003): Descent → Cruise Recovery. Wenn der
+                // Sink stoppt UND wir wieder hoch genug sind, war das
+                // wahrscheinlich ein ATC-Step-Down oder ein V/S-Spike
+                // (Pause/Resume-Race) der die FSM faelschlich nach
+                // Descent gekippt hat. Vorher gab es nur Descent →
+                // Approach — Aircraft blieb fuer immer als „Descent"
+                // gemeldet, auch wenn Pilot wieder cruiste. Tester-
+                // Report ICE 529 EDDB→EVRA: FL330 Cruise, FMA ALT CRZ,
+                // Live-Map zeigte „Descent" + V/S -11 fpm. Selber
+                // Schwellwert wie Climb → Cruise (200 fpm + AGL > 5000).
+                next_phase = FlightPhase::Cruise;
             }
         }
         FlightPhase::Approach => {
@@ -14106,10 +14585,30 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
 
                 if !in_bounce_window && stats.landing_score.is_none() {
                     // All windows have closed — finalise the score once.
-                    let peak_vs = stats.landing_peak_vs_fpm.unwrap_or(0.0);
-                    let peak_g = stats.landing_peak_g_force.unwrap_or(0.0);
-                    let score = LandingScore::classify(peak_vs, peak_g, stats.bounce_count);
-                    stats.landing_score = Some(score);
+                    //
+                    // v0.7.17 (B-005): Wenn `landing_peak_vs_fpm` None ist
+                    // (= Sampler hat den Touchdown-VS gar nicht erfasst,
+                    // typisch bei Phantom-Touchdowns durch on_ground-
+                    // Flicker oder Sim-Bug), waere `unwrap_or(0.0)` =
+                    // 0.0 fpm gefallen → Smooth-Score 100 trotz nie
+                    // wirklich gemessenen Werts. Pilot sieht „Butter
+                    // Landing 100/100" obwohl gar kein Touchdown war.
+                    //
+                    // Fix: nur klassifizieren wenn `landing_peak_vs_fpm`
+                    // tatsaechlich Some ist (also der Sampler einen Wert
+                    // hatte). Sonst landing_score bleibt None, das
+                    // Touchdown-Event wird im PIREP als „score not
+                    // captured" markiert.
+                    if let Some(peak_vs) = stats.landing_peak_vs_fpm {
+                        let peak_g = stats.landing_peak_g_force.unwrap_or(0.0);
+                        let score = LandingScore::classify(peak_vs, peak_g, stats.bounce_count);
+                        stats.landing_score = Some(score);
+                    } else {
+                        tracing::warn!(
+                            pirep_id = %flight.pirep_id,
+                            "landing_peak_vs_fpm = None at score-finalise — keeping landing_score=None (B-005). Sampler likely missed the touchdown edge."
+                        );
+                    }
                 }
 
                 // Touch-and-Go classifier — runs in parallel with the
@@ -14275,9 +14774,42 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
                 }
             }
         }
-        FlightPhase::Arrived
-        | FlightPhase::PirepSubmitted
-        | FlightPhase::Preflight => {}
+        FlightPhase::Arrived | FlightPhase::PirepSubmitted => {
+            // v0.7.17 (B-004): Sanity-Check fuer „Aircraft fliegt wieder
+            // obwohl Phase ARRIVED ist". Klassisches Pattern: Pilot
+            // landet, vergisst Flug zu beenden (oder Auto-File scheitert
+            // silent, siehe B-006), startet im Sim einen neuen Flug.
+            // Position-Stream lief vorher endlos mit der alten PIREP-ID
+            // weiter und packte die neuen Positionen in den alten
+            // PIREP-Recorder-Stream (= „Aircraft springt nach Landung
+            // ploetzlich 750 km weg" wie bei CFG 1641 EDDM→EDDL).
+            //
+            // Hier ist die FSM die einzige Stelle die das mitbekommen
+            // kann — der Position-Worker selbst hat keinen Zugriff auf
+            // die Phase, posted blind. Wir setzen flight.stop damit der
+            // Worker beim naechsten Tick sauber abdreht. PIREP bleibt
+            // existing (wird nicht gefilt, bleibt prefiled — falls Pilot
+            // doch zurueckkommt und manuell beenden moechte).
+            let aircraft_clearly_flying =
+                !snap.on_ground && snap.groundspeed_kt > 100.0 && snap.engines_running > 0;
+            if aircraft_clearly_flying && !stats.arrived_stale_warning_logged {
+                tracing::warn!(
+                    pirep_id = %flight.pirep_id,
+                    phase = ?stats.phase,
+                    gs_kt = snap.groundspeed_kt,
+                    agl_ft = snap.altitude_agl_ft,
+                    "FSM phase=Arrived/PirepSubmitted but aircraft is flying again — stopping position stream"
+                );
+                stats.arrived_stale_warning_logged = true;
+                stats.pending_acars_logs.push(
+                    "Position-Stream gestoppt — Flugzeug fliegt wieder, aber PIREP war als 'angekommen' markiert. \
+                     Bitte den alten Flug manuell beenden (PIREP-Detail) oder via 'Flug verwerfen' verwerfen, \
+                     dann neuen Flug starten.".to_string(),
+                );
+                flight.stop.store(true, Ordering::Relaxed);
+            }
+        }
+        FlightPhase::Preflight => {}
     }
 
     // Universal "we're done" fallback. The normal FSM chain assumes a
@@ -14744,7 +15276,7 @@ fn build_pirep_fields(
     // 100/100" unten). Fallback auf Touchdown-Klassifikation wenn
     // Crate keinen Aggregate liefert.
     if let Some(touchdown_class) = stats.landing_score {
-        let aggregate = compute_aggregate_master_score(stats);
+        let aggregate = compute_aggregate_master_score(stats, Some(&flight.aircraft_icao));
         let (label, numeric) = match aggregate {
             Some(m) => (aggregate_score_label(m), m as i32),
             None => (touchdown_class.label(), touchdown_class.numeric()),
@@ -15370,7 +15902,9 @@ fn build_pirep_notes(flight: &ActiveFlight, stats: &FlightStats) -> String {
         _ => None,
     };
     let crate_input = landing_scoring::LandingScoringInput {
-        vs_fpm: stats.landing_peak_vs_fpm.or(stats.landing_rate_fpm),
+        // v0.7.17 (B-015a QS-Fix): Edge-Wert hat Vorrang — siehe
+        // `score_basis_vs_fpm()` Doc.
+        vs_fpm: score_basis_vs_fpm(stats),
         peak_g_load: stats.landing_peak_g_force,
         // v0.7.6 P2-B: zentraler Helper statt direkten Read.
         bounce_count: Some(scored_bounce_count_for_score(stats)),
@@ -15595,7 +16129,7 @@ fn announce_landing_score(app: &AppHandle, flight: &ActiveFlight) -> Option<Stri
     // Master-Score (das was App/Web/phpVMS jetzt anzeigen). Damit
     // ist klar dass "Touchdown: smooth" nicht das gleiche ist wie
     // "Master 77/100" — Pilot sieht beide Begriffe ohne Verwechslung.
-    let aggregate_master = compute_aggregate_master_score(&stats);
+    let aggregate_master = compute_aggregate_master_score(&stats, Some(&flight.aircraft_icao));
     drop(stats);
     let touchdown_grade = letter_grade(score.numeric());
     let master_text = match aggregate_master {
@@ -17107,51 +17641,11 @@ fn inspector_list(_state: tauri::State<'_, AppState>) -> Vec<serde_json::Value> 
     }
 }
 
-// ---- Fenix A32x Beta toggle (v0.7.16) ----
-//
-// Opt-in flag that gates the additive Fenix-A32x LVAR overrides in the
-// MSFS adapter's telemetry mapping (landing/nose/wing lights + flaps
-// lever cross-check). Default is `false` — current Fenix users on
-// v0.7.15 stable see no behavioral change unless they flip this on
-// from the Settings → Beta panel.
-//
-// Frontend persists the choice in localStorage and re-syncs it on
-// app start / login. Backend lives on the `MsfsAdapter` (atomic bool).
-
-#[tauri::command]
-fn set_fenix_beta_enabled(
-    _state: tauri::State<'_, AppState>,
-    enabled: bool,
-) -> Result<(), UiError> {
-    #[cfg(target_os = "windows")]
-    {
-        let adapter = _state.msfs.lock().expect("msfs lock");
-        adapter.set_fenix_beta_enabled(enabled);
-        tracing::info!(enabled, "fenix_beta_enabled set");
-        Ok(())
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = enabled;
-        Err(UiError::new(
-            "unsupported",
-            "Fenix Beta is only available on the Windows MSFS adapter",
-        ))
-    }
-}
-
-#[tauri::command]
-fn get_fenix_beta_enabled(_state: tauri::State<'_, AppState>) -> bool {
-    #[cfg(target_os = "windows")]
-    {
-        let adapter = _state.msfs.lock().expect("msfs lock");
-        adapter.fenix_beta_enabled()
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        false
-    }
-}
+// v0.7.16 introduced an opt-in `set_fenix_beta_enabled` / `get_fenix_beta_enabled`
+// Tauri-Command-Paar fuer das Fenix-A32x-Profil. v0.7.17 (F-001) hat das wieder
+// entfernt: die Fenix-Erkennung ist jetzt automatisch (siehe AircraftProfile::
+// is_fenix()), die LVAR-Overrides werden bedingungslos fuer Fenix-Aircraft
+// angewendet, ohne dass der Pilot in den Settings einen Haken setzen muss.
 
 /// X-Plane DataRef inspector: returns the static catalog with the
 /// most recent received value per entry. Unlike the MSFS Inspector
@@ -17631,22 +18125,46 @@ fn spawn_auto_start_watcher(app: AppHandle) {
             // hat dann ungewollt einen Auto-Start mit laufenden
             // Triebwerken bekommen.
             //
-            // Lösung: Wir prüfen ob die Snapshot-Daten "warm" sind
-            // (Aircraft-Title vorhanden + Fuel > 100 kg = echtes
-            // Aircraft, nicht Default). Wenn nicht warm, skip ohne
-            // Hint-Banner — die Daten settled binnen 1-3 s und der
-            // Pilot will dafür keinen Banner sehen.
-            let sim_data_warm = snap
+            // v0.7.17 (N-003a/b/c): Differenzierte Diagnose statt
+            // pauschalem Skip. Bisher war der "nicht warm"-Skip stumm
+            // (nur Debug-Log), was Piloten ohne X-Plane-Web-API ratlos
+            // zurueckliess — siehe Michel's „Auto-Start funktioniert
+            // nicht"-Report.
+            //   * `aircraft_title` leer → bei XP12-Profil ist die
+            //     Web-API nicht aktiviert (Settings → Network); bei
+            //     MSFS der Sim noch im Boot.
+            //   * `fuel_total_kg` ≤ 100 → Anti-Race-Sanity ist zu
+            //     strikt fuer Light-GA. Wir lockern auf > 1 kg, was
+            //     den Sim-Boot-Race weiter abfaengt (Default = 0) ohne
+            //     legitime kleine Sprits auszuschliessen.
+            let title_missing = snap
                 .aircraft_title
                 .as_deref()
-                .map(|s| !s.trim().is_empty())
-                .unwrap_or(false)
-                && snap.fuel_total_kg > 100.0;
-            if !sim_data_warm {
-                tracing::debug!("auto-start: sim data not warm yet — skipping");
-                continue;
-            }
-            let skip_reason: Option<(&'static str, &'static str)> = if !snap.on_ground {
+                .map(|s| s.trim().is_empty())
+                .unwrap_or(true);
+            let fuel_zero = snap.fuel_total_kg <= 1.0;
+            let warm_reason: Option<(&'static str, &'static str)> =
+                if title_missing && matches!(snap.simulator, sim_core::Simulator::XPlane11 | sim_core::Simulator::XPlane12) {
+                    Some((
+                        "title_missing_xplane",
+                        "Auto-Start wartet auf Sim-Daten: Aircraft-Titel fehlt. In X-Plane Settings → Network → Web API einschalten, damit AeroACARS den Flugzeug-Namen lesen kann.",
+                    ))
+                } else if title_missing {
+                    Some((
+                        "title_missing",
+                        "Auto-Start wartet auf Sim-Daten: Aircraft-Titel fehlt. Sim ist noch im Boot oder das Flugzeug ist nicht voll geladen.",
+                    ))
+                } else if fuel_zero {
+                    Some((
+                        "fuel_zero",
+                        "Auto-Start wartet auf Sim-Daten: Fuel = 0. Tank ist leer (Cold & Dark ohne Sprit) oder Sim noch im Boot.",
+                    ))
+                } else {
+                    None
+                };
+            let skip_reason: Option<(&'static str, &'static str)> = if let Some(r) = warm_reason {
+                Some(r)
+            } else if !snap.on_ground {
                 Some(("airborne", "Du bist in der Luft — Auto-Start funktioniert nur am Boden"))
             } else if snap.groundspeed_kt > 5.0 {
                 Some(("moving", "Flugzeug rollt schon — Auto-Start greift nur am Stand"))
@@ -17704,6 +18222,33 @@ fn spawn_auto_start_watcher(app: AppHandle) {
                 Ok(v) => v,
                 Err(_) => continue,
             };
+            // v0.7.17 (N-003): Wenn die Bid-Liste leer ist, sagen wir
+            // es dem Piloten — vorher Silent-Skip.
+            if bids.is_empty() {
+                let now = Utc::now();
+                let should_log = {
+                    let mut g = state.auto_start_skip_reason.lock().unwrap();
+                    let log_it = matches!(
+                        g.as_ref(),
+                        None | Some((_, _))
+                    ) && g.as_ref().map_or(true, |(at, code)| {
+                        code != "no_bids" || (now - *at).num_seconds() >= 60
+                    });
+                    if log_it {
+                        *g = Some((now, "no_bids".to_string()));
+                    }
+                    log_it
+                };
+                if should_log {
+                    log_activity_handle(
+                        &app,
+                        ActivityLevel::Info,
+                        "Auto-Start: keine Bids verfuegbar".to_string(),
+                        Some("Im phpVMS-Bid-Tab steht aktuell nichts gebucht. Logged-in?".to_string()),
+                    );
+                }
+                continue;
+            }
             // Don't re-fire for the same bid within the same parked
             // session. Cleared in `flight_end` via the active_flight
             // guard above resetting on the next tick.
@@ -17711,9 +18256,22 @@ fn spawn_auto_start_watcher(app: AppHandle) {
                 let g = state.auto_start_last_bid_id.lock().unwrap();
                 *g
             };
+            let mut any_match_attempt = false;
+            let mut closest_nm: Option<f64> = None;
+            let mut fired = false;
             for bid in &bids {
                 if Some(bid.id) == last_bid {
                     continue;
+                }
+                any_match_attempt = true;
+                // v0.7.17 (N-003): Track nearest-bid distance fuer
+                // den Aktivity-Log-Hint, wenn am Ende KEIN Bid matcht.
+                if let Some((apt_lat, apt_lon)) =
+                    runway::airport_position(&bid.flight.dpt_airport_id)
+                {
+                    let dist_nm = runway::distance_m(snap.lat, snap.lon, apt_lat, apt_lon)
+                        / 1852.0;
+                    closest_nm = Some(closest_nm.map_or(dist_nm, |c| c.min(dist_nm)));
                 }
                 if !bid_matches_current_state(bid, &snap) {
                     continue;
@@ -17755,6 +18313,18 @@ fn spawn_auto_start_watcher(app: AppHandle) {
                             bid_id,
                             "auto-start: flight_start command failed"
                         );
+                        // v0.7.17 (N-003): bisher silent (nur tracing::warn).
+                        // Jetzt auch im Activity-Log, damit der Pilot sieht
+                        // warum sein automatisch erkannter Flug nicht
+                        // gestartet wurde (z.B. „not_at_departure",
+                        // „not_on_ground", „bid_not_found" wegen W5).
+                        let app_log = app_for_call.clone();
+                        log_activity_handle(
+                            &app_log,
+                            ActivityLevel::Warn,
+                            "Auto-Start: flight_start fehlgeschlagen".to_string(),
+                            Some(format!("Bid {} – Fehler: {}", bid_id, e.code)),
+                        );
                         // Clear the last_bid_id so the user can retry
                         // by toggling auto-start off/on or fixing the
                         // condition (e.g. wrong aircraft).
@@ -17763,7 +18333,56 @@ fn spawn_auto_start_watcher(app: AppHandle) {
                         *g = None;
                     }
                 });
+                fired = true;
                 break;
+            }
+            // v0.7.17 (N-003): Wenn die for-Schleife ohne Match endet
+            // (kein break), gib dem Piloten einen Hint mit dem nähesten
+            // Departure-Airport. Vorher silent.
+            if !fired {
+                let now = Utc::now();
+                let (reason_code, reason_msg) = if !any_match_attempt {
+                    // Bid-Liste war zwar nicht leer, aber das einzige Bid
+                    // ist bereits durchs last_bid_id-Lock blockiert.
+                    (
+                        "bid_already_started",
+                        format!(
+                            "Bid {} wurde diese Session schon mal auto-gestartet. \
+                             Neu-Starten via Manual-Toggle oder anderem Bid.",
+                            last_bid.map_or("?".to_string(), |id| id.to_string())
+                        ),
+                    )
+                } else {
+                    let dist_text = closest_nm
+                        .map(|nm| format!("{:.1} nm zum naechsten Departure-Airport", nm))
+                        .unwrap_or_else(|| "kein Departure-Airport in Reichweite".to_string());
+                    (
+                        "no_bid_match",
+                        format!(
+                            "Kein Bid passt zur aktuellen Position ({}). Auto-Start \
+                             greift nur am Stand des Departure-Airports.",
+                            dist_text
+                        ),
+                    )
+                };
+                let should_log = {
+                    let mut g = state.auto_start_skip_reason.lock().unwrap();
+                    let log_it = g.as_ref().map_or(true, |(at, code)| {
+                        code != reason_code || (now - *at).num_seconds() >= 60
+                    });
+                    if log_it {
+                        *g = Some((now, reason_code.to_string()));
+                    }
+                    log_it
+                };
+                if should_log {
+                    log_activity_handle(
+                        &app,
+                        ActivityLevel::Info,
+                        "Auto-Start: kein Match".to_string(),
+                        Some(reason_msg),
+                    );
+                }
             }
         }
     });
@@ -18346,6 +18965,7 @@ pub fn run() {
             flight_cancel,
             activity_log_get,
             activity_log_clear,
+            activity_log_add,
             landing_list,
             landing_get_current,
             landing_delete,
@@ -18357,8 +18977,6 @@ pub fn run() {
             inspector_add,
             inspector_remove,
             inspector_list,
-            set_fenix_beta_enabled,
-            get_fenix_beta_enabled,
             xplane_inspector_list,
             xplane_premium_status,
             xplane_detect_install_path,
@@ -18571,6 +19189,176 @@ mod touch_and_go_go_around_tests {
         );
         assert!(out.is_none());
         assert_eq!(stats.go_around_count, 0);
+    }
+
+    // ---- v0.7.17 (B-010): check_descent_transition ----
+
+    fn descent_snap(agl_ft: f64, vs_fpm: f32, total_weight_kg: Option<f32>) -> SimSnapshot {
+        let mut s = snap_at(agl_ft, vs_fpm, false);
+        s.altitude_msl_ft = agl_ft + 1000.0; // dummy MSL above AGL
+        s.total_weight_kg = total_weight_kg;
+        s
+    }
+
+    #[test]
+    fn descent_single_tick_spike_does_not_transition() {
+        // GSG-105-Symptom: ein einzelner Trim-Spike (-800 fpm) bei vs<-500
+        // erfuellt standard_tod-Bedingung sofort. Wichtig: erste Tick darf
+        // NICHT direkt umschalten — nur den Dwell-Timer arm-en.
+        let mut stats = FlightStats::default();
+        let snap = descent_snap(8000.0, -800.0, Some(60000.0));
+        let lost_from_peak = 300.0; // > 200 → standard_tod TRUE
+        let out = check_descent_transition(&mut stats, &snap, t0(), lost_from_peak);
+        assert!(out.is_none(), "single tick must not transition (dwell not elapsed)");
+        // Timer ist armed
+        assert!(stats.descent_pending_since.is_some());
+    }
+
+    #[test]
+    fn descent_brief_spike_armed_then_breaks_clears_dwell() {
+        // Airliner: kurzer -600 fpm Spike der Bedingung erfuellt, aber
+        // nach 5 s ist V/S wieder +200 fpm (Cruise-Korrektur).
+        let mut stats = FlightStats::default();
+        let now = t0();
+        let trigger = descent_snap(8000.0, -600.0, Some(60000.0)); // Heavy
+        let lost = 300.0; // > 200 fuer standard_tod
+        // Tick 1: Bedingung erfuellt → Timer started
+        let out1 = check_descent_transition(&mut stats, &trigger, now, lost);
+        assert!(out1.is_none());
+        assert!(stats.descent_pending_since.is_some());
+        // Tick 2 (5 s spaeter): Bedingung gebrochen
+        let recover = descent_snap(8050.0, 200.0, Some(60000.0));
+        let out2 = check_descent_transition(
+            &mut stats,
+            &recover,
+            now + chrono::Duration::seconds(5),
+            300.0,
+        );
+        assert!(out2.is_none());
+        // Timer reset
+        assert!(stats.descent_pending_since.is_none());
+    }
+
+    #[test]
+    fn descent_sustained_sink_after_dwell_transitions() {
+        let mut stats = FlightStats::default();
+        let now = t0();
+        let trigger = descent_snap(8000.0, -600.0, Some(60000.0));
+        let lost = 300.0;
+        // Tick 1: arm
+        check_descent_transition(&mut stats, &trigger, now, lost);
+        assert!(stats.descent_pending_since.is_some());
+        // Tick 2 (DWELL_SECS+1 s spaeter, immer noch sustained sink):
+        let out = check_descent_transition(
+            &mut stats,
+            &trigger,
+            now + chrono::Duration::seconds(DESCENT_DWELL_SECS + 1),
+            lost,
+        );
+        assert_eq!(out, Some(FlightPhase::Descent));
+        // Timer wieder None nach Trigger
+        assert!(stats.descent_pending_since.is_none());
+    }
+
+    #[test]
+    fn descent_light_ga_uses_higher_threshold() {
+        // Cessna (800 kg), AGL 2000 ft, V/S -200 fpm.
+        // lost_from_peak = 600 ft → unter Light-GA-Schwelle (1000) → KEIN Trigger.
+        // Bei Heavy waere 600 > 500 → Trigger gewesen.
+        let mut stats = FlightStats::default();
+        let snap = descent_snap(2000.0, -200.0, Some(800.0));
+        let out = check_descent_transition(
+            &mut stats,
+            &snap,
+            t0() + chrono::Duration::seconds(DESCENT_DWELL_SECS + 10),
+            600.0,
+        );
+        assert!(out.is_none(), "Light-GA bei 600 ft lost darf nicht triggern");
+
+        // Gleicher Snap aber Heavy (60.000 kg) → MUSS arm dann triggern.
+        let mut stats2 = FlightStats::default();
+        let mut heavy = snap;
+        heavy.total_weight_kg = Some(60000.0);
+        let now = t0();
+        check_descent_transition(&mut stats2, &heavy, now, 600.0);
+        let out_heavy = check_descent_transition(
+            &mut stats2,
+            &heavy,
+            now + chrono::Duration::seconds(DESCENT_DWELL_SECS + 1),
+            600.0,
+        );
+        assert_eq!(out_heavy, Some(FlightPhase::Descent));
+    }
+
+    #[test]
+    fn descent_no_weight_info_uses_heavy_thresholds() {
+        // Wenn snap.total_weight_kg=None (z.B. Fenix in fruehen Versionen),
+        // fallback auf Heavy-Schwellen — sonst wuerden alle Airliner
+        // im Light-GA-Modus laufen.
+        let mut stats = FlightStats::default();
+        let snap = descent_snap(2000.0, -200.0, None);
+        let now = t0();
+        check_descent_transition(&mut stats, &snap, now, 600.0);
+        let out = check_descent_transition(
+            &mut stats,
+            &snap,
+            now + chrono::Duration::seconds(DESCENT_DWELL_SECS + 1),
+            600.0,
+        );
+        assert_eq!(out, Some(FlightPhase::Descent));
+    }
+
+    // ---- v0.7.17 (B-015a QS-Fix): score_basis_vs_fpm ----
+
+    #[test]
+    fn score_basis_uses_edge_when_negative() {
+        // EIN799-Regression: vs_at_edge_fpm = -265 muss gewinnen gegen
+        // landing_peak_vs_fpm = -311.
+        let mut stats = FlightStats::default();
+        stats.landing_peak_vs_fpm = Some(-311.0);
+        stats.landing_rate_fpm = Some(-311.0);
+        stats.landing_analysis = Some(serde_json::json!({
+            "vs_at_edge_fpm": -265.0,
+        }));
+        assert_eq!(score_basis_vs_fpm(&stats), Some(-265.0));
+    }
+
+    #[test]
+    fn score_basis_falls_back_when_edge_missing() {
+        let mut stats = FlightStats::default();
+        stats.landing_peak_vs_fpm = Some(-311.0);
+        stats.landing_rate_fpm = Some(-358.0);
+        // No landing_analysis at all.
+        assert_eq!(score_basis_vs_fpm(&stats), Some(-311.0));
+        // landing_analysis ohne vs_at_edge_fpm-Key.
+        stats.landing_analysis = Some(serde_json::json!({
+            "other_field": 42,
+        }));
+        assert_eq!(score_basis_vs_fpm(&stats), Some(-311.0));
+    }
+
+    #[test]
+    fn score_basis_ignores_positive_edge() {
+        // Bumping/Ballooning kurz vor TD kann positive Werte produzieren —
+        // das ist kein echter Aufsetz-Moment, fallback auf peak.
+        let mut stats = FlightStats::default();
+        stats.landing_peak_vs_fpm = Some(-311.0);
+        stats.landing_analysis = Some(serde_json::json!({
+            "vs_at_edge_fpm": 12.0,
+        }));
+        assert_eq!(score_basis_vs_fpm(&stats), Some(-311.0));
+    }
+
+    #[test]
+    fn score_basis_full_fallback_chain() {
+        // peak None → rate.
+        let mut stats = FlightStats::default();
+        stats.landing_peak_vs_fpm = None;
+        stats.landing_rate_fpm = Some(-358.0);
+        assert_eq!(score_basis_vs_fpm(&stats), Some(-358.0));
+        // alle None → None.
+        let stats2 = FlightStats::default();
+        assert_eq!(score_basis_vs_fpm(&stats2), None);
     }
 }
 

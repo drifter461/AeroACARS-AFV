@@ -117,13 +117,6 @@ struct Shared {
     /// `None` when no PMDG aircraft is loaded.
     /// Phase 5.2 — wired into the dispatch loop in this commit.
     pmdg: Mutex<PmdgSharedState>,
-    /// v0.7.16: opt-in flag that enables the additive Fenix A32x
-    /// LVAR overrides in `telemetry::parse` (landing/nose/wing/runway
-    /// turnoff lights + flaps lever detent). Default `false` so the
-    /// stable v0.7.15 mapping is bit-identical for current users. Set
-    /// via `MsfsAdapter::set_fenix_beta_enabled` (Tauri command from
-    /// the frontend). Read on every snapshot tick.
-    fenix_beta_enabled: AtomicBool,
 }
 
 /// Convert a PMDG NG3 (737-specific) snapshot to the generic
@@ -505,7 +498,6 @@ impl MsfsAdapter {
                 touchdown: Mutex::new(None),
                 inspector: Mutex::new(InspectorState::default()),
                 pmdg: Mutex::new(PmdgSharedState::default()),
-                fenix_beta_enabled: AtomicBool::new(false),
             }),
             worker: None,
             stop: Arc::new(AtomicBool::new(false)),
@@ -549,21 +541,6 @@ impl MsfsAdapter {
 
     pub fn state(&self) -> ConnectionState {
         *self.shared.state.lock().unwrap()
-    }
-
-    /// v0.7.16: opt-in toggle for the additive Fenix-A32x LVAR
-    /// overrides (`telemetry::parse` reads this on every tick). Default
-    /// is `false`; the frontend wires it via the
-    /// `set_fenix_beta_enabled` Tauri command.
-    pub fn set_fenix_beta_enabled(&self, enabled: bool) {
-        self.shared
-            .fenix_beta_enabled
-            .store(enabled, Ordering::Relaxed);
-    }
-
-    /// Read the current Fenix beta opt-in state.
-    pub fn fenix_beta_enabled(&self) -> bool {
-        self.shared.fenix_beta_enabled.load(Ordering::Relaxed)
     }
 
     pub fn snapshot(&self) -> Option<SimSnapshot> {
@@ -896,10 +873,10 @@ fn run_dispatch(
                     last_data = Instant::now();
                     match request_id {
                         REQUEST_ID => {
-                            let fenix_beta = shared
-                                .fenix_beta_enabled
-                                .load(Ordering::Relaxed);
-                            let mut snap = telemetry::parse(&bytes, simulator, fenix_beta);
+                            // v0.7.17 (F-001): no more Fenix-Beta flag — the
+                            // adapter always applies the Fenix-A32x extension
+                            // LVARs when the aircraft profile is Fenix.
+                            let mut snap = telemetry::parse(&bytes, simulator);
                             // Spec v0.7.15 F5: Pause-State aus dem Atomic
                             // in den Snapshot kopieren — wird vom Streamer-
                             // Loop in lib.rs ausgewertet damit der Pause-

@@ -314,6 +314,16 @@ pub struct TouchdownPayload {
     /// spaeteren Major-Version entfernt. Spec docs/spec/v0.7.6-landing-
     /// payload-consistency.md §4 P2-3.
     pub fuel_efficiency_pct: Option<f32>,
+    // v0.7.17 (B-015d): OFP-Plan-Werte mitschicken damit die Webapp
+    // den Loadsheet-Sub-Score genauso berechnen kann wie der Pilot-
+    // Client (sub_loadsheet erwartet ZFW + TOW). Ohne diese Felder
+    // zeigte die Webapp 6 Sub-Scores (kein Loadsheet) waehrend der
+    // Pilot-Client 7 zeigte → unterschiedliche Master-Scores fuer
+    // denselben Flug (Tester-Befund EIN799 2026-05-12).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub planned_zfw_kg: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub planned_tow_kg: Option<f32>,
     // ─── v0.5.23 Touchdown-Forensik ──────────────────────────────────
     //
     // Der Client berechnet bei jeder Landung BEIDE Schaetzer (Lua-30-
@@ -468,6 +478,17 @@ pub struct TouchdownPayload {
     /// Peak G ueber 1000 ms post-Edge.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub peak_g_post_1000ms: Option<f32>,
+    /// v0.7.17 (B-009): G-Force-Forensik (analog vs_smoothed_*).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub g_at_edge: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub g_smoothed_250ms_post: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub g_median_post_500ms: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub g_p95_post_500ms: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_gear_force_n: Option<f32>,
     /// Steepste Sinkrate in [-2000, -100] ms vor Edge — Pre-Flare.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub peak_vs_pre_flare_fpm: Option<f32>,

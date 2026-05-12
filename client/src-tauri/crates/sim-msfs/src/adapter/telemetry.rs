@@ -55,6 +55,17 @@ pub const TELEMETRY_FIELDS: &[TelemetryField] = &[
     F::f64("PLANE LONGITUDE", "degrees"),
     F::f64("PLANE ALTITUDE", "feet"),
     F::f64("PLANE ALT ABOVE GROUND", "feet"),
+    // v0.7.17 (B-003): zusaetzliche Altitude-SimVars um den bekannten
+    // MSFS-Altimetrie-Bug zu diagnostizieren — `PLANE ALTITUDE` ist
+    // geometric MSL und divergiert in arktischer Kaelte oder bei
+    // hohen ISA-Abweichungen 1-2k ft vom Cockpit-PFD-Reading. Mode-C-
+    // Transponder + VATSIM nutzen pressure altitude.
+    //   * INDICATED ALTITUDE: was das Cockpit-PFD zeigt (mit aktuellem
+    //     Baro-Setting; in cruise mit STD = pressure altitude)
+    //   * PRESSURE ALTITUDE: was Mode-C/VATSIM transmittet (immer STD)
+    // Refs: swift-project/pilotclient #169, MSFS DevSupport-Threads.
+    F::f64("INDICATED ALTITUDE", "feet"),
+    F::f64("PRESSURE ALTITUDE", "feet"),
     // ---- Attitude / motion ----
     F::f64("PLANE HEADING DEGREES TRUE", "degrees"),
     F::f64("PLANE HEADING DEGREES MAGNETIC", "degrees"),
@@ -330,6 +341,11 @@ pub struct Telemetry {
     pub lon: f64,
     pub altitude_msl_ft: f64,
     pub altitude_agl_ft: f64,
+    /// v0.7.17 (B-003) — INDICATED ALTITUDE (cockpit PFD reading,
+    /// baro-corrected). 0.0 when the SimVar is absent.
+    pub altitude_indicated_ft: f64,
+    /// v0.7.17 (B-003) — PRESSURE ALTITUDE (always STD). 0.0 when absent.
+    pub altitude_pressure_ft: f64,
 
     pub heading_true_deg: f64,
     pub heading_magnetic_deg: f64,
@@ -690,6 +706,8 @@ impl Telemetry {
         pull_f64!(t.lon);
         pull_f64!(t.altitude_msl_ft);
         pull_f64!(t.altitude_agl_ft);
+        pull_f64!(t.altitude_indicated_ft);
+        pull_f64!(t.altitude_pressure_ft);
 
         pull_f64!(t.heading_true_deg);
         pull_f64!(t.heading_magnetic_deg);
@@ -825,15 +843,14 @@ impl Telemetry {
 
 /// Convenience used by the worker: parse + remap to `SimSnapshot`.
 ///
-/// `fenix_beta_enabled` (v0.7.16) gates the additive Fenix-A32x
-/// LVAR overrides for landing / nose / wing / runway-turnoff lights
-/// and the flaps lever detent. Default is `false`: when off, the
-/// snapshot mapping is bit-identical to v0.7.15 stable (no regression
-/// for current Fenix users). When on, verified Fenix LVARs replace
-/// the standard SimVars for the affected fields.
-pub fn parse(bytes: &[u8], simulator: Simulator, fenix_beta_enabled: bool) -> SimSnapshot {
+/// v0.7.17 (F-001): The previous `fenix_beta_enabled` parameter is
+/// removed. The Fenix-A32x LVAR overrides are now ALWAYS applied
+/// when `AircraftProfile::is_fenix()` returns true. Tester-Feedback
+/// during the v0.7.16 opt-in beta phase was positive — no regression
+/// observed, mapping verified against the live `FNX32X_Interior.xml`.
+pub fn parse(bytes: &[u8], simulator: Simulator) -> SimSnapshot {
     let t = Telemetry::from_block(bytes);
-    telemetry_to_snapshot(t, simulator, fenix_beta_enabled)
+    telemetry_to_snapshot(t, simulator)
 }
 
 /// Map 0.0 → None, anything > 0 → Some. Used for SimVars where a
@@ -866,18 +883,16 @@ fn read_str256(bytes: &[u8], off: usize) -> Option<String> {
     })
 }
 
-fn telemetry_to_snapshot(
-    t: Telemetry,
-    simulator: Simulator,
-    fenix_beta_enabled: bool,
-) -> SimSnapshot {
+fn telemetry_to_snapshot(t: Telemetry, simulator: Simulator) -> SimSnapshot {
     let profile = AircraftProfile::detect(&t.title, &t.atc_model);
     let is_fenix = profile.is_fenix();
     let is_fbw = matches!(profile, AircraftProfile::FbwA32nx);
-    // v0.7.16 gate: additive LVAR overrides only kick in when
-    // the user has opted into the Fenix Beta profile. Stable behavior
-    // (v0.7.15 baseline) is the `false` branch everywhere below.
-    let fenix_beta = is_fenix && fenix_beta_enabled;
+    // v0.7.17 (F-001): Fenix-A32x extension LVARs are now ALWAYS applied
+    // when the profile is Fenix — the v0.7.16 opt-in flag is removed
+    // after a positive testing phase. The branch below is kept under
+    // the same `fenix_beta` name to avoid touching every downstream
+    // site; semantically it's now just "is a Fenix profile".
+    let fenix_beta = is_fenix;
 
     let engines_running = (t.eng1_firing as u8)
         + (t.eng2_firing as u8)
@@ -945,7 +960,18 @@ fn telemetry_to_snapshot(
     // Transponder code: FBW writes a plain decimal LVar (e.g.
     // L:A32NX_TRANSPONDER_CODE = 2523 means squawk 2523), the
     // standard SimVar is BCD-encoded (0x1234 = squawk 1234).
-    let transponder_code = if is_fbw && t.fbw_xpdr > 0.0 {
+    //
+    // v0.7.17 (B-002): Bei Fenix-Profilen liefert der Standard-
+    // `TRANSPONDER CODE:1` SimVar Werte, die NICHT mit dem cockpit-
+    // seitigen RMP/ATC-Display synchronisiert sind — Pilot stellt
+    // 2532 ein, AeroACARS meldet weiterhin 2000 (oder einen
+    // zufaelligen Pre-Power-Default). Bis ein Fenix-eigener LVAR
+    // identifiziert ist, der den echten Code haelt, blenden wir
+    // den Wert komplett aus, damit das Activity-Log keinen falschen
+    // Squawk loggt. Siehe docs/qs/v0.7.16-fenix-beta-bugs.md B-002.
+    let transponder_code = if is_fenix {
+        None
+    } else if is_fbw && t.fbw_xpdr > 0.0 {
         Some(t.fbw_xpdr.round().clamp(0.0, 7777.0) as u16)
     } else if t.transponder_bcd > 0.0 {
         let raw = t.transponder_bcd.round() as u32;
@@ -976,12 +1002,27 @@ fn telemetry_to_snapshot(
             t.fbw_ap_appr != 0.0,
         )
     } else if is_fenix {
-        let master = t.fnx_fcu_ap1 as i32 != 0 || t.fnx_fcu_ap2 as i32 != 0;
-        // We don't have HDG/ALT/NAV-mode LVars yet; fall back to the
-        // standard SimVars for those if Fenix wires them, otherwise
-        // they stay false. AP master is the most important value.
+        // v0.7.17 (B-008): `L:S_FCU_AP1` / `L:S_FCU_AP2` sind
+        // **Button-Press-Pulse** — 0→1→0 bei jedem Klick — NICHT der
+        // Engagement-State. Sie sind die ueberwaeltigende Mehrheit der
+        // Zeit 0, auch wenn der A320-AP tatsaechlich aktiv ist. Wir
+        // lasen sie als Master-Status und meldeten dadurch "AP off"
+        // mitten im FL313-Cruise (Tester-Befund Thomas K CFG 2222).
+        //
+        // Fix: Standard `AUTOPILOT MASTER` SimVar wie fuer alle
+        // anderen Modi (HDG/ALT/NAV) verwenden. Fenix's interner
+        // FCU-State spiegelt sich gemaess SimConnect-Konventionen
+        // im Standard-SimVar wider, solange das Aircraft korrekt
+        // wired ist. Falls QS belegt dass auch der Standard bei
+        // Fenix entkoppelt ist, brauchen wir Option C aus B-008
+        // (Suppression via Option<bool>).
+        //
+        // Approach-Mode behaelt den Pulse-OR-Standard-Pfad — die
+        // APPR-LVAR ist beim Fenix in der Praxis stabiler weil
+        // sie an die Mode-Flag-Latch des FMA gebunden ist; falls
+        // Standard wired ist, gewinnt der.
         (
-            master,
+            t.ap_master,
             t.ap_heading,
             t.ap_altitude,
             t.ap_nav,
@@ -1174,6 +1215,21 @@ fn telemetry_to_snapshot(
         lon: t.lon,
         altitude_msl_ft: t.altitude_msl_ft,
         altitude_agl_ft: t.altitude_agl_ft,
+        // v0.7.17 (B-003): Indicated + Pressure altitude side-by-side
+        // mit `altitude_msl_ft` (geometric MSL). Wenn ein SimVar
+        // nicht gesetzt wurde (0.0), liefern wir `None` damit
+        // Downstream zwischen "nicht gemessen" und "0 ft" unterscheiden
+        // kann.
+        altitude_indicated_ft: if t.altitude_indicated_ft.abs() > f64::EPSILON {
+            Some(t.altitude_indicated_ft)
+        } else {
+            None
+        },
+        altitude_pressure_ft: if t.altitude_pressure_ft.abs() > f64::EPSILON {
+            Some(t.altitude_pressure_ft)
+        } else {
+            None
+        },
         heading_deg_true: t.heading_true_deg as f32,
         heading_deg_magnetic: t.heading_magnetic_deg as f32,
         // v0.5.24: MSFS-SimConnect convention is INVERTED — `PLANE PITCH
@@ -1238,7 +1294,15 @@ fn telemetry_to_snapshot(
         mach: Some(t.mach as f32),
         empty_weight_kg,
         aircraft_title: Some(t.title).filter(|s| !s.is_empty()),
-        aircraft_icao: Some(t.atc_model).filter(|s| !s.is_empty()),
+        // v0.7.17 (B-001): Bei Profilen wie Fenix kommt `ATC MODEL`
+        // oft leer aus dem Sim — Pilot sah dann „Type ?" im Activity-
+        // Log. Fallback auf einen Profile-eigenen kanonischen ICAO
+        // (`AircraftProfile::icao_fallback()`), wenn der SimVar nichts
+        // liefert. Profile ohne eindeutige Variante (FBW, Default)
+        // behalten None und bleiben „?".
+        aircraft_icao: Some(t.atc_model)
+            .filter(|s| !s.is_empty())
+            .or_else(|| profile.icao_fallback().map(str::to_string)),
         aircraft_registration: Some(t.atc_id).filter(|s| !s.is_empty()),
         simulator,
         sim_version: None,
@@ -1334,39 +1398,25 @@ mod tests {
     }
 
     #[test]
-    fn beta_off_preserves_v0_7_15_stable_lights() {
-        // With beta disabled, the Fenix extension LVARs must NOT
-        // affect the snapshot — the standard SimVar values are the
-        // source of truth, exactly as in v0.7.15.
-        let t = fenix_telemetry(2.0, 2.0, 1.0, 1.0);
-        let snap = telemetry_to_snapshot(t, Simulator::Msfs2024, false);
-        assert_eq!(snap.light_landing, Some(false));
-        assert_eq!(snap.light_taxi, Some(false));
-        assert_eq!(snap.light_wing, None);
-    }
-
-    #[test]
-    fn beta_on_maps_landing_from_lvar_l_or_r_equals_2() {
-        // Either side at position 2 ("on") counts as landing-on. The
+    fn fenix_maps_landing_from_lvar_l_or_r_equals_2() {
+        // v0.7.17 (F-001): Fenix-Profil immer default-on. Either
+        // side at position 2 ("on") counts as landing-on. The
         // 0/1 positions (retracted/off) both stay off.
         let snap_l_only = telemetry_to_snapshot(
             fenix_telemetry(2.0, 0.0, 0.0, 0.0),
             Simulator::Msfs2024,
-            true,
         );
         assert_eq!(snap_l_only.light_landing, Some(true));
 
         let snap_r_only = telemetry_to_snapshot(
             fenix_telemetry(0.0, 2.0, 0.0, 0.0),
             Simulator::Msfs2024,
-            true,
         );
         assert_eq!(snap_r_only.light_landing, Some(true));
 
         let snap_off_with_off_position = telemetry_to_snapshot(
             fenix_telemetry(1.0, 1.0, 0.0, 0.0),
             Simulator::Msfs2024,
-            true,
         );
         // Position 1 = "off" (not retracted), still no landing light.
         assert_eq!(snap_off_with_off_position.light_landing, Some(false));
@@ -1374,60 +1424,91 @@ mod tests {
         let snap_retracted = telemetry_to_snapshot(
             fenix_telemetry(0.0, 0.0, 0.0, 0.0),
             Simulator::Msfs2024,
-            true,
         );
         assert_eq!(snap_retracted.light_landing, Some(false));
     }
 
     #[test]
-    fn beta_on_maps_taxi_from_nose_lvar() {
+    fn fenix_maps_taxi_from_nose_lvar() {
         // 0 = off, 1 = taxi, 2 = T.O. — both 1 and 2 count as on
         // for the binary taxi-light snapshot pill.
         let snap_off = telemetry_to_snapshot(
             fenix_telemetry(0.0, 0.0, 0.0, 0.0),
             Simulator::Msfs2024,
-            true,
         );
         assert_eq!(snap_off.light_taxi, Some(false));
 
         let snap_taxi = telemetry_to_snapshot(
             fenix_telemetry(0.0, 0.0, 1.0, 0.0),
             Simulator::Msfs2024,
-            true,
         );
         assert_eq!(snap_taxi.light_taxi, Some(true));
 
         let snap_takeoff = telemetry_to_snapshot(
             fenix_telemetry(0.0, 0.0, 2.0, 0.0),
             Simulator::Msfs2024,
-            true,
         );
         assert_eq!(snap_takeoff.light_taxi, Some(true));
     }
 
     #[test]
-    fn beta_on_maps_wing_light_from_lvar() {
+    fn fenix_maps_wing_light_from_lvar() {
         let snap_off = telemetry_to_snapshot(
             fenix_telemetry(0.0, 0.0, 0.0, 0.0),
             Simulator::Msfs2024,
-            true,
         );
         assert_eq!(snap_off.light_wing, Some(false));
 
         let snap_on = telemetry_to_snapshot(
             fenix_telemetry(0.0, 0.0, 0.0, 1.0),
             Simulator::Msfs2024,
-            true,
         );
         assert_eq!(snap_on.light_wing, Some(true));
     }
 
     #[test]
-    fn beta_on_does_not_affect_non_fenix_aircraft() {
-        // Beta flag must not leak into non-Fenix aircraft mapping —
-        // an Asobo A320 with non-zero Fenix LVAR fields (which would
-        // never happen in practice, but defensive) must stay on the
-        // standard SimVar path.
+    fn b008_fenix_ap_master_uses_standard_simvar_not_lvar_pulse() {
+        // v0.7.17 (B-008): `L:S_FCU_AP1` und `L:S_FCU_AP2` sind
+        // Button-Press-Pulse — 0→1→0 bei jedem Klick. Sie sind die
+        // meiste Zeit 0 obwohl der A320-AP aktiv ist (Tester-Befund
+        // Thomas K CFG 2222 FL313 Cruise: alle AP-Status zeigten OFF).
+        // Wir muessen den Standard `AUTOPILOT MASTER` SimVar lesen.
+
+        // Case 1: Pulse ist 0 (= 99% der Zeit), Standard-SimVar sagt AP aktiv
+        //   → Snapshot MUSS ap_master=true zeigen.
+        let mut t = Telemetry::default();
+        t.title = "FenixA320 CFM WF".into();
+        t.atc_model = "A320".into();
+        t.fnx_fcu_ap1 = 0.0; // Pulse zurueck auf 0
+        t.fnx_fcu_ap2 = 0.0;
+        t.ap_master = true; // Standard-SimVar = engaged
+        let snap = telemetry_to_snapshot(t, Simulator::Msfs2024);
+        assert!(
+            snap.autopilot_master.unwrap_or(false),
+            "B-008 regression: Fenix-AP-Master MUSS auf t.ap_master mappen, nicht auf den Pulse-LVAR"
+        );
+
+        // Case 2: Pulse spiked auf 1 (= seltener Klick-Moment), Standard sagt AP off.
+        //   → snapshot zeigt AP off (= echte Wahrheit), wir lassen uns vom Pulse
+        //     nicht ueberreden dass AP aktiv ist.
+        let mut t = Telemetry::default();
+        t.title = "FenixA320 CFM WF".into();
+        t.atc_model = "A320".into();
+        t.fnx_fcu_ap1 = 1.0; // Pulse spike — wir ignorieren ihn
+        t.fnx_fcu_ap2 = 0.0;
+        t.ap_master = false;
+        let snap = telemetry_to_snapshot(t, Simulator::Msfs2024);
+        assert!(
+            !snap.autopilot_master.unwrap_or(true),
+            "B-008: Pulse-Spike darf nicht als AP-engaged interpretiert werden"
+        );
+    }
+
+    #[test]
+    fn fenix_mapping_does_not_affect_non_fenix_aircraft() {
+        // v0.7.17: With Fenix mapping always-on the `is_fenix()`
+        // gate is the only thing keeping a non-Fenix aircraft on
+        // the standard SimVar path. Verify that gate.
         let mut t = Telemetry::default();
         t.title = "Asobo A320 Neo".into();
         t.atc_model = "A20N".into();
@@ -1437,10 +1518,82 @@ mod tests {
         t.fnx_ext_lt_landing_l = 2.0;
         t.fnx_ext_lt_nose = 1.0;
         t.fnx_ext_lt_wing = 1.0;
-        let snap = telemetry_to_snapshot(t, Simulator::Msfs2024, true);
+        let snap = telemetry_to_snapshot(t, Simulator::Msfs2024);
         assert_eq!(snap.light_landing, Some(false));
         assert_eq!(snap.light_taxi, Some(false));
         assert_eq!(snap.light_wing, None);
+    }
+
+    #[test]
+    fn b001_aircraft_icao_falls_back_for_fenix_with_empty_atc_model() {
+        // v0.7.17 (B-001): Wenn `ATC MODEL` leer (typisch bei Fenix
+        // wo der SimVar nicht zuverlaessig gefuellt wird), muss
+        // aircraft_icao auf den Profile-Fallback fallen — sonst sieht
+        // der Pilot „Type ?" im Activity-Log.
+        let mut t = Telemetry::default();
+        t.title = "FenixA320 CFM SL".into();
+        t.atc_model = "".into(); // SimVar leer
+        let snap = telemetry_to_snapshot(t, Simulator::Msfs2024);
+        assert_eq!(snap.aircraft_icao, Some("A320".to_string()));
+
+        let mut t = Telemetry::default();
+        t.title = "FenixA319 IAE".into();
+        t.atc_model = "".into();
+        let snap = telemetry_to_snapshot(t, Simulator::Msfs2024);
+        assert_eq!(snap.aircraft_icao, Some("A319".to_string()));
+
+        let mut t = Telemetry::default();
+        t.title = "FenixA321 NEO LR".into();
+        t.atc_model = "".into();
+        let snap = telemetry_to_snapshot(t, Simulator::Msfs2024);
+        assert_eq!(snap.aircraft_icao, Some("A321".to_string()));
+    }
+
+    #[test]
+    fn b001_aircraft_icao_prefers_sim_value_over_fallback() {
+        // Wenn der SimVar einen Wert liefert, hat der Vorrang — der
+        // Fallback ist nur ein Backup fuer leere SimVars.
+        let mut t = Telemetry::default();
+        t.title = "FenixA320 CFM SL".into();
+        t.atc_model = "A20N".into(); // SimVar liefert was (selten, aber falls)
+        let snap = telemetry_to_snapshot(t, Simulator::Msfs2024);
+        assert_eq!(snap.aircraft_icao, Some("A20N".to_string()));
+    }
+
+    #[test]
+    fn b002_fenix_transponder_code_suppressed_regardless_of_simvar() {
+        // v0.7.17 (B-002): Bei Fenix wird der Squawk im Snapshot
+        // immer None gemeldet — der Standard-SimVar liefert dort
+        // falsche/eingefrorene Werte. Auch wenn der Sim einen Wert
+        // zurueck gibt, blendet AeroACARS ihn aus.
+        let mut t = Telemetry::default();
+        t.title = "FenixA320 CFM SL".into();
+        t.atc_model = "A320".into();
+        t.transponder_bcd = 0x2532 as f64; // Sim sagt 2532, wir glauben's bei Fenix nicht
+        let snap = telemetry_to_snapshot(t, Simulator::Msfs2024);
+        assert_eq!(snap.transponder_code, None);
+    }
+
+    #[test]
+    fn b002_non_fenix_transponder_still_decoded() {
+        // BCD-Decoding fuer Nicht-Fenix-Profile bleibt unveraendert.
+        let mut t = Telemetry::default();
+        t.title = "Asobo A320 Neo".into();
+        t.atc_model = "A20N".into();
+        t.transponder_bcd = 0x2532 as f64;
+        let snap = telemetry_to_snapshot(t, Simulator::Msfs2024);
+        assert_eq!(snap.transponder_code, Some(2532));
+    }
+
+    #[test]
+    fn b001_non_fenix_with_empty_icao_stays_none() {
+        // Profile ohne icao_fallback (Default / FBW / PMDG / INI)
+        // behalten None bei leerem SimVar — kein Phantasie-ICAO.
+        let mut t = Telemetry::default();
+        t.title = "Asobo Cessna 172".into();
+        t.atc_model = "".into();
+        let snap = telemetry_to_snapshot(t, Simulator::Msfs2024);
+        assert_eq!(snap.aircraft_icao, None);
     }
 
     #[test]

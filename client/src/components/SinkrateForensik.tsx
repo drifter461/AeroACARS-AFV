@@ -138,10 +138,27 @@ export function vsTone(vs: number | null | undefined): Tone | null {
   return "err-severe";
 }
 
-/// Score-Basis-Chain: 1:1 wie LandingPanel.tsx:257, 1116.
+/// Score-Basis-Chain.
+///
+/// v0.7.17 (B-015): Bevorzuge `vs_at_edge_fpm` (50-Hz-Buffer-Edge, FAR
+/// 25.473 Engineering-Standard). Alte Felder `landing_peak_vs_fpm` /
+/// `landing_rate_fpm` kommen vom Streamer-Tick (3-30 s Cadence, je
+/// nach Phase) und liegen meist 30-50 fpm vom echten Edge entfernt.
+/// Die Webapp nutzt seit v0.7.11 den Edge-Wert konsequent (siehe
+/// `webapp/src/lib/displayVs.ts`); ohne diesen Fix zeigt der Pilot-
+/// Client einen anderen Wert als die Webapp fuer denselben Touchdown
+/// — Pilot kann sich das nicht erklaeren (User-Report 2026-05-12
+/// EIN799: Client -311 vs Web -265).
+///
+/// Negative-Check gegen Float-Noise / Pre-Touchdown-Bumps: nur Werte
+/// < 0 zaehlen als gueltiger Edge (im Sim positives V/S beim TD =
+/// Ballooning oder Sample-Glitch, nicht der echte Aufsetz-Moment).
 export function scoreBasisVs(record: Pick<LandingRecord,
-  "landing_peak_vs_fpm" | "landing_rate_fpm"
+  "vs_at_edge_fpm" | "landing_peak_vs_fpm" | "landing_rate_fpm"
 >): number {
+  if (record.vs_at_edge_fpm != null && record.vs_at_edge_fpm < 0) {
+    return record.vs_at_edge_fpm;
+  }
   return record.landing_peak_vs_fpm ?? record.landing_rate_fpm;
 }
 
