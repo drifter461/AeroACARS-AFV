@@ -1002,12 +1002,27 @@ fn telemetry_to_snapshot(t: Telemetry, simulator: Simulator) -> SimSnapshot {
             t.fbw_ap_appr != 0.0,
         )
     } else if is_fenix {
-        let master = t.fnx_fcu_ap1 as i32 != 0 || t.fnx_fcu_ap2 as i32 != 0;
-        // We don't have HDG/ALT/NAV-mode LVars yet; fall back to the
-        // standard SimVars for those if Fenix wires them, otherwise
-        // they stay false. AP master is the most important value.
+        // v0.7.17 (B-008): `L:S_FCU_AP1` / `L:S_FCU_AP2` sind
+        // **Button-Press-Pulse** — 0→1→0 bei jedem Klick — NICHT der
+        // Engagement-State. Sie sind die ueberwaeltigende Mehrheit der
+        // Zeit 0, auch wenn der A320-AP tatsaechlich aktiv ist. Wir
+        // lasen sie als Master-Status und meldeten dadurch "AP off"
+        // mitten im FL313-Cruise (Tester-Befund Thomas K CFG 2222).
+        //
+        // Fix: Standard `AUTOPILOT MASTER` SimVar wie fuer alle
+        // anderen Modi (HDG/ALT/NAV) verwenden. Fenix's interner
+        // FCU-State spiegelt sich gemaess SimConnect-Konventionen
+        // im Standard-SimVar wider, solange das Aircraft korrekt
+        // wired ist. Falls QS belegt dass auch der Standard bei
+        // Fenix entkoppelt ist, brauchen wir Option C aus B-008
+        // (Suppression via Option<bool>).
+        //
+        // Approach-Mode behaelt den Pulse-OR-Standard-Pfad — die
+        // APPR-LVAR ist beim Fenix in der Praxis stabiler weil
+        // sie an die Mode-Flag-Latch des FMA gebunden ist; falls
+        // Standard wired ist, gewinnt der.
         (
-            master,
+            t.ap_master,
             t.ap_heading,
             t.ap_altitude,
             t.ap_nav,
@@ -1449,6 +1464,44 @@ mod tests {
             Simulator::Msfs2024,
         );
         assert_eq!(snap_on.light_wing, Some(true));
+    }
+
+    #[test]
+    fn b008_fenix_ap_master_uses_standard_simvar_not_lvar_pulse() {
+        // v0.7.17 (B-008): `L:S_FCU_AP1` und `L:S_FCU_AP2` sind
+        // Button-Press-Pulse — 0→1→0 bei jedem Klick. Sie sind die
+        // meiste Zeit 0 obwohl der A320-AP aktiv ist (Tester-Befund
+        // Thomas K CFG 2222 FL313 Cruise: alle AP-Status zeigten OFF).
+        // Wir muessen den Standard `AUTOPILOT MASTER` SimVar lesen.
+
+        // Case 1: Pulse ist 0 (= 99% der Zeit), Standard-SimVar sagt AP aktiv
+        //   → Snapshot MUSS ap_master=true zeigen.
+        let mut t = Telemetry::default();
+        t.title = "FenixA320 CFM WF".into();
+        t.atc_model = "A320".into();
+        t.fnx_fcu_ap1 = 0.0; // Pulse zurueck auf 0
+        t.fnx_fcu_ap2 = 0.0;
+        t.ap_master = true; // Standard-SimVar = engaged
+        let snap = telemetry_to_snapshot(t, Simulator::Msfs2024);
+        assert!(
+            snap.autopilot_master.unwrap_or(false),
+            "B-008 regression: Fenix-AP-Master MUSS auf t.ap_master mappen, nicht auf den Pulse-LVAR"
+        );
+
+        // Case 2: Pulse spiked auf 1 (= seltener Klick-Moment), Standard sagt AP off.
+        //   → snapshot zeigt AP off (= echte Wahrheit), wir lassen uns vom Pulse
+        //     nicht ueberreden dass AP aktiv ist.
+        let mut t = Telemetry::default();
+        t.title = "FenixA320 CFM WF".into();
+        t.atc_model = "A320".into();
+        t.fnx_fcu_ap1 = 1.0; // Pulse spike — wir ignorieren ihn
+        t.fnx_fcu_ap2 = 0.0;
+        t.ap_master = false;
+        let snap = telemetry_to_snapshot(t, Simulator::Msfs2024);
+        assert!(
+            !snap.autopilot_master.unwrap_or(true),
+            "B-008: Pulse-Spike darf nicht als AP-engaged interpretiert werden"
+        );
     }
 
     #[test]

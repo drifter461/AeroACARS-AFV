@@ -378,8 +378,10 @@
       "sync": "SYNC",
       "offline": "OFFLINE",
       "stale": "STALLED",
-      "idle": "STARTING"
+      "idle": "STARTING",
+      "blocked": "BLOCKED"
     },
+    "blocked_detail": "Account blocked — contact your VA admin",
     "no_post_yet": "no post yet",
     "last_send_secs": "sent {{secs}} s ago",
     "sync_pending_one": "{{count}} position syncing",

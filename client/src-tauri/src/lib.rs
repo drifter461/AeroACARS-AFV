@@ -259,6 +259,24 @@ const HOLDING_BANK_THRESHOLD_DEG: f32 = 15.0;
 const HOLDING_VS_THRESHOLD_FPM: f32 = 200.0;
 /// Sustained climb time required before we classify a Go-Around.
 const GO_AROUND_DWELL_SECS: i64 = 8;
+/// v0.7.17 (B-010): Sustained sink-rate dwell before Climb → Descent.
+///
+/// Quelle: GSG 105 Cessna LDDU→LDSP zeigte 6 sec Descent-Phase weil
+/// ein Trim-/Turbulenz-Spike single-tick die FSM kippte. 15 s ist
+/// laenger als jede plausible Trim-Korrektur oder Turbulenz-Pause,
+/// aber kurz genug damit ein echter Top-of-Descent nicht spuerbar
+/// verzoegert wird (-500 fpm × 15 s = 125 ft Verlust, vernachlaessigbar
+/// gegen typische 25.000-ft-TOD-Strecken).
+const DESCENT_DWELL_SECS: i64 = 15;
+/// v0.7.17 (B-010): Gewichts-Schwelle Light-GA vs. Medium/Heavy.
+///
+/// 5700 kg = MTOM-Grenze EASA CS-23/CS-25 (Single/Twin-Prop GA vs.
+/// Regional/Airline). Light-GA-Flugzeuge fliegen Patterns / Local
+/// Sightseeing oft komplett unter 3000 ft AGL — die Standard-
+/// Schwellen `lost_from_peak > 500/800` triggern Spurious-Descent
+/// bei jedem Pattern-Leg. Light-GA bekommt deshalb groesszuegigere
+/// Werte.
+const LIGHT_GA_MTOM_KG: f32 = 5700.0;
 /// Minimum positive V/S at which the GA detector accepts a sample
 /// as "actually climbing" (filters out flare round-out / level-off).
 ///
@@ -853,6 +871,12 @@ struct ActiveFlight {
 /// Connection-State-Konstanten für ActiveFlight.connection_state.
 const CONN_STATE_LIVE: u8 = 0;
 const CONN_STATE_FAILING: u8 = 1;
+/// v0.7.17 (B-007): phpVMS hat 401/403 geliefert — Pilot-Account ist
+/// gesperrt, inaktiv, oder der API-Key wurde server-side revoked. Der
+/// Worker stoppt nach diesem State (kein endloses Retry-Spam mehr),
+/// die UI zeigt einen klaren Hinweis. Pilot muss VA-Admin kontaktieren
+/// und sich danach neu einloggen.
+const CONN_STATE_BLOCKED: u8 = 2;
 
 /// On-disk representation of an active flight, used for resume after a client
 /// crash. Not the same as `ActiveFlight` because we only persist serializable,
@@ -1062,6 +1086,10 @@ struct PersistedFlightStats {
     lowest_agl_during_approach_ft: Option<f32>,
     #[serde(default)]
     go_around_climb_pending_since: Option<DateTime<Utc>>,
+    // v0.7.17 (B-010): Descent-Dwell-Timer persistieren damit Resume
+    // mitten in einem Climb-Trim-Spike nicht den Timer verliert.
+    #[serde(default)]
+    descent_pending_since: Option<DateTime<Utc>>,
     // v0.5.11 holding-pattern tracking
     #[serde(default)]
     holding_pending_since: Option<DateTime<Utc>>,
@@ -1177,6 +1205,7 @@ impl PersistedFlightStats {
             go_around_count: stats.go_around_count,
             lowest_agl_during_approach_ft: stats.lowest_agl_during_approach_ft,
             go_around_climb_pending_since: stats.go_around_climb_pending_since,
+            descent_pending_since: stats.descent_pending_since,
             holding_pending_since: stats.holding_pending_since,
             holding_exit_pending_since: stats.holding_exit_pending_since,
             previous_phase_before_holding: stats.previous_phase_before_holding,
@@ -1268,6 +1297,7 @@ impl PersistedFlightStats {
         stats.go_around_count = self.go_around_count;
         stats.lowest_agl_during_approach_ft = self.lowest_agl_during_approach_ft;
         stats.go_around_climb_pending_since = self.go_around_climb_pending_since;
+        stats.descent_pending_since = self.descent_pending_since;
         stats.holding_pending_since = self.holding_pending_since;
         stats.holding_exit_pending_since = self.holding_exit_pending_since;
         stats.previous_phase_before_holding = self.previous_phase_before_holding;
@@ -1929,6 +1959,17 @@ struct FlightStats {
     /// `GO_AROUND_DWELL_SECS` before firing — otherwise every brief
     /// climb-correction during a normal approach would count as a GA.
     go_around_climb_pending_since: Option<DateTime<Utc>>,
+
+    /// v0.7.17 (B-010): Dwell-Timer fuer Climb → Descent.
+    ///
+    /// Bug-Symptom: GSG 105 (X-Plane 12 Cessna 1.000 kg, LDDU→LDSP)
+    /// zeigte 6-Sekunden-Phase Descent (17:49:35 Climb→Descent,
+    /// 17:49:41 Descent→Approach) — ein einzelner Turbulenz-/Trim-
+    /// Spike loeste single-tick Phase-Wechsel aus, AGL stieg sogar
+    /// zwischen den Phasen. Fix: Descent-Bedingungen muessen
+    /// `DESCENT_DWELL_SECS` durchgehend halten bevor wir umschalten.
+    /// Cleared sobald die Bedingungen wieder brechen.
+    descent_pending_since: Option<DateTime<Utc>>,
 
     // ---- v0.5.11 holding-pattern tracking ----
     /// Timestamp of the first tick where the aircraft satisfied
@@ -2873,6 +2914,68 @@ fn check_go_around(
         stats.go_around_climb_pending_since = None;
     }
     None
+}
+
+/// v0.7.17 (B-010): Climb → Descent Transition Decision.
+///
+/// Bug-Symptom (GSG 105 Cessna LDDU→LDSP, X-Plane 12):
+/// ```text
+/// 17:49:35  Climb→Descent    AGL 3575 ft
+/// 17:49:41  Descent→Approach AGL 3540 ft   (nur 6 s Descent!)
+/// ```
+/// Ein einzelner Turbulenz-/Trim-Spike kippte single-tick die FSM.
+/// AGL stieg sogar zwischen zwei Phasen-Wechseln — physikalisch
+/// unmoeglich fuer einen echten Descent.
+///
+/// **Fix:** zwei orthogonale Anpassungen:
+///
+/// 1. **Dwell-Timer:** Descent-Bedingung muss `DESCENT_DWELL_SECS`
+///    durchgehend halten bevor wir die FSM umschalten. Bricht die
+///    Bedingung zwischendrin → Timer reset.
+///
+/// 2. **Light-GA-Schwellen:** Wenn `total_weight_kg < LIGHT_GA_MTOM_KG`
+///    (= unter 5700 kg, CS-23-Klasse) → groesszuegigere
+///    `lost_from_peak`-Schwellen (1000/1200 statt 500/800 ft). Cessna
+///    im 1500-ft-Pattern verliert leicht 300-500 ft auf einem Sightseeing-
+///    Leg — das ist kein Descent.
+///
+/// Returns `Some(FlightPhase::Descent)` wenn beide Bedingungen erfuellt
+/// sind (Triggerung + Dwell durchgehalten). Side-effect: setzt /
+/// loescht `stats.descent_pending_since`.
+fn check_descent_transition(
+    stats: &mut FlightStats,
+    snap: &SimSnapshot,
+    now: DateTime<Utc>,
+    lost_from_peak: f32,
+) -> Option<FlightPhase> {
+    let is_light_ga = snap
+        .total_weight_kg
+        .map(|w| w < LIGHT_GA_MTOM_KG)
+        .unwrap_or(false);
+    let low_alt_thresh = if is_light_ga { 1000.0 } else { 500.0 };
+    let near_ground_thresh = if is_light_ga { 1200.0 } else { 800.0 };
+    let standard_tod = snap.vertical_speed_fpm < -500.0
+        && lost_from_peak > 200.0;
+    let low_altitude_descent = snap.vertical_speed_fpm < -100.0
+        && snap.altitude_agl_ft < 3000.0
+        && lost_from_peak > low_alt_thresh;
+    let near_ground_descent = snap.altitude_agl_ft < 2000.0
+        && lost_from_peak > near_ground_thresh
+        && snap.vertical_speed_fpm < 0.0;
+    let descent_conds = standard_tod || low_altitude_descent || near_ground_descent;
+    if descent_conds {
+        let pending = stats.descent_pending_since.get_or_insert(now);
+        if (now - *pending).num_seconds() >= DESCENT_DWELL_SECS {
+            stats.descent_pending_since = None;
+            return Some(FlightPhase::Descent);
+        }
+        None
+    } else {
+        // Bedingung gebrochen — Timer reset damit der naechste sustained
+        // Sink-Run einen frischen 15-s-Countdown bekommt.
+        stats.descent_pending_since = None;
+        None
+    }
 }
 
 /// v0.5.11: detect entry into a holding pattern.
@@ -4336,9 +4439,23 @@ async fn phpvms_load_session(
             Ok(Some(LoginResult { profile, base_url }))
         }
         // Stored key was rejected — drop it so the next login goes via the form.
-        Err(ApiError::Unauthenticated) => {
+        Err(ApiError::Unauthenticated) | Err(ApiError::Forbidden) => {
+            // v0.7.17 (B-007): Account-Sperre / inaktiv / revoked API-Key.
+            // Vorher: API-Key stumm geloescht, Pilot landete auf Login-Form
+            // ohne Erklaerung. Jetzt: klarer Activity-Log-Eintrag damit
+            // der Pilot sofort versteht warum er ausgeloggt wurde und was
+            // er tun muss (VA-Admin kontaktieren).
             let _ = secrets::delete_api_key(KEYRING_ACCOUNT);
             let _ = clear_site_config(&app);
+            log_activity_handle(
+                &app,
+                ActivityLevel::Warn,
+                "phpVMS hat dich abgemeldet — Account gesperrt, inaktiv oder API-Key revoked",
+                Some(
+                    "Bitte VA-Admin kontaktieren. Nach Freigabe einfach neu einloggen."
+                        .to_string(),
+                ),
+            );
             Ok(None)
         }
         Err(other) => Err(other.into()),
@@ -5722,6 +5839,7 @@ fn flight_info(flight: &ActiveFlight) -> ActiveFlightInfo {
         queued_position_count: stats.queued_position_count,
         connection_state: match flight.connection_state.load(Ordering::Relaxed) {
             CONN_STATE_FAILING => "failing".to_string(),
+            CONN_STATE_BLOCKED => "blocked".to_string(),
             _ => "live".to_string(),
         },
         paused_since: stats.paused_since.map(|t| t.to_rfc3339()),
@@ -8373,7 +8491,24 @@ fn record_landing_for_filed_flight(
         SimKind::Msfs2020 | SimKind::Msfs2024 => Some("MSFS"),
         SimKind::XPlane11 | SimKind::XPlane12 => Some("X-PLANE"),
     };
-    let aircraft_icao = snapshot.as_ref().and_then(|s| s.aircraft_icao.as_deref());
+    // v0.7.17 (B-015): Snapshot kann beim Filing None sein (Sim
+    // disconnected, X-Plane Web API aus, etc.). Vorher: aircraft_icao
+    // fiel dann ebenfalls None → sub_rollout-Score nutzte konservative
+    // Light-GA-Schwellen → A320 mit 1096 m Rollout bekam fälschlich
+    // 80 PTS (good_stop) statt 100 PTS (excellent_stop). Fallback auf
+    // Bid-Wert (`flight.aircraft_icao`) der beim Flugstart aus dem
+    // phpVMS-Bid persistiert wurde und über die gesamte Flight-Dauer
+    // stabil bleibt. Webapp benutzt denselben Wert → konsistent.
+    let bid_icao = flight.aircraft_icao.trim();
+    let bid_icao_opt: Option<&str> = if bid_icao.is_empty() {
+        None
+    } else {
+        Some(bid_icao)
+    };
+    let aircraft_icao = snapshot
+        .as_ref()
+        .and_then(|s| s.aircraft_icao.as_deref())
+        .or(bid_icao_opt);
     let aircraft_title = snapshot.as_ref().and_then(|s| s.aircraft_title.as_deref());
 
     let Some(record) = build_landing_record(
@@ -8665,6 +8800,56 @@ fn spawn_phpvms_position_worker(
                         &app,
                         &flight,
                         "phpvms-worker POST",
+                    );
+                    flight.phpvms_worker_spawned.store(false, Ordering::SeqCst);
+                    return;
+                }
+                Ok(Err(e @ ApiError::Unauthenticated)) | Ok(Err(e @ ApiError::Forbidden)) => {
+                    // v0.7.17 (B-007): phpVMS hat 401/403 zurueckgegeben.
+                    // Typische Ursachen:
+                    //   * VA-Admin hat den Pilot-Account gesperrt
+                    //     (suspended) oder inaktiv gesetzt
+                    //   * API-Key wurde server-side rotated/revoked
+                    //   * VA-Permissions wurden geaendert und der Pilot
+                    //     hat den ACARS-Endpunkt nicht mehr
+                    //
+                    // Vor v0.7.17 wurde der Batch endlos requeued —
+                    // phpVMS bekam 30 s Takt Spam von einem Account der
+                    // gar nicht mehr posten darf. Jetzt: Outbox leeren,
+                    // Connection-State BLOCKED, Worker terminieren,
+                    // klarer Activity-Log-Eintrag. Pilot kontaktiert
+                    // VA-Admin und re-logged-in nach Klaerung.
+                    let http_code = match e {
+                        ApiError::Unauthenticated => 401,
+                        _ => 403,
+                    };
+                    // Schmeisse den Batch und die noch in der Outbox
+                    // wartenden Items weg — retry sinnlos.
+                    {
+                        let mut outbox = flight.position_outbox.lock()
+                            .expect("position_outbox lock");
+                        outbox.clear();
+                    }
+                    {
+                        let mut stats = flight.stats.lock().expect("flight stats");
+                        stats.queued_position_count = 0;
+                    }
+                    flight.connection_state.store(CONN_STATE_BLOCKED, Ordering::Relaxed);
+                    tracing::error!(
+                        pirep_id = %flight.pirep_id,
+                        http_code = http_code,
+                        batch_size = batch.len(),
+                        "phpvms-worker terminating: account blocked (401/403). \
+                         outbox cleared, no more retries"
+                    );
+                    log_activity_handle(
+                        &app,
+                        ActivityLevel::Error,
+                        "phpVMS lehnt deine Anfragen ab — Account gesperrt oder inaktiv",
+                        Some(format!(
+                            "HTTP {http_code}: VA-Admin kontaktieren und nach Freigabe neu einloggen. \
+                             Position-Streaming wurde gestoppt."
+                        )),
                     );
                     flight.phpvms_worker_spawned.store(false, Ordering::SeqCst);
                     return;
@@ -12106,6 +12291,12 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                             heading_mag_deg: stats.landing_heading_deg,
                             landing_weight_kg: stats.landing_weight_kg.map(|w| w as f32),
                             landing_fuel_kg: stats.landing_fuel_kg,
+                            // v0.7.17 (B-015d): OFP-Plan-Werte ans MQTT-
+                            // Touchdown-Payload anhängen damit die Webapp
+                            // den Loadsheet-Sub-Score genauso berechnen
+                            // kann wie der Pilot-Client.
+                            planned_zfw_kg: stats.planned_zfw_kg,
+                            planned_tow_kg: stats.planned_tow_kg,
                             rollout_distance_m: stats.rollout_distance_m.map(|d| d as f32),
                             approach_vs_stddev_fpm: stats.approach_vs_stddev_fpm,
                             approach_bank_stddev_deg: stats.approach_bank_stddev_deg,
@@ -13343,16 +13534,10 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
             //       AND below 2000 ft AGL — robust catchall for
             //       low-altitude operations where neither (a) nor
             //       (b) clearly fires (helicopter ops, bush flying).
-            let standard_tod = snap.vertical_speed_fpm < -500.0
-                && lost_from_peak > 200.0;
-            let low_altitude_descent = snap.vertical_speed_fpm < -100.0
-                && snap.altitude_agl_ft < 3000.0
-                && lost_from_peak > 500.0;
-            let near_ground_descent = snap.altitude_agl_ft < 2000.0
-                && lost_from_peak > 800.0
-                && snap.vertical_speed_fpm < 0.0;
-            if standard_tod || low_altitude_descent || near_ground_descent {
-                next_phase = FlightPhase::Descent;
+            // v0.7.17 (B-010): Descent-Transition mit Dwell + Light-GA-
+            // Schwellen. Siehe check_descent_transition() Doc.
+            if let Some(p) = check_descent_transition(&mut stats, snap, now, lost_from_peak) {
+                next_phase = p;
             } else if snap.vertical_speed_fpm.abs() < 200.0
                 && snap.altitude_agl_ft > 5000.0
             {
@@ -18946,6 +19131,123 @@ mod touch_and_go_go_around_tests {
         );
         assert!(out.is_none());
         assert_eq!(stats.go_around_count, 0);
+    }
+
+    // ---- v0.7.17 (B-010): check_descent_transition ----
+
+    fn descent_snap(agl_ft: f64, vs_fpm: f32, total_weight_kg: Option<f32>) -> SimSnapshot {
+        let mut s = snap_at(agl_ft, vs_fpm, false);
+        s.altitude_msl_ft = agl_ft + 1000.0; // dummy MSL above AGL
+        s.total_weight_kg = total_weight_kg;
+        s
+    }
+
+    #[test]
+    fn descent_single_tick_spike_does_not_transition() {
+        // GSG-105-Symptom: ein einzelner Trim-Spike (-800 fpm) bei vs<-500
+        // erfuellt standard_tod-Bedingung sofort. Wichtig: erste Tick darf
+        // NICHT direkt umschalten — nur den Dwell-Timer arm-en.
+        let mut stats = FlightStats::default();
+        let snap = descent_snap(8000.0, -800.0, Some(60000.0));
+        let lost_from_peak = 300.0; // > 200 → standard_tod TRUE
+        let out = check_descent_transition(&mut stats, &snap, t0(), lost_from_peak);
+        assert!(out.is_none(), "single tick must not transition (dwell not elapsed)");
+        // Timer ist armed
+        assert!(stats.descent_pending_since.is_some());
+    }
+
+    #[test]
+    fn descent_brief_spike_armed_then_breaks_clears_dwell() {
+        // Airliner: kurzer -600 fpm Spike der Bedingung erfuellt, aber
+        // nach 5 s ist V/S wieder +200 fpm (Cruise-Korrektur).
+        let mut stats = FlightStats::default();
+        let now = t0();
+        let trigger = descent_snap(8000.0, -600.0, Some(60000.0)); // Heavy
+        let lost = 300.0; // > 200 fuer standard_tod
+        // Tick 1: Bedingung erfuellt → Timer started
+        let out1 = check_descent_transition(&mut stats, &trigger, now, lost);
+        assert!(out1.is_none());
+        assert!(stats.descent_pending_since.is_some());
+        // Tick 2 (5 s spaeter): Bedingung gebrochen
+        let recover = descent_snap(8050.0, 200.0, Some(60000.0));
+        let out2 = check_descent_transition(
+            &mut stats,
+            &recover,
+            now + chrono::Duration::seconds(5),
+            300.0,
+        );
+        assert!(out2.is_none());
+        // Timer reset
+        assert!(stats.descent_pending_since.is_none());
+    }
+
+    #[test]
+    fn descent_sustained_sink_after_dwell_transitions() {
+        let mut stats = FlightStats::default();
+        let now = t0();
+        let trigger = descent_snap(8000.0, -600.0, Some(60000.0));
+        let lost = 300.0;
+        // Tick 1: arm
+        check_descent_transition(&mut stats, &trigger, now, lost);
+        assert!(stats.descent_pending_since.is_some());
+        // Tick 2 (DWELL_SECS+1 s spaeter, immer noch sustained sink):
+        let out = check_descent_transition(
+            &mut stats,
+            &trigger,
+            now + chrono::Duration::seconds(DESCENT_DWELL_SECS + 1),
+            lost,
+        );
+        assert_eq!(out, Some(FlightPhase::Descent));
+        // Timer wieder None nach Trigger
+        assert!(stats.descent_pending_since.is_none());
+    }
+
+    #[test]
+    fn descent_light_ga_uses_higher_threshold() {
+        // Cessna (800 kg), AGL 2000 ft, V/S -200 fpm.
+        // lost_from_peak = 600 ft → unter Light-GA-Schwelle (1000) → KEIN Trigger.
+        // Bei Heavy waere 600 > 500 → Trigger gewesen.
+        let mut stats = FlightStats::default();
+        let snap = descent_snap(2000.0, -200.0, Some(800.0));
+        let out = check_descent_transition(
+            &mut stats,
+            &snap,
+            t0() + chrono::Duration::seconds(DESCENT_DWELL_SECS + 10),
+            600.0,
+        );
+        assert!(out.is_none(), "Light-GA bei 600 ft lost darf nicht triggern");
+
+        // Gleicher Snap aber Heavy (60.000 kg) → MUSS arm dann triggern.
+        let mut stats2 = FlightStats::default();
+        let mut heavy = snap;
+        heavy.total_weight_kg = Some(60000.0);
+        let now = t0();
+        check_descent_transition(&mut stats2, &heavy, now, 600.0);
+        let out_heavy = check_descent_transition(
+            &mut stats2,
+            &heavy,
+            now + chrono::Duration::seconds(DESCENT_DWELL_SECS + 1),
+            600.0,
+        );
+        assert_eq!(out_heavy, Some(FlightPhase::Descent));
+    }
+
+    #[test]
+    fn descent_no_weight_info_uses_heavy_thresholds() {
+        // Wenn snap.total_weight_kg=None (z.B. Fenix in fruehen Versionen),
+        // fallback auf Heavy-Schwellen — sonst wuerden alle Airliner
+        // im Light-GA-Modus laufen.
+        let mut stats = FlightStats::default();
+        let snap = descent_snap(2000.0, -200.0, None);
+        let now = t0();
+        check_descent_transition(&mut stats, &snap, now, 600.0);
+        let out = check_descent_transition(
+            &mut stats,
+            &snap,
+            now + chrono::Duration::seconds(DESCENT_DWELL_SECS + 1),
+            600.0,
+        );
+        assert_eq!(out, Some(FlightPhase::Descent));
     }
 }
 

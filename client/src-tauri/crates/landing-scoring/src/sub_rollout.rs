@@ -220,6 +220,22 @@ mod tests {
     }
 
     #[test]
+    fn b015_ein799_regression_a20n_1096m_is_excellent_not_good() {
+        // v0.7.17 (B-015): EIN799 LTBJ→EIDW, A20N, Rollout 1096 m.
+        // Vorher meldete der Pilot-Client 80 PTS „good_stop", weil
+        // `aircraft_icao` beim PIREP-File None war (X-Plane Web API
+        // hatte den ICAO nicht geliefert) → Fallback auf Light-GA-
+        // Schwellen (800/1200) → 1096 fiel in „good_stop". Nach der
+        // bid_icao-Fallback-Reparatur in lib.rs:8482 bekommt der Sub-
+        // Score den Bid-Wert „A20N" und nutzt Medium-Schwellen
+        // (1200/1800) → 1096 < 1200 → excellent_stop, 100 PTS.
+        assert_eq!(run(1096.0, Some("A20N")), (100, "landing.rat.excellent_stop".into()));
+        // Auch wenn snapshot None lieferte: jetzt kommt der Wert via Bid.
+        // (Wenn beides None ist, fallen wir auf Light zurueck → 80 PTS.)
+        assert_eq!(run(1096.0, None), (80, "landing.rat.good_stop".into()));
+    }
+
+    #[test]
     fn heavy_category_b777_a350_etc() {
         assert_eq!(category_for_icao(Some("B77W")), Category::Heavy);
         assert_eq!(category_for_icao(Some("A35K")), Category::Heavy);

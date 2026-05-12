@@ -378,8 +378,10 @@
       "sync": "SYNC",
       "offline": "OFFLINE",
       "stale": "ERRORE",
-      "idle": "ATTESA"
+      "idle": "ATTESA",
+      "blocked": "BLOCCATO"
     },
+    "blocked_detail": "Account bloccato — contatta l'admin VA",
     "no_post_yet": "non ancora inviato",
     "last_send_secs": "inviato {{secs}}s fa",
     "sync_pending_one": "{{count}} posizione in sincronia",

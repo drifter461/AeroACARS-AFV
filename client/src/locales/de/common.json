@@ -378,8 +378,10 @@
       "sync": "SYNC",
       "offline": "OFFLINE",
       "stale": "FEHLER",
-      "idle": "WARTET"
+      "idle": "WARTET",
+      "blocked": "GESPERRT"
     },
+    "blocked_detail": "Account gesperrt — VA-Admin kontaktieren",
     "no_post_yet": "noch nicht gesendet",
     "last_send_secs": "vor {{secs}} s gesendet",
     "sync_pending_one": "{{count}} Position wird gesendet",

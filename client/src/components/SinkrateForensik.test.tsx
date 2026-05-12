@@ -227,6 +227,7 @@ describe("pickCoachingTip — Prioritaet (erster Match gewinnt)", () => {
 describe("scoreBasisVs — Cascade-Chain", () => {
   it("nimmt landing_peak_vs_fpm wenn gesetzt", () => {
     expect(scoreBasisVs({
+      vs_at_edge_fpm: null,
       landing_peak_vs_fpm: -343,
       landing_rate_fpm: -358,
     })).toBe(-343);
@@ -234,9 +235,38 @@ describe("scoreBasisVs — Cascade-Chain", () => {
 
   it("Fallback auf landing_rate_fpm wenn landing_peak_vs_fpm null", () => {
     expect(scoreBasisVs({
+      vs_at_edge_fpm: null,
       landing_peak_vs_fpm: null,
       landing_rate_fpm: -358,
     })).toBe(-358);
+  });
+
+  // v0.7.17 (B-015): vs_at_edge_fpm muss Vorrang haben.
+  it("bevorzugt vs_at_edge_fpm (50-Hz-Edge, FAR 25.473) vor allen anderen", () => {
+    expect(scoreBasisVs({
+      vs_at_edge_fpm: -265,
+      landing_peak_vs_fpm: -311,
+      landing_rate_fpm: -358,
+    })).toBe(-265);
+  });
+
+  it("ignoriert positive vs_at_edge_fpm (= Bumping/Ballooning, kein echter TD)", () => {
+    expect(scoreBasisVs({
+      vs_at_edge_fpm: 12,
+      landing_peak_vs_fpm: -311,
+      landing_rate_fpm: -358,
+    })).toBe(-311);
+  });
+
+  it("EIN799-Regression: -265 statt -311", () => {
+    // Tester-Befund 2026-05-12: Pilot-Client zeigte -311, Webapp -265
+    // fuer denselben EIN799-Touchdown. Dieser Test fixiert dass der
+    // Pilot-Client jetzt auch -265 zeigt.
+    expect(scoreBasisVs({
+      vs_at_edge_fpm: -265,
+      landing_peak_vs_fpm: -311,
+      landing_rate_fpm: -311,
+    })).toBe(-265);
   });
 });
 

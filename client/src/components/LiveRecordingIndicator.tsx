@@ -12,17 +12,17 @@ interface Props {
    * v0.6.2 — Connection-Health from phpVMS-Worker.
    *   - "live"    → letzter POST war Erfolg
    *   - "failing" → letzter POST scheiterte (echter Network-Loss)
+   *   - "blocked" → v0.7.17 (B-007) phpVMS lehnt mit 401/403 ab (Account
+   *     gesperrt / inaktiv / API-Key revoked). Worker hat sich beendet,
+   *     keine weiteren Retries — Pilot muss VA-Admin kontaktieren.
    *
-   * Wird zusammen mit `queuedCount` für 3 klare Status verwendet:
-   *   - live    + queued=0 → „Live" (grün)
-   *   - live    + queued>0 → „Sync" (blau, normaler Backlog zwischen POSTs)
-   *   - failing            → „Offline" (rot, echte Verbindung weg)
+   * Wird zusammen mit `queuedCount` für die Status-Anzeige verwendet.
    *
    * Vor v0.6.2 zeigte der Indikator „queued offline" für jeden Backlog,
    * was zwischen normalen Sync-Pausen und echten Connection-Loss nicht
    * unterscheiden konnte → Pilot dachte er sei offline obwohl alles ok.
    */
-  connectionState?: "live" | "failing";
+  connectionState?: "live" | "failing" | "blocked";
 }
 
 /**
@@ -75,26 +75,33 @@ export function LiveRecordingIndicator({
   // - Offline wenn letzter POST gescheitert: echte Verbindungs-Probleme
   // - Sync wenn Backlog UND letzter POST Erfolg: nur Cadence-Pause
   // - Live wenn Backlog leer UND letzter POST Erfolg
-  const status: "live" | "sync" | "offline" | "stale" | "idle" =
-    ageSecs == null
-      ? "idle"
-      : ageSecs > STALE_THRESHOLD_SEC
-        ? "stale"
-        : connectionState === "failing"
-          ? "offline"
-          : queuedCount > 0
-            ? "sync"
-            : "live";
+  // v0.7.17 (B-007): "blocked" hat hoechste Prioritaet — wir wollen
+  // dass Pilot SOFORT sieht dass sein Account gesperrt ist, nicht
+  // versteckt unter "stale" oder "offline".
+  const status: "live" | "sync" | "offline" | "stale" | "blocked" | "idle" =
+    connectionState === "blocked"
+      ? "blocked"
+      : ageSecs == null
+        ? "idle"
+        : ageSecs > STALE_THRESHOLD_SEC
+          ? "stale"
+          : connectionState === "failing"
+            ? "offline"
+            : queuedCount > 0
+              ? "sync"
+              : "live";
 
   const label = t(`recording.status.${status}`);
   const detail =
-    ageSecs == null
-      ? t("recording.no_post_yet")
-      : status === "offline"
-        ? t("recording.offline_pending", { count: queuedCount })
-        : status === "sync"
-          ? t("recording.sync_pending", { count: queuedCount })
-          : t("recording.last_send_secs", { secs: ageSecs });
+    status === "blocked"
+      ? t("recording.blocked_detail")
+      : ageSecs == null
+        ? t("recording.no_post_yet")
+        : status === "offline"
+          ? t("recording.offline_pending", { count: queuedCount })
+          : status === "sync"
+            ? t("recording.sync_pending", { count: queuedCount })
+            : t("recording.last_send_secs", { secs: ageSecs });
 
   // v0.5.51 — UI-Klarstellung. Vorher stand einfach nur die Zahl
   // `positionCount` ohne Label rechts in der Pille. Bei status="stale"
