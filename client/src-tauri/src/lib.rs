@@ -1101,6 +1101,10 @@ struct PersistedFlightStats {
     /// Resume-Files weiter laden — defaulten auf leeren Vec.
     #[serde(default)]
     pause_segments: Vec<PauseSegment>,
+    /// Spec v0.7.15 F5/F6: aktuelle Pause-Reason fuer App-Restart-
+    /// Persistenz. `#[serde(default)]` → None bei pre-v0.7.15 Files.
+    #[serde(default)]
+    current_pause_reason: Option<PauseReason>,
 }
 
 impl PersistedFlightStats {
@@ -1187,6 +1191,7 @@ impl PersistedFlightStats {
             // Spec sim-disconnect-auto-resume F2 (Pause-Akkumulator)
             pause_total_duration_secs: stats.pause_total_duration_secs,
             pause_segments: stats.pause_segments.clone(),
+            current_pause_reason: stats.current_pause_reason,
         }
     }
 
@@ -1281,6 +1286,7 @@ impl PersistedFlightStats {
         // lierte Zeit nicht verlieren (Spec-Szenario 3.4.2).
         stats.pause_total_duration_secs = self.pause_total_duration_secs;
         stats.pause_segments = self.pause_segments;
+        stats.current_pause_reason = self.current_pause_reason;
     }
 }
 
@@ -1412,6 +1418,12 @@ struct PausedSnapshot {
 #[serde(rename_all = "snake_case")]
 enum PauseReason {
     SimDisconnect,
+    /// Spec v0.7.15 F5/F6: Simulator-eigene Pause (MSFS-Esc-Pause oder
+    /// X-Plane `sim/time/paused`). SimConnect / Plugin liefert weiterhin
+    /// (eingefrorene) Snapshots — der Disconnect-Pfad wuerde sonst nie
+    /// triggern. Verhalten beim Resume identisch zu SimDisconnect:
+    /// `apply_pause_resume` schliesst den Block + akkumuliert.
+    SimPause,
     ManualResume,
 }
 
@@ -1502,6 +1514,11 @@ struct FlightStats {
     /// + Activity-Log angezeigt damit der Pilot weiß was er für die
     /// Repositionierung braucht. None solange der Flug nicht pausiert.
     paused_last_known: Option<PausedSnapshot>,
+    /// Spec v0.7.15 F5/F6: warum ist der Flug gerade pausiert?
+    /// Wird beim Pause-Start gesetzt, vom Resume-Helper im PauseSegment
+    /// gespeichert und beim Resume zurueck auf None gesetzt. None
+    /// solange `paused_since` None ist.
+    current_pause_reason: Option<PauseReason>,
 
     /// Spec sim-disconnect-auto-resume F2 (Pause-Akkumulator):
     /// Summe aller Pause-Sekunden seit Flugstart. Wird beim
@@ -10011,6 +10028,7 @@ fn apply_pause_resume(
         }
         stats.paused_since = None;
         stats.paused_last_known = None;
+        stats.current_pause_reason = None;
         // Reposition-Distanz darf nicht in distance_nm einlaufen —
         // last_lat/lon auf None setzt die Distanz-Baseline neu, der
         // naechste Tick startet frisch (entspricht dem alten Verhalten
@@ -10031,6 +10049,7 @@ fn apply_pause_resume(
     // korrigieren wenn er einen falschen Flug erwischt hat.
     let auto_prefix = match reason {
         PauseReason::SimDisconnect => "▶ Flug automatisch fortgesetzt",
+        PauseReason::SimPause => "▶ Sim-Pause beendet — Flug fortgesetzt",
         PauseReason::ManualResume => "▶ Flug wiederaufgenommen",
     };
     let (level, msg) = match drift_nm {
@@ -10061,6 +10080,52 @@ fn apply_pause_resume(
         _ => Some(format!("Pause-Dauer: {} s", duration_secs)),
     };
     log_activity_handle(app, level, msg, detail);
+
+    // Spec v0.7.15 F7: Aircraft-Change-Detection nach Resume.
+    //
+    // Wenn der Sim-Snapshot nach Resume ein anderes Flugzeug-ICAO
+    // meldet als der aktive Flug erwartet, ist das ein starkes
+    // Signal "falsches Bid geladen". Beispiel: Pilot loadet
+    // versehentlich aus dem MSFS-Menue die A320 statt der B738
+    // die laut Bid eingetragen ist.
+    //
+    // Wir blockieren NICHT (Spec-Prinzip P2: informieren statt
+    // blockieren) — aber Warnung im Activity-Log mit konkretem
+    // Mismatch-Hinweis. Der Pilot kann ueber das normale Bid/PIREP-
+    // Cancel-UI korrigieren wenn das wirklich der falsche Flug ist.
+    //
+    // Vergleich gegen `flight.aircraft_icao` (= Bid-Wert), nicht
+    // gegen `paused_last_known.aircraft_icao` — der Bid-Wert ist
+    // die "Wahrheit" was geflogen werden soll. Wenn das Pre-Pause-
+    // Aircraft schon falsch war, hat das Activity-Log das beim
+    // Flug-Start schon protokolliert.
+    if let Some(cur) = current_snap {
+        if let Some(snap_icao) = cur.aircraft_icao.as_deref().and_then(extract_icao_code) {
+            let bid_icao = flight.aircraft_icao.trim().to_uppercase();
+            if !bid_icao.is_empty() && snap_icao != bid_icao {
+                log_activity_handle(
+                    app,
+                    ActivityLevel::Warn,
+                    format!(
+                        "⚠ Aircraft-Mismatch nach Resume: Sim meldet {}, Bid erwartet {}",
+                        snap_icao, bid_icao
+                    ),
+                    Some(format!(
+                        "Falls du wirklich ein anderes Flugzeug laedst, cancel den aktuellen PIREP \
+                         und starte einen neuen Flug mit dem passenden Bid. Andernfalls lade in MSFS \
+                         das richtige Flugzeug nach (Bid-ICAO: {}).",
+                        bid_icao
+                    )),
+                );
+                tracing::warn!(
+                    pirep_id = %flight.pirep_id,
+                    snap_icao = %snap_icao,
+                    bid_icao = %bid_icao,
+                    "aircraft mismatch detected after pause-resume"
+                );
+            }
+        }
+    }
 
     tracing::info!(
         pirep_id = %flight.pirep_id,
@@ -11383,6 +11448,60 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                 last_good_snap_at = Some(std::time::Instant::now());
             }
 
+            // Spec v0.7.15 F5/F6: Sim-eigene Pause-Detection.
+            //
+            // SimSnapshot.paused wird vom Adapter gesetzt:
+            // - MSFS: aus dem SimConnect-`Paused`/`Unpaused`-Event-Atomic
+            //   (siehe crates/sim-msfs/src/adapter.rs)
+            // - X-Plane: aus dem Plugin `sim/time/paused` DataRef
+            //   (siehe F6 unten, falls Plugin v0.7.15+)
+            //
+            // Wenn der Sim eigenstaendig pausiert und ACARS noch nicht im
+            // Pause-State ist: paused_since setzen, last_known speichern,
+            // Reason vermerken. Der bestehende `is_paused`-Block
+            // (siehe unten) macht dann den Rest — Skip-Streamer-Tick +
+            // Heartbeat-mit-last_good_snap.
+            let snap_says_paused = snapshot.as_ref().map(|s| s.paused).unwrap_or(false);
+            if snap_says_paused {
+                let already_paused = {
+                    let stats = flight.stats.lock().expect("flight stats");
+                    stats.paused_since.is_some()
+                };
+                if !already_paused {
+                    if let Some(ref snap) = snapshot {
+                        let paused = PausedSnapshot {
+                            lat: snap.lat,
+                            lon: snap.lon,
+                            heading_deg: snap.heading_deg_true,
+                            altitude_ft: snap.altitude_msl_ft,
+                            fuel_total_kg: snap.fuel_total_kg,
+                            zfw_kg: snap.zfw_kg,
+                        };
+                        let detail = format!(
+                            "Letzte bekannte Position: LAT {:.4}° · LON {:.4}° · ALT {:.0} ft",
+                            paused.lat, paused.lon, paused.altitude_ft,
+                        );
+                        {
+                            let mut stats = flight.stats.lock().expect("flight stats");
+                            stats.paused_since = Some(Utc::now());
+                            stats.paused_last_known = Some(paused);
+                            stats.current_pause_reason = Some(PauseReason::SimPause);
+                        }
+                        log_activity_handle(
+                            &app,
+                            ActivityLevel::Info,
+                            "⏸ Simulator pausiert — AeroACARS pausiert die Aufzeichnung.".to_string(),
+                            Some(detail),
+                        );
+                        save_active_flight(&app, &flight);
+                        tracing::info!(
+                            pirep_id = %flight.pirep_id,
+                            "sim-pause detected via snapshot.paused flag"
+                        );
+                    }
+                }
+            }
+
             // Spec sim-disconnect-auto-resume F1 (Auto-Resume):
             //
             // Frueher (v0.4.1) war Pause ein strikter Block — der Streamer
@@ -11412,17 +11531,28 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                 .paused_since
                 .is_some();
             if is_paused {
-                if snapshot.is_some() {
-                    // Auto-Resume: Helper updated State, schreibt Activity-
-                    // Log, persistiert active_flight.json. Anschliessend
-                    // faellt der Tick durch zum normalen Position-Stream-
-                    // Pfad — der aktuelle `snapshot` wird also genauso
-                    // verarbeitet wie nach einem manuellen Resume.
+                // Resume-Bedingung: Snapshot ist da UND Sim ist NICHT
+                // mehr in eigener Pause (snap.paused=false). Sonst
+                // bleibt der Streamer pausiert auch wenn Snapshots
+                // kommen (F5: Frozen-Snapshots waehrend Esc-Pause).
+                let can_resume = snapshot.is_some() && !snap_says_paused;
+                if can_resume {
+                    // Auto-Resume: Reason aus dem State (gesetzt vom
+                    // Disconnect- bzw. Sim-Pause-Detect-Pfad). Helper
+                    // updated State, schreibt Activity-Log, persistiert
+                    // active_flight.json. Anschliessend faellt der Tick
+                    // durch zum normalen Position-Stream-Pfad.
+                    let resume_reason = {
+                        let stats = flight.stats.lock().expect("flight stats");
+                        stats
+                            .current_pause_reason
+                            .unwrap_or(PauseReason::SimDisconnect)
+                    };
                     let _ = apply_pause_resume(
                         &app,
                         &flight,
                         snapshot.as_ref(),
-                        PauseReason::SimDisconnect,
+                        resume_reason,
                     );
                     // fall-through zum naechsten Code-Pfad
                 } else {
@@ -11446,12 +11576,20 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                     // eingefroren auf dem Pre-Pause-Stand, was korrekt ist:
                     // der Flieger steht "weiterhin" dort, bis ein Sim-
                     // Snapshot beweist dass er weiter geflogen ist.
-                    if let Some(ref last_snap) = last_good_snap {
+                    // Heartbeat-Quelle: bei SimPause haben wir den
+                    // aktuellen (eingefrorenen) Snapshot, bei
+                    // SimDisconnect nur den letzten guten Pre-Pause-
+                    // Snapshot. Beide funktionieren — der Heartbeat-
+                    // Body enthaelt eingefrorene Position/Alt/Fuel-
+                    // Werte was korrekt ist: der Flieger steht zu
+                    // dem Zeitpunkt eingefroren.
+                    let hb_snap = snapshot.as_ref().or(last_good_snap.as_ref());
+                    if let Some(hb) = hb_snap {
                         if last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
                             let (phase, body) = {
                                 let stats = flight.stats.lock().expect("flight stats");
                                 let p = stats.phase;
-                                (p, build_heartbeat_body(last_snap, &stats, p))
+                                (p, build_heartbeat_body(hb, &stats, p))
                             };
                             match client.update_pirep(&flight.pirep_id, &body).await {
                                 Ok(()) => {
@@ -11464,7 +11602,8 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                                     tracing::debug!(
                                         pirep_id = %flight.pirep_id,
                                         phase = ?phase,
-                                        "PIREP heartbeat sent during sim-disconnect pause"
+                                        sim_paused = snap_says_paused,
+                                        "PIREP heartbeat sent during pause"
                                     );
                                 }
                                 Err(ApiError::NotFound) => {
@@ -11513,6 +11652,10 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                         if stats.paused_since.is_none() {
                             stats.paused_since = Some(Utc::now());
                             stats.paused_last_known = Some(paused.clone());
+                            // Spec v0.7.15 F5: Reason setzen damit der
+                            // Resume-Helper weiss welcher Trigger es war.
+                            stats.current_pause_reason =
+                                Some(PauseReason::SimDisconnect);
                         }
                     }
                     let detail = format!(
@@ -19596,6 +19739,57 @@ mod sim_pause_tests {
         assert_eq!(decoded.pause_total_duration_secs, 720);
         assert_eq!(decoded.pause_segments.len(), 1);
         assert_eq!(decoded.pause_segments[0].reason, PauseReason::ManualResume);
+    }
+
+    // ─── v0.7.15 F5/F6: SimPause-Reason serde + State-Persistenz ───
+
+    #[test]
+    fn sim_pause_reason_serde_roundtrip() {
+        // Spec v0.7.15 F5: PauseReason::SimPause muss in PauseSegments
+        // serialisierbar sein (sonst gehen Esc-Pause-Audit-Daten
+        // verloren beim active_flight.json-Roundtrip).
+        let segment = PauseSegment {
+            started_at: Utc::now(),
+            ended_at: Utc::now(),
+            duration_secs: 120,
+            reason: PauseReason::SimPause,
+            drift_nm: Some(0.0),
+            altitude_delta_ft: Some(0.0),
+            fuel_delta_kg: Some(0.0),
+        };
+        let json = serde_json::to_string(&segment).expect("serialize");
+        // Snake-case-Konvention im JSON.
+        assert!(
+            json.contains("\"sim_pause\""),
+            "expected snake_case reason in JSON, got: {}",
+            json
+        );
+        let decoded: PauseSegment = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded.reason, PauseReason::SimPause);
+    }
+
+    #[test]
+    fn current_pause_reason_persists_across_resume() {
+        // Spec v0.7.15 F5/F6: current_pause_reason muss im
+        // PersistedFlightStats-Roundtrip erhalten bleiben damit ein
+        // App-Restart waehrend laufender Sim-Pause die Reason behaelt
+        // (= apply_pause_resume nimmt sie wieder auf).
+        let mut stats = FlightStats::default();
+        stats.current_pause_reason = Some(PauseReason::SimPause);
+        let snapshot = PersistedFlightStats::snapshot_from(&stats);
+        let json = serde_json::to_string(&snapshot).expect("serialize");
+        let decoded: PersistedFlightStats = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded.current_pause_reason, Some(PauseReason::SimPause));
+    }
+
+    #[test]
+    fn current_pause_reason_defaults_to_none_in_legacy_json() {
+        // Pre-v0.7.15 active_flight.json hat das Feld nicht — serde
+        // muss es defaulten auf None damit alte Files weiter laden.
+        let legacy_json = r#"{"distance_nm": 0.0}"#;
+        let decoded: PersistedFlightStats =
+            serde_json::from_str(legacy_json).expect("legacy json must load");
+        assert_eq!(decoded.current_pause_reason, None);
     }
 }
 

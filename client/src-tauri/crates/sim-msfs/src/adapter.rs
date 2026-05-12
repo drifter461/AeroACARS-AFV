@@ -53,6 +53,12 @@ const PMDG_X777_DEFINITION_ID: sys::SIMCONNECT_DATA_DEFINITION_ID = 101;
 const PMDG_X777_REQUEST_ID: sys::SIMCONNECT_DATA_REQUEST_ID = 101;
 const AIRCRAFT_LOADED_REQUEST_ID: sys::SIMCONNECT_DATA_REQUEST_ID = 200;
 const SIM_START_EVENT_ID: u32 = 300;
+/// Spec v0.7.15 F5: SimConnect-System-Event-IDs fuer Pause/Unpause.
+/// MSFS sendet `Paused` wenn der User Esc drueckt (oder den Sim auf
+/// andere Weise eingefroren ist), `Unpaused` wenn er weiterspielt.
+/// SDK-Doku: https://docs.flightsimulator.com/html/Programming_Tools/SimConnect/API_Reference/Events_And_Data/SimConnect_SubscribeToSystemEvent.htm
+const PAUSE_EVENT_ID: u32 = 301;
+const UNPAUSE_EVENT_ID: u32 = 302;
 const STALE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Public connection state mirrored to the frontend.
@@ -76,6 +82,13 @@ struct Shared {
     state: Mutex<ConnectionState>,
     snapshot: Mutex<Option<SimSnapshot>>,
     last_error: Mutex<Option<String>>,
+    /// Spec v0.7.15 F5: SimConnect-`Paused`/`Unpaused`-System-Events
+    /// setzen dieses Atomic. Wird beim Bauen jedes `SimSnapshot` in
+    /// `telemetry::parse` zurueck nach `snap.paused` kopiert, damit
+    /// der Streamer-Loop in `lib.rs` ueber den bestehenden Snapshot-
+    /// Pfad lesen kann (= keine zweite IPC-Schiene noetig). Default
+    /// false bis der Sim das erste Mal pausiert.
+    sim_paused: AtomicBool,
     /// Last touchdown sample as seen on data definition #2. Updated
     /// asynchronously by SimConnect — we merge it into each emitted
     /// `SimSnapshot` so downstream consumers see a unified view.
@@ -469,6 +482,7 @@ impl MsfsAdapter {
                 state: Mutex::new(ConnectionState::Disconnected),
                 snapshot: Mutex::new(None),
                 last_error: Mutex::new(None),
+                sim_paused: AtomicBool::new(false),
                 touchdown: Mutex::new(None),
                 inspector: Mutex::new(InspectorState::default()),
                 pmdg: Mutex::new(PmdgSharedState::default()),
@@ -848,6 +862,12 @@ fn run_dispatch(
                     match request_id {
                         REQUEST_ID => {
                             let mut snap = telemetry::parse(&bytes, simulator);
+                            // Spec v0.7.15 F5: Pause-State aus dem Atomic
+                            // in den Snapshot kopieren — wird vom Streamer-
+                            // Loop in lib.rs ausgewertet damit der Pause-
+                            // Akkumulator auch waehrend MSFS-Esc-Pause
+                            // (= eingefrorene Snapshots) korrekt zaehlt.
+                            snap.paused = shared.sim_paused.load(Ordering::Relaxed);
                             // Merge in the most recent touchdown sample
                             // so consumers see a unified snapshot.
                             if let Some(td) = *shared.touchdown.lock().unwrap() {
@@ -1031,6 +1051,16 @@ fn run_dispatch(
                         if let Err(e) = conn.subscribe_aircraft_loaded() {
                             tracing::warn!(error = %e, "re-request AircraftLoaded failed");
                         }
+                    } else if event_id == PAUSE_EVENT_ID {
+                        // Spec v0.7.15 F5: MSFS Esc-Pause / Active-Pause
+                        // erkannt. Atomic setzen — naechster Snapshot-Build
+                        // in `telemetry::parse` traegt es nach `snap.paused`,
+                        // der Streamer-Loop in lib.rs reagiert darauf.
+                        shared.sim_paused.store(true, Ordering::Relaxed);
+                        tracing::info!("MSFS SimConnect Paused-Event empfangen");
+                    } else if event_id == UNPAUSE_EVENT_ID {
+                        shared.sim_paused.store(false, Ordering::Relaxed);
+                        tracing::info!("MSFS SimConnect Unpaused-Event empfangen");
                     }
                 }
                 Err(e) => {
@@ -1501,6 +1531,38 @@ impl Connection {
         if hr != 0 {
             return Err(format!(
                 "SubscribeToSystemEvent(SimStart) returned 0x{hr:08X}"
+            ));
+        }
+
+        // Spec v0.7.15 F5: Pause/Unpause-Events fuer Sim-Recovery.
+        // MSFS emittiert `Paused` wenn der User Esc drueckt + `Unpaused`
+        // wenn er weiterspielt. Damit kann der Client den `paused`-State
+        // in den SimSnapshot durchreichen und die `apply_pause_resume`-
+        // Logik im Streamer-Loop greift sauber.
+        let cevent = std::ffi::CString::new("Paused").expect("ASCII");
+        let hr = unsafe {
+            sys::SimConnect_SubscribeToSystemEvent(
+                self.handle,
+                PAUSE_EVENT_ID,
+                cevent.as_ptr(),
+            )
+        };
+        if hr != 0 {
+            return Err(format!(
+                "SubscribeToSystemEvent(Paused) returned 0x{hr:08X}"
+            ));
+        }
+        let cevent = std::ffi::CString::new("Unpaused").expect("ASCII");
+        let hr = unsafe {
+            sys::SimConnect_SubscribeToSystemEvent(
+                self.handle,
+                UNPAUSE_EVENT_ID,
+                cevent.as_ptr(),
+            )
+        };
+        if hr != 0 {
+            return Err(format!(
+                "SubscribeToSystemEvent(Unpaused) returned 0x{hr:08X}"
             ));
         }
         Ok(())
