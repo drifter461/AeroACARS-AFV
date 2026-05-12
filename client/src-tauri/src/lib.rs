@@ -13338,6 +13338,20 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
                 // gets a clean per-attempt picture.
                 stats.low_agl_vs_min_fpm = None;
                 stats.last_low_agl_vs_fpm = None;
+            } else if snap.vertical_speed_fpm.abs() < 200.0
+                && snap.altitude_agl_ft > 5000.0
+            {
+                // v0.7.17 (B-003): Descent → Cruise Recovery. Wenn der
+                // Sink stoppt UND wir wieder hoch genug sind, war das
+                // wahrscheinlich ein ATC-Step-Down oder ein V/S-Spike
+                // (Pause/Resume-Race) der die FSM faelschlich nach
+                // Descent gekippt hat. Vorher gab es nur Descent →
+                // Approach — Aircraft blieb fuer immer als „Descent"
+                // gemeldet, auch wenn Pilot wieder cruiste. Tester-
+                // Report ICE 529 EDDB→EVRA: FL330 Cruise, FMA ALT CRZ,
+                // Live-Map zeigte „Descent" + V/S -11 fpm. Selber
+                // Schwellwert wie Climb → Cruise (200 fpm + AGL > 5000).
+                next_phase = FlightPhase::Cruise;
             }
         }
         FlightPhase::Approach => {
