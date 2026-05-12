@@ -16,7 +16,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.7.12"
+version = "0.7.13"
 edition = "2021"
 license = "MIT"
 authors = ["Thomas Kant <github@MANFahrer-GF>", "AeroACARS contributors"]
@@ -42,26 +42,23 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 url = "2"
 
 # Discord Rich Presence — IPC zu lokalem Discord-Client (Named Pipe
-# unter Windows, Unix-Socket auf macOS/Linux). v1.0 ist cross-platform,
-# gleiche API auf allen Targets. Schlägt graceful fehl wenn Discord
-# gerade nicht läuft — wir loggen warn und gehen weiter.
-discord-rich-presence = "1"
+# v0.7.13: discord-rich-presence-Dep entfernt — Rich-Presence-Foundation
+# blieb 8 Releases lang dead, RP-Wiring kam nie. Falls Revival: wieder
+# `= "1"` hinzufuegen + Code aus git history rausziehen. Audit Q4-2026-05.
 
 # Persistence
 rusqlite = { version = "0.32", features = ["bundled"] }
 
-# OS keyring. Since keyring v3 the platform backends are opt-in features —
-# without these flags the crate falls back to a no-op mock that silently
-# accepts writes (the bug we hit on first try). `apple-native` and
-# `windows-native` are gated internally by `#[cfg(target_os = ...)]` so
-# only the appropriate one is compiled per target.
-keyring = { version = "3", features = ["apple-native", "windows-native"] }
+# v0.7.13: keyring-Dep entfernt. v0.5.15 hat von OS-Keyring auf
+# File-based Secrets-Storage (chmod 0600 JSON in <app_data_dir>) umgestellt.
+# Die `migrate_from_keyring`-Funktion war seit 30+ Releases ungenutzt.
+# Audit Q4-2026-05 (CC1) + Security-Audit M5.
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }
 
-# Cross-component schemas (codegen base)
-schemars = "0.8"
+# v0.7.13: schemars-Workspace-Dep entfernt — wurde von keinem direkten
+# Code-Pfad mehr genutzt. Audit Q4-2026-05 (L9).
 
 # Internal crates (path entries)
 api-client = { path = "crates/api-client" }
@@ -125,8 +122,7 @@ chrono.workspace = true
 # dep; we just need it directly here for `fetch_release_notes`.
 reqwest.workspace = true
 
-# Discord Rich Presence — siehe workspace-Dependency.
-discord-rich-presence.workspace = true
+# v0.7.13: discord-rich-presence Workspace-Dep entfernt (Cleanup, RP-Code raus).
 
 # Bundled CSV parser for the embedded ourairports runway table
 # (used by `src/runway.rs` to map a touchdown coord → runway).

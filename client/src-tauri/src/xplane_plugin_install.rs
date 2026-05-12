@@ -305,15 +305,6 @@ pub async fn install_plugin(xplane_root: &Path) -> Result<PluginInstallResult, S
     })
 }
 
-/// Remove the plugin folder. No-op if it doesn't exist.
-pub fn uninstall_plugin(xplane_root: &Path) -> Result<(), String> {
-    let target_root = xplane_root
-        .join("Resources")
-        .join("plugins")
-        .join("AeroACARS");
-    if !target_root.exists() {
-        return Ok(());
-    }
-    fs::remove_dir_all(&target_root)
-        .map_err(|e| format!("could not remove {}: {}", target_root.display(), e))
-}
+// v0.7.13: `uninstall_plugin` entfernt — der einzige Caller war der
+// `xplane_uninstall_plugin` Tauri-Command, der mangels UI-Button nie
+// gerufen wurde. Audit Q4-2026-05.

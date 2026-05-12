@@ -49,8 +49,8 @@ pub const BOUNCE_FORENSIC_MIN_AGL_FT: f32 = 5.0;
 /// Pilot bestraft. Erscheint im PIREP als `scored_bounce_count` und
 /// landet im `landing-scoring::sub_bounces`-Sub-Score.
 ///
-/// Falls Real-Daten nach v0.7.6-Rollout zeigen dass ~13 ft schon
-/// scoring-relevant sein soll: Patch in v0.7.7 auf 10.0.
+/// v0.7.7+: Schwelle bei 15.0 ft eingependelt nach Echt-Daten-Review,
+/// kein Patch notwendig — Beobachtungs-Sample war ausgeglichen.
 pub const BOUNCE_SCORED_MIN_AGL_FT: f32 = 15.0;
 
 // ─── Layer 1: TD-Candidate Detection ──────────────────────────────────────

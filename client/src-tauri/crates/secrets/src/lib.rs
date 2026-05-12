@@ -180,63 +180,11 @@ pub fn delete_api_key(account: &str) -> Result<(), SecretError> {
     Ok(())
 }
 
-/// One-shot migration from the old `keyring`-based storage to the
-/// JSON file. For each (account, present_in_file?) pair: if the
-/// account isn't in our file yet, try to read it from the OS
-/// keyring. If found, write to the file and delete from the
-/// keyring. Pilots see one final batch of Keychain prompts on the
-/// upgrade run; from then on, every future launch is silent.
-///
-/// Idempotent: subsequent calls are cheap no-ops because the file
-/// will already have the entries (or the keyring will already be
-/// empty).
-///
-/// Returns the number of accounts that were successfully migrated.
-pub fn migrate_from_keyring(accounts: &[&str]) -> usize {
-    let mut migrated = 0usize;
-    for account in accounts {
-        // Skip if we already have it in the file.
-        match load_api_key(account) {
-            Ok(Some(_)) => continue,
-            Ok(None) => {}
-            Err(e) => {
-                tracing::warn!(account = account, error = %e, "secrets read failed during migration");
-                continue;
-            }
-        }
-        // Read from old keyring.
-        let entry = match keyring::Entry::new("AeroACARS", account) {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::debug!(account = account, error = %e, "keyring entry create failed (migration)");
-                continue;
-            }
-        };
-        let value = match entry.get_password() {
-            Ok(v) => v,
-            Err(keyring::Error::NoEntry) => continue,
-            Err(e) => {
-                tracing::debug!(
-                    account = account,
-                    error = %e,
-                    "keyring read failed (migration) — skipping"
-                );
-                continue;
-            }
-        };
-        if let Err(e) = store_api_key(account, &value) {
-            tracing::warn!(account = account, error = %e, "file write failed during migration");
-            continue;
-        }
-        let _ = entry.delete_credential();
-        migrated += 1;
-        tracing::info!(account = account, "migrated credential from keyring to file");
-    }
-    if migrated > 0 {
-        tracing::info!(count = migrated, "keyring → file migration complete");
-    }
-    migrated
-}
+// v0.7.13: `migrate_from_keyring(accounts)` entfernt — die einmalige
+// v0.5.15-Migration vom OS-Keyring zur JSON-File-Storage ist 30+ Releases
+// her. Wer noch nicht v0.5.15+ gestartet hat, wuerde sich ohnehin frisch
+// einloggen muessen (Keyring-Eintrag laeuft seit Monaten ungenutzt).
+// Audit Q4-2026-05 (CC1).
 
 #[cfg(test)]
 mod tests {

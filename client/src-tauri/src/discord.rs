@@ -14,24 +14,19 @@
 //! URL über ein anderes Channel verteilen (env var, downloaded
 //! config from server, …).
 
-use std::sync::Mutex;
-
-use ::discord_rich_presence::{
-    activity::{Activity, Assets, Timestamps},
-    DiscordIpc, DiscordIpcClient,
-};
 use serde::Serialize;
 
-/// GSG-Discord-Webhook (für Auto-Posts: Takeoff / Landing / PIREP /
-/// Divert). Bei Fork für eine andere VA: hier austauschen.
-const WEBHOOK_URL: &str = "https://discord.com/api/webhooks/1501257121235468418/0sLGmj9-LY4sPfsL0iw7s0TQRmI9qgyYcTek147kR0igU1__IXjx8hXafAl-fPmdOp7Q";
+// v0.7.13: Discord-Rich-Presence-Block (PresenceState / RichPresenceService /
+// build_activity / string_leak ~170 LOC + discord-rich-presence-Imports +
+// RICH_PRESENCE_APP_ID) entfernt — seit v0.4.0 unbenutzt mit Comment
+// "Wiring kommt in v0.4.5", wir sind bei v0.7.13. Falls Revival: aus git
+// history rausziehen. Audit Q4-2026-05.
 
-/// Discord-App-ID für Rich Presence. Registriert auf
-/// discord.com/developers als „AeroACARS / German Sky Group". Wird
-/// im Discord-Client als App-Name angezeigt neben dem RP-Status.
-/// Bei Fork: eigene App registrieren und ID hier austauschen.
-#[allow(dead_code)] // Wiring in den Streamer kommt in v0.4.5
-const RICH_PRESENCE_APP_ID: &str = "1340818636616634489";
+// v0.7.13 A1-FIX: GSG-Discord-Webhook-URL nicht mehr hardcoded — siehe
+// `webhook_url_for_runtime()` unten. Pilot muss die URL in den Settings
+// pasten, sonst kein Discord-Post (kein hardcoded Token mehr im public
+// Repo). Wer auf v0.7.12 oder aelter ist: alte URL wurde rotiert,
+// AeroACARS in den Settings unter Discord-Webhook URL neu eingeben.
 
 /// Welcher Lifecycle-Event Discord posten soll. Mapped 1:1 auf einen
 /// Embed mit eigener Farbe + Icon, gebaut von [`build_embed`].
@@ -49,7 +44,6 @@ pub enum EventKind {
 #[derive(Debug, Clone, Default)]
 pub struct EventContext {
     pub callsign: String,            // "RYR100" — Flight-Number-Teil
-    pub airline_icao: String,        // "RYR" — für Logo-Lookup-Fallback
     pub airline_logo_url: Option<String>, // direkt von phpVMS bid.flight.airline.logo
     pub dpt_icao: String,            // "LOWS"
     pub arr_icao: String,            // "EDDB"  (oder Divert-Ziel)
@@ -64,8 +58,9 @@ pub struct EventContext {
     pub landing_rate_fpm: Option<f32>,    // bei Landing
     pub score: Option<i32>,               // bei Landing/PIREP
     pub distance_nm: Option<f64>,
-    pub fuel_used_kg: Option<f32>,
     pub flight_time_min: Option<i32>,
+    // v0.7.13: airline_icao + fuel_used_kg entfernt — wurden in 4 lib.rs-
+    // Stellen geschrieben aber nie in einem Embed gelesen. Audit Q4-2026-05.
 }
 
 /// Discord Embed (Webhook-API-kompatibel). Wir nutzen mehr Felder als
@@ -442,11 +437,40 @@ fn build_divert(ctx: &EventContext) -> (String, u32, String, Vec<EmbedField>) {
 }
 
 /// Schickt den Event-Embed via HTTP-POST an die GSG-Webhook-URL.
+/// v0.7.13 A1-FIX: Webhook-URL pro Runtime aus
+///   1. Env-Variable `AEROACARS_DISCORD_WEBHOOK` (Power-User / CI)
+///   2. Config-File `<app_data_dir>/discord-webhook.txt` (Pilot setzt das
+///      via Settings-UI → File-Write — siehe Frontend SettingsPanel)
+///   3. None → kein Post (Default fuer alle Neu-Installationen ohne Setup)
+///
+/// Kein Hardcode mehr. Wer den public Repo liest, sieht hier kein Token.
+fn webhook_url(app: &tauri::AppHandle) -> Option<String> {
+    if let Ok(v) = std::env::var("AEROACARS_DISCORD_WEBHOOK") {
+        let t = v.trim();
+        if !t.is_empty() {
+            return Some(t.to_string());
+        }
+    }
+    let base = tauri::Manager::path(app).app_data_dir().ok()?;
+    let cfg = base.join("discord-webhook.txt");
+    let raw = std::fs::read_to_string(cfg).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 /// Best-effort — Fehler werden als WARN geloggt aber niemals propagiert
 /// nach oben (Discord soll *nie* den Flug-Workflow blocken). Wenn der
 /// Pilot Discord-Posts deaktiviert hat (Settings) ruft niemand diese
 /// Funktion auf — der Filter passiert beim Caller.
-pub async fn post_event(kind: EventKind, ctx: EventContext) {
+pub async fn post_event(app: tauri::AppHandle, kind: EventKind, ctx: EventContext) {
+    let Some(url) = webhook_url(&app) else {
+        tracing::debug!(?kind, "Discord webhook: keine URL konfiguriert — skip");
+        return;
+    };
     let payload = WebhookPayload {
         embeds: vec![build_embed(kind, &ctx)],
     };
@@ -462,7 +486,7 @@ pub async fn post_event(kind: EventKind, ctx: EventContext) {
             return;
         }
     };
-    match client.post(WEBHOOK_URL).json(&payload).send().await {
+    match client.post(&url).json(&payload).send().await {
         Ok(resp) if resp.status().is_success() => {
             tracing::info!(?kind, "Discord webhook posted");
         }
@@ -479,181 +503,3 @@ pub async fn post_event(kind: EventKind, ctx: EventContext) {
     }
 }
 
-// ===========================================================================
-// Rich Presence
-// ===========================================================================
-
-/// Was der Pilot in Discord neben dem AeroACARS-App-Eintrag sieht.
-/// Mapped 1:1 auf eine Discord-Activity. Enum statt `Option<...>`-
-/// Tuple weil das Mapping-Verhalten je nach Phase unterschiedlich
-/// ist (z.B. Cruise zeigt FL, Boarding zeigt's nicht).
-#[derive(Debug, Clone)]
-#[allow(dead_code)] // Wiring in den Streamer kommt in v0.4.5
-pub enum PresenceState {
-    /// Kein aktiver Flug — Pilot scrollt durch Bids o.ä.
-    Idle,
-    /// Aktiver Flug. Phase-Label kommt rein als bereits-übersetzter
-    /// Kurzstring (z.B. "Boarding", "Cruising").
-    InFlight {
-        callsign: String,        // "RYR100"
-        dpt_icao: String,        // "LOWS"
-        arr_icao: String,        // "EDDB"
-        phase_label: String,     // "Cruising" / "Boarding" / etc.
-        aircraft_type: Option<String>, // "B738"
-        cruise_fl: Option<i32>,  // FL340 → 340
-        started_at_unix: i64,    // für "elapsed XX:YY"-Anzeige in Discord
-    },
-}
-
-/// Singleton-ähnlicher Service: hält die IPC-Connection zum lokalen
-/// Discord-Client. Kapselt Reconnect-Logik (Discord kann während des
-/// Flugs gestartet/beendet werden) und thread-safe Mutex-Wrapping.
-///
-/// Der Service ist optional — fehlt Discord oder schlägt der Connect
-/// fehl, loggen wir warn und gehen weiter. Niemals fatal.
-///
-/// **WIP-Status (v0.4.0+):** Foundation gebaut, Wiring in den Streamer
-/// kommt in v0.4.5. `#[allow(dead_code)]` damit der vorbereitete
-/// Code keine Warnings im Build wirft bis er dann live geht.
-#[allow(dead_code)]
-pub struct RichPresenceService {
-    /// `None` wenn Discord nicht erreichbar ist (nicht installiert,
-    /// nicht laufend, IPC-Pipe noch nicht offen). `Some` sobald die
-    /// erste Verbindung steht — bleibt drin auch wenn Discord
-    /// zwischenzeitlich beendet wird, der nächste `set_*`-Call
-    /// versucht's neu.
-    client: Mutex<Option<DiscordIpcClient>>,
-}
-
-#[allow(dead_code)] // Wiring in den Streamer kommt in v0.4.5
-impl RichPresenceService {
-    pub fn new() -> Self {
-        Self {
-            client: Mutex::new(None),
-        }
-    }
-
-    /// Versucht Connect falls noch keine Verbindung steht. Idempotent.
-    /// Returnt true wenn die Verbindung danach (vermutlich) lebt.
-    fn ensure_connected(&self) -> bool {
-        let mut guard = self.client.lock().expect("rp client lock");
-        if guard.is_some() {
-            return true;
-        }
-        let mut c = DiscordIpcClient::new(RICH_PRESENCE_APP_ID);
-        match c.connect() {
-            Ok(()) => {
-                tracing::info!(app_id = RICH_PRESENCE_APP_ID, "Discord RP connected");
-                *guard = Some(c);
-                true
-            }
-            Err(e) => {
-                tracing::debug!(error = %e, "Discord RP connect failed (Discord nicht offen?)");
-                false
-            }
-        }
-    }
-
-    /// Hauptmethode: setzt den Discord-Status auf `state`. Bei IPC-
-    /// Fehler wird die Connection verworfen und der nächste Call
-    /// versucht reconnect.
-    pub fn set(&self, state: PresenceState) {
-        if !self.ensure_connected() {
-            return;
-        }
-        let activity = build_activity(&state);
-        let mut guard = self.client.lock().expect("rp client lock");
-        let Some(client) = guard.as_mut() else { return };
-        if let Err(e) = client.set_activity(activity) {
-            tracing::warn!(error = %e, "Discord RP set_activity failed — reconnecting next time");
-            // Drop the broken client; ensure_connected will rebuild.
-            *guard = None;
-        }
-    }
-
-    /// Discord-Status komplett entfernen (App schließt).
-    pub fn clear(&self) {
-        let mut guard = self.client.lock().expect("rp client lock");
-        if let Some(client) = guard.as_mut() {
-            let _ = client.clear_activity();
-            let _ = client.close();
-        }
-        *guard = None;
-    }
-}
-
-impl Default for RichPresenceService {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Map `PresenceState` → Discord-Activity. Discord rendert:
-///
-/// ```text
-/// AeroACARS  (App-Name aus dem Developer-Portal)
-///   <details>     ← top line, bigger
-///   <state>       ← bottom line, smaller
-///   xx:yy elapsed (wenn timestamp gesetzt)
-/// ```
-///
-/// Wir nutzen `details` für die wichtigste Info (Callsign + Route)
-/// und `state` für Phase + zusätzliche Details (FL, Aircraft).
-#[allow(dead_code)] // Wiring kommt in v0.4.5
-fn build_activity(state: &PresenceState) -> Activity<'_> {
-    match state {
-        PresenceState::Idle => Activity::new()
-            .details("Browsing bids")
-            .state("Idle on the apron"),
-        PresenceState::InFlight {
-            callsign,
-            dpt_icao,
-            arr_icao,
-            phase_label,
-            aircraft_type,
-            cruise_fl,
-            started_at_unix,
-        } => {
-            let details = format!("{} · {} → {}", callsign, dpt_icao, arr_icao);
-            let mut state_line = phase_label.clone();
-            if let Some(fl) = cruise_fl {
-                state_line.push_str(&format!(" · FL{:03}", fl));
-            }
-            if let Some(ac) = aircraft_type {
-                state_line.push_str(&format!(" · {}", ac));
-            }
-            let mut activity = Activity::new()
-                .details(string_leak(details))
-                .state(string_leak(state_line))
-                .timestamps(Timestamps::new().start(*started_at_unix))
-                .assets(
-                    Assets::new()
-                        // Asset key — falls auf discord.com/developers
-                        // unter "Rich Presence Art Assets" hochgeladen
-                        // (sonst zeigt Discord nichts oder den App-
-                        // Avatar-Fallback). Keys können wir später
-                        // ergänzen — Activity-Builder ignoriert nicht-
-                        // existente keys silently.
-                        .large_image("aeroacars_logo")
-                        .large_text("AeroACARS"),
-                );
-            // Kein .small_image / .small_text — wir haben aktuell nur
-            // ein Asset. Zukünftig: Sim-Logo (MSFS / X-Plane) als
-            // small_image für mehr Kontext.
-            let _ = &mut activity; // silence unused-mut if branch shrinks
-            activity
-        }
-    }
-}
-
-/// Activity API in `discord-rich-presence` v1 nimmt `&'a str` —
-/// damit wir Strings dynamisch bauen können und sie überleben den
-/// `set_activity`-Call brauchen wir Heap-Pointer mit static lifetime.
-/// `Box::leak` ist hier akzeptabel: wir leaken pro RP-Update ~50
-/// Bytes, im Schnitt 1 Update pro Phase-Change → über einen ganzen
-/// Flug ~10 Updates × 100 Bytes = 1 KB total. Wer 1000 Flüge in einer
-/// Session macht ohne den Client neu zu starten, leakt 1 MB — okay.
-#[allow(dead_code)] // Wiring kommt in v0.4.5
-fn string_leak(s: String) -> &'static str {
-    Box::leak(s.into_boxed_str())
-}

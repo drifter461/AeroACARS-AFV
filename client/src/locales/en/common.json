@@ -4,7 +4,6 @@
     "tagline": "ACARS for phpVMS 7"
   },
   "tabs": {
-    "dashboard": "Dashboard",
     "cockpit": "Cockpit",
     "briefing": "My Flights",
     "landing": "Landing",
@@ -37,7 +36,6 @@
     "touchdown": "Touchdown",
     "vs_curve": "V/S curve",
     "landing_rate": "Landing rate",
-    "peak_vs": "Peak V/S",
     "g_force": "G force",
     "peak_g": "Peak G",
     "pitch": "Pitch",
@@ -79,8 +77,6 @@
     "landing_fuel": "LDG fuel",
     "tow": "TOW",
     "ldw": "LDW",
-    "plan_tow": "Plan TOW",
-    "plan_ldw": "Plan LDW",
     "fuel_table": "Fuel",
     "weight_table": "Weight",
     "trip_burn": "Trip burn",
@@ -435,6 +431,12 @@
       "verify_err_parse_failed": "Could not read SimBrief response.",
       "verify_err_unknown": "Unknown verification error."
     },
+    "discord": {
+      "title": "Discord Integration",
+      "intro": "Optional. AeroACARS can post Takeoff / Landing / PIREP / Divert events into a Discord channel — via a webhook configured by your VA. Leave empty for no posts. Ask your VA owner for the webhook URL.",
+      "webhook_label": "Webhook URL",
+      "webhook_hint": "Format: https://discord.com/api/webhooks/.../... — the token part is basically a password, do NOT share in chats."
+    },
     "simulator_section": "Simulator",
     "simulator_label": "Active simulator",
     "simulator_hint": "Pick your simulator. AeroACARS connects automatically as soon as the sim is running.",
@@ -602,16 +604,6 @@
       "config_parse": "The saved configuration is corrupted.",
       "unknown": "An unexpected error occurred."
     }
-  },
-  "dashboard": {
-    "welcome": "Welcome, {{name}}",
-    "pilot_id": "Pilot ID",
-    "airline": "Airline",
-    "current_airport": "Current airport",
-    "home_airport": "Home airport",
-    "current_short": "Now",
-    "home_short": "Home",
-    "site": "Site"
   },
   "sim": {
     "title": "Simulator",

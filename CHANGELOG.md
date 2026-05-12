@@ -4,6 +4,70 @@ Alle nennenswerten Änderungen an AeroACARS. Format: lose an [Keep a Changelog](
 
 ---
 
+## [v0.7.13] — 2026-05-12
+
+🧹 **Codebase-Audit + Security-Cleanup — kein hardcoded Token mehr, ~700 LOC tot raus.**
+
+### Hintergrund
+
+Komplettes QS-Audit über beide Codebases (Pilot-Client + aeroacars-live + Cross-Cutting-Security). 3 parallele Auditor-Agenten haben **18 Punkte** identifiziert. Dieses Release pickt alle **Pilot-Client-relevanten** Punkte raus (= SSH/VPS-Changes wurden bewusst ausgeklammert für einen späteren Release).
+
+### Critical-Fix
+
+**A1 — Discord-Webhook-Token nicht mehr hardcoded** (Audit C1)
+- `discord.rs:27` hatte den GSG-Discord-Webhook-Token im Klartext drin. Repo ist public auf github.com/MANFahrer-GF/AeroACARS → das Token war effektiv öffentlich.
+- v0.7.13 liest die Webhook-URL jetzt aus 3 Quellen (mit Priorität): Env `AEROACARS_DISCORD_WEBHOOK` > `<app_data_dir>/discord-webhook.txt` (chmod 0600) > None.
+- Settings → Discord-Integration: neues Feld "Webhook-URL" wo Pilot/VA-Owner die URL einfügt.
+- Default = leer = keine Posts. Pilot muss aktiv konfigurieren.
+- **Wichtig für VA-Owner:** alten Webhook in Discord **rotieren**, neuen erstellen, URL an Piloten verteilen (Pinned-Post im Discord oder PM).
+
+### Cleanup (~700 LOC tot raus)
+
+| # | Was | Stelle |
+|---|---|---|
+| B7 | Discord `EventContext.airline_icao` + `fuel_used_kg` Felder + 4 Setter | `discord.rs:52` + `lib.rs` × 4 |
+| B6 | `current_premium_status` + `pirep_queue::count` Cargo-Warnings | `lib.rs:7230, 12241` |
+| B5 | `fcu_debounce()` + 8 Fenix-FCU-State-Felder (Plan verworfen) | `lib.rs:2198, 16331` |
+| B4 | 6 orphan Tauri-Commands ohne Frontend-Caller | `landing_get`, `get_minimize_to_tray`, `get_simbrief_settings`, `ofp_callsign_warning_dismiss`, `xplane_uninstall_plugin`, `detect_running_sim` |
+| B3 | 4 verwaiste React-Components | `Dashboard.tsx`, `FlightInfoPanel.tsx`, `MassPanel.tsx`, `PhaseTimeline.tsx` |
+| B2 | Discord-Rich-Presence-Block (~170 LOC dead seit v0.4.0) | `discord.rs:485-659` + `discord-rich-presence` Cargo-Dep |
+| C1 | `secrets::migrate_from_keyring()` + `keyring` Cargo-Dep (v0.5.15-Migration, 30+ Releases her) | `crates/secrets/src/lib.rs:183` |
+| C2 | 4 tote i18n-Keys + ganzer `dashboard:`-Locale-Block (DE/EN/IT) | `tabs.dashboard`, `landing.peak_vs`, `landing.plan_tow`, `landing.plan_ldw` |
+| C3 | Workspace-Dep `schemars = "0.8"` ohne Code-Pfad | `Cargo.toml` |
+| C4 | Stale "Wiring kommt in v0.4.5" + "Patch in v0.7.7" Comments | diverse |
+
+### Security-Härtung
+
+| # | Was |
+|---|---|
+| B1 | Tauri-Updater-Private-Key aus `client/aeroacars-updater.key` nach `~/.aeroacars-keys/` verschoben (war in `.gitignore`, aber 1× `git add -f` = catastrophic). GitHub-Actions-Secrets nicht betroffen. |
+| C5 | Tauri-Webview-CSP von `null` auf strict gesetzt (Audit M-Sec-7). `default-src 'self'` + explizit erlaubte `connect-src` (phpVMS via `https:`, MQTT-WS `wss://live.kant.ovh`, SimBrief). XSS-Defense-in-Depth. |
+
+### Doku + Audit-Spuren
+
+| # | Was |
+|---|---|
+| D1 | `cargo audit` lokal ausgeführt → 4 Vulnerabilities in `rustls-webpki@0.102.8` via `rumqttc 0.24 → rustls 0.22` → in Audit-Report dokumentiert, Dep-Tree-Update für späteren Release |
+| D2 | MEMORY.md korrigiert: Secrets-Storage ist **file-based** (`<app_data_dir>/secrets.json`, chmod 0600), NICHT OS-Keyring (Doku war 30 Releases falsch) |
+| D3 | 8 stale Specs (alle als "Approved" / "CODE-READY" markiert) nach `docs/spec/historical/` archiviert. Nur `requirements.md` bleibt aktiv |
+| D4 | Audit-Reports (`pilot-client-audit.md`, `aeroacars-live-audit.md`, `security-audit.md`, `MASTER-AUDIT-REPORT.md`) im Repo committet |
+
+### Was NICHT in v0.7.13 ist (bewusst, für separates Release)
+
+- **C2** (`NOPASSWD:ALL` auf VPS) → braucht SSH-Patch + Test der Admin-Endpoints
+- **H1+H2** Rate-Limit auf `/api/login` + Re-Auth auf Admin-Endpoints → Recorder-Code-Change
+- **H3** `@fastify/static` Major-Bump auf 9.x → Recorder-Test
+- **H5** `bcrypt → bcryptjs` → Recorder-Migration
+- **Caddy Security-Headers** (CSP, HSTS-explicit, X-Frame-Options)
+
+→ Diese 5 Punkte landen im nächsten VPS-Side-Release wenn du SSH-Window für Tests freigibst.
+
+### Cargo-Audit-Finding (Pending)
+
+4 Vulns in `rustls-webpki@0.102.8` (transitive via `rumqttc`). Solution = `rustls-webpki >=0.103.12` aber das verlangt `rumqttc`-Upgrade auf eine Version die `rustls 0.23+` nutzt → API-Breaking-Check needed. Notiert in `docs/audit/MASTER-AUDIT-REPORT.md` Q1. Geplant für v0.7.14.
+
+---
+
 ## [v0.7.12] — 2026-05-12
 
 🐛 **Bid-Card: Pax + Cargo erscheinen wieder — auch ohne phpVMS-Bid-Pointer.**

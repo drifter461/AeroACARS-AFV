@@ -2190,27 +2190,11 @@ struct FlightStats {
     /// Captured continuously — final value is the union of all
     /// phases that were ever ticked (NG3 stays None).
     pmdg_ecl_phases_complete: Option<[bool; 10]>,
-    // FCU debounce state — kept around for the planned switch to the
-    // standard `AUTOPILOT * VAR` SimVars (the Fenix LVar variant
-    // proved unreliable as encoder click counters; we don't log
-    // them for now). The four `last_logged_*` + `pending_*` fields
-    // get re-wired when fcu_debounce() is called again.
-    #[allow(dead_code)]
-    last_logged_fcu_alt: Option<i32>,
-    #[allow(dead_code)]
-    last_logged_fcu_hdg: Option<i32>,
-    #[allow(dead_code)]
-    last_logged_fcu_spd: Option<i32>,
-    #[allow(dead_code)]
-    last_logged_fcu_vs: Option<i32>,
-    #[allow(dead_code)]
-    pending_fcu_alt: Option<(i32, DateTime<Utc>)>,
-    #[allow(dead_code)]
-    pending_fcu_hdg: Option<(i32, DateTime<Utc>)>,
-    #[allow(dead_code)]
-    pending_fcu_spd: Option<(i32, DateTime<Utc>)>,
-    #[allow(dead_code)]
-    pending_fcu_vs: Option<(i32, DateTime<Utc>)>,
+    // v0.7.13: FCU-Debounce-Felder entfernt — der geplante Switch auf
+    // `AUTOPILOT * VAR` SimVars wurde verworfen, der Fenix-LVar-Variant
+    // ist als Encoder-Click-Counter unzuverlaessig. Falls FCU-Logging
+    // doch jemals revived wird: aus git history rausziehen (commit
+    // ggf vor v0.7.13). Audit Q4-2026-05.
 }
 
 /// What kind of touchdown this is from the pilot's perspective.
@@ -3793,13 +3777,9 @@ fn landing_list(app: AppHandle) -> Vec<LandingRecord> {
         .unwrap_or_default()
 }
 
-/// Fetch a single landing record by PIREP id.
-#[tauri::command]
-fn landing_get(app: AppHandle, pirep_id: String) -> Option<LandingRecord> {
-    open_landing_store(&app)
-        .and_then(|s| s.get(&pirep_id).ok())
-        .flatten()
-}
+// v0.7.13: `landing_get(pirep_id)` Tauri-Command entfernt — Frontend nutzt
+// nur `landing_list` (Landing-Tab) + `landing_get_current` (Live-Vorschau).
+// Audit Q4-2026-05.
 
 /// Build a *preview* landing record from the currently-active flight.
 /// Used by the Landing tab during the rollout / before file: shows the
@@ -4244,15 +4224,9 @@ fn current_client(state: &tauri::State<'_, AppState>) -> Result<Client, UiError>
         .ok_or_else(|| UiError::new("not_logged_in", "no active session"))
 }
 
-/// Read the current minimize-to-tray setting from backend state.
-/// Used by the React side after mount to surface the toggle's
-/// initial value when localStorage was wiped.
-#[tauri::command]
-fn get_minimize_to_tray(state: tauri::State<'_, AppState>) -> bool {
-    state
-        .minimize_to_tray_enabled
-        .load(std::sync::atomic::Ordering::Relaxed)
-}
+// v0.7.13: `get_minimize_to_tray` Tauri-Command entfernt — Frontend
+// liest localStorage selber + setzt via `set_minimize_to_tray`. Es gab
+// nie einen Caller fuer den Read-Path. Audit Q4-2026-05.
 
 /// Flip the minimize-to-tray flag. The React Settings panel calls
 /// this whenever the user toggles the checkbox AND on every mount
@@ -4273,12 +4247,61 @@ fn set_minimize_to_tray(
     Ok(())
 }
 
-/// v0.7.8: Read SimBrief-Identifier-Settings.
-/// Spec docs/spec/ofp-refresh-simbrief-direct-v0.7.8.md §4.
+/// v0.7.13: Discord-Webhook-URL aus dem File-Storage lesen
+/// (`<app_data_dir>/discord-webhook.txt`). Returnt `None` wenn die Datei
+/// fehlt oder leer ist. Spec: Audit-A1.
 #[tauri::command]
-fn get_simbrief_settings(state: tauri::State<'_, AppState>) -> SimBriefSettings {
-    state.simbrief_settings.lock().expect("simbrief_settings lock").clone()
+fn discord_webhook_get(app: AppHandle) -> Option<String> {
+    let base = app.path().app_data_dir().ok()?;
+    let path = base.join("discord-webhook.txt");
+    let content = std::fs::read_to_string(path).ok()?;
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
+
+/// v0.7.13: Discord-Webhook-URL setzen. Leerer / None-Wert loescht die
+/// Datei (= keine Discord-Posts mehr). Sonst File-Write mit chmod 0600
+/// auf Unix (Webhook-Token ist quasi ein Passwort). Spec: Audit-A1.
+#[tauri::command]
+fn discord_webhook_set(app: AppHandle, url: Option<String>) -> Result<(), UiError> {
+    let base = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| UiError::new("path_err", format!("app_data_dir: {e}")))?;
+    std::fs::create_dir_all(&base)
+        .map_err(|e| UiError::new("io_err", format!("mkdir: {e}")))?;
+    let path = base.join("discord-webhook.txt");
+    let trimmed = url
+        .as_deref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    match trimmed {
+        Some(u) => {
+            std::fs::write(&path, &u)
+                .map_err(|e| UiError::new("io_err", format!("write: {e}")))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+            }
+            tracing::info!("discord webhook URL gesetzt (Laenge: {})", u.len());
+        }
+        None => {
+            // Datei loeschen — Discord-Posts deaktiviert.
+            let _ = std::fs::remove_file(&path);
+            tracing::info!("discord webhook URL geloescht");
+        }
+    }
+    Ok(())
+}
+
+// v0.7.13: `get_simbrief_settings` Tauri-Command entfernt — Frontend
+// haelt die Settings selber in React-State + persistiert via
+// `set_simbrief_settings`. Kein Read-Path-Caller. Audit Q4-2026-05.
 
 /// v0.7.8: Set SimBrief-Identifier-Settings. Wird vom Frontend
 /// SettingsPanel + App.tsx Login-Mount aufgerufen. Empty-Strings werden
@@ -4598,12 +4621,10 @@ fn ofp_callsign_warning_get(
         .clone()
 }
 
-/// v0.7.9: Dismisst das Callsign-Warning (Pilot hat es bestaetigt /
-/// X-Button gedrueckt).
-#[tauri::command]
-fn ofp_callsign_warning_dismiss(state: tauri::State<AppState>) {
-    *state.ofp_callsign_warning.lock().expect("ofp_callsign_warning lock") = None;
-}
+// v0.7.13: `ofp_callsign_warning_dismiss` Tauri-Command entfernt — die
+// X-Button-Dismiss-Logik im Frontend setzt das Banner ueber lokalen
+// React-State auf null statt einen Backend-Roundtrip zu machen. Audit
+// Q4-2026-05.
 
 /// v0.7.10: Pre-Flight-Preview eines SimBrief-OFP fuer einen bestimmten Bid.
 /// Holt OFP direkt von simbrief.com (= SimBrief-direct, gleicher Pfad wie
@@ -7227,13 +7248,9 @@ mod pirep_queue {
         out
     }
 
-    pub fn count(app: &AppHandle) -> usize {
-        let Some(d) = dir(app) else { return 0; };
-        let Ok(rd) = std::fs::read_dir(&d) else { return 0; };
-        rd.flatten()
-          .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
-          .count()
-    }
+    // v0.7.13: `count(app)` entfernt — wurde fuer einen geplanten
+    // "X Pireps in Queue"-Indicator vorgesehen, der nie ins UI ging.
+    // `list(app)` reicht den Callern. Audit Q4-2026-05.
 }
 
 /// v0.5.49 — Auto-Retry für PIREP-File mit exponentiellem Backoff.
@@ -9071,7 +9088,6 @@ async fn flight_end(
             let stats_for_post = flight.stats.lock().expect("flight stats");
             let ctx = discord::EventContext {
                 callsign: format_callsign(&flight.airline_icao, &flight.flight_number),
-                airline_icao: flight.airline_icao.clone(),
                 airline_logo_url: flight.airline_logo_url.clone(),
                 dpt_icao: flight.dpt_airport.clone(),
                 arr_icao: actual_arr,
@@ -9093,7 +9109,7 @@ async fn flight_end(
                 ..Default::default()
             };
             drop(stats_for_post);
-            tokio::spawn(discord::post_event(discord::EventKind::Divert, ctx));
+            tokio::spawn(discord::post_event(app.clone(), discord::EventKind::Divert, ctx));
         }
         consume_bid_best_effort(&client, flight.bid_id).await;
         // Drop the in-memory active flight: divert is finalized.
@@ -9173,8 +9189,7 @@ async fn flight_end(
                 let stats_for_post = flight.stats.lock().expect("flight stats");
                 let ctx = discord::EventContext {
                     callsign: format_callsign(&flight.airline_icao, &flight.flight_number),
-                    airline_icao: flight.airline_icao.clone(),
-                    airline_logo_url: flight.airline_logo_url.clone(),
+                        airline_logo_url: flight.airline_logo_url.clone(),
                     dpt_icao: flight.dpt_airport.clone(),
                     arr_icao: flight.arr_airport.clone(),
                     aircraft_type: Some(flight.aircraft_icao.clone()).filter(|s| !s.is_empty()),
@@ -9215,7 +9230,7 @@ async fn flight_end(
                     ..Default::default()
                 };
                 drop(stats_for_post);
-                tokio::spawn(discord::post_event(discord::EventKind::PirepFiled, ctx));
+                tokio::spawn(discord::post_event(app.clone(), discord::EventKind::PirepFiled, ctx));
             }
             // v0.5.11: MQTT live-tracking PIREP publish. Best-effort,
             // fire-and-forget. Monitor uses this to mark a flight
@@ -11450,8 +11465,7 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                 if prev_takeoff_at.is_none() && stats.takeoff_at.is_some() {
                     let ctx = discord::EventContext {
                         callsign: format_callsign(&flight.airline_icao, &flight.flight_number),
-                        airline_icao: flight.airline_icao.clone(),
-                        airline_logo_url: flight.airline_logo_url.clone(),
+                                airline_logo_url: flight.airline_logo_url.clone(),
                         dpt_icao: flight.dpt_airport.clone(),
                         arr_icao: flight.arr_airport.clone(),
                         aircraft_type: Some(flight.aircraft_icao.clone()).filter(|s| !s.is_empty()),
@@ -11463,13 +11477,12 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                         tow_kg: stats.takeoff_weight_kg.map(|w| w as f32),
                         ..Default::default()
                     };
-                    tokio::spawn(discord::post_event(discord::EventKind::Takeoff, ctx));
+                    tokio::spawn(discord::post_event(app.clone(), discord::EventKind::Takeoff, ctx));
                 }
                 if prev_landing_at.is_none() && stats.landing_at.is_some() {
                     let ctx = discord::EventContext {
                         callsign: format_callsign(&flight.airline_icao, &flight.flight_number),
-                        airline_icao: flight.airline_icao.clone(),
-                        airline_logo_url: flight.airline_logo_url.clone(),
+                                airline_logo_url: flight.airline_logo_url.clone(),
                         dpt_icao: flight.dpt_airport.clone(),
                         arr_icao: flight.arr_airport.clone(),
                         aircraft_type: Some(flight.aircraft_icao.clone()).filter(|s| !s.is_empty()),
@@ -11481,7 +11494,7 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                         distance_nm: Some(stats.distance_nm),
                         ..Default::default()
                     };
-                    tokio::spawn(discord::post_event(discord::EventKind::Landing, ctx));
+                    tokio::spawn(discord::post_event(app.clone(), discord::EventKind::Landing, ctx));
                 }
             }
             // v0.5.14: MQTT block + takeoff snapshots. Fire on the same
@@ -12234,23 +12247,9 @@ fn current_premium_touchdown(app: &AppHandle) -> Option<sim_xplane::PremiumTouch
     adapter.take_premium_touchdown()
 }
 
-/// Status of the AeroACARS X-Plane Plugin connection. Returns
-/// `(ever_seen, active)` for the X-Plane sim path; `(false, false)`
-/// for any other sim. UI uses `active` to show the "X-PLANE PREMIUM"
-/// badge.
-fn current_premium_status(app: &AppHandle) -> sim_xplane::PremiumStatus {
-    let state = app.state::<AppState>();
-    let kind = read_sim_config(app).kind;
-    if !kind.is_xplane() {
-        return sim_xplane::PremiumStatus {
-            ever_seen: false,
-            active: false,
-            packet_count: 0,
-        };
-    }
-    let adapter = state.xplane.lock().expect("xplane lock");
-    adapter.premium_status()
-}
+// v0.7.13: `current_premium_status` entfernt — war seit der Refactor-Welle
+// in v0.6.x ohne Caller. UI greift direkt via `app.state::<AppState>()` auf
+// den X-Plane-Premium-Status zu. Audit Q4-2026-05.
 
 /// Update running stats AND step the flight-phase FSM. Returns the new phase
 /// when a transition fires, otherwise `None`.
@@ -16354,56 +16353,10 @@ fn log_three_state_change(
     }
 }
 
-/// Debounced logger for FCU encoder displays. Each tick, the pilot
-/// might be turning the knob — we don't want a "Selected ALT 36000"
-///
-/// Currently unused — the call sites were removed when we dropped
-/// the Fenix `L:E_FCU_*` LVar logging (those returned encoder
-/// click counts, not engineering values). Kept because we plan to
-/// revive it for the standard `AUTOPILOT * VAR` SimVars. Once the
-/// new wiring lands, drop the `#[allow(dead_code)]` below.
-/// for every click on the way from 12000 to 36000. We hold the new
-/// value for FCU_DEBOUNCE_SECS, and only emit the log entry once it
-/// has held steady for that long.
-#[allow(dead_code)]
-fn fcu_debounce(
-    app: &AppHandle,
-    snap_value: Option<i32>,
-    last_logged: &mut Option<i32>,
-    pending: &mut Option<(i32, DateTime<Utc>)>,
-    now: DateTime<Utc>,
-    label: &str,
-    unit: &str,
-) {
-    const FCU_DEBOUNCE_SECS: i64 = 2;
-    let Some(v) = snap_value else { return };
-    if *last_logged == Some(v) {
-        // No change since last log — drop any pending entry.
-        *pending = None;
-        return;
-    }
-    match *pending {
-        Some((pv, since)) if pv == v => {
-            // Same new value held — has it been steady long enough?
-            if (now - since).num_seconds() >= FCU_DEBOUNCE_SECS {
-                if last_logged.is_some() {
-                    log_activity_handle(
-                        app,
-                        ActivityLevel::Info,
-                        format!("{label} {v} {unit}"),
-                        None,
-                    );
-                }
-                *last_logged = Some(v);
-                *pending = None;
-            }
-        }
-        _ => {
-            // New value (or first change) — start the debounce.
-            *pending = Some((v, now));
-        }
-    }
-}
+// v0.7.13: `fcu_debounce()` entfernt — wurde fuer Fenix-LVar-Logging
+// gebraucht, der Plan ist verworfen (Fenix-Encoder-Klicks sind nicht
+// engineering-Werte). Falls revival fuer `AUTOPILOT * VAR`-SimVars:
+// aus git history rausziehen. Audit Q4-2026-05.
 
 /// Helper for bool-only telemetry change logging — checks Option,
 /// initialises silently on first read, and emits an activity-log line
@@ -16928,19 +16881,11 @@ async fn xplane_install_plugin(
     xplane_plugin_install::install_plugin(&path).await
 }
 
-/// Remove the plugin folder from the given X-Plane install. No-op
-/// when no plugin folder exists. Async + `spawn_blocking` so a slow
-/// `remove_dir_all` (Windows Defender scanning, network drives, etc.)
-/// can't stall IPC.
-#[tauri::command]
-async fn xplane_uninstall_plugin(install_dir: String) -> Result<(), String> {
-    let path = std::path::PathBuf::from(install_dir);
-    tauri::async_runtime::spawn_blocking(move || {
-        xplane_plugin_install::uninstall_plugin(&path)
-    })
-    .await
-    .map_err(|e| format!("worker thread panicked: {e}"))?
-}
+// v0.7.13: `xplane_uninstall_plugin` Tauri-Command entfernt — UI hat
+// nie einen "Plugin deinstallieren"-Button gehabt. Manuell loescht der
+// Pilot via Settings → X-Plane → Plugin-Ordner anzeigen → Loeschen.
+// Helper `xplane_plugin_install::uninstall_plugin` ebenfalls entfernt.
+// Audit Q4-2026-05.
 
 /// Status of the optional AeroACARS X-Plane Plugin (v0.5.0+
 /// "Premium Mode"). The Cockpit tab uses this to show a green
@@ -16968,38 +16913,9 @@ fn xplane_premium_status(state: tauri::State<'_, AppState>) -> serde_json::Value
     })
 }
 
-/// Probe both potential simulators and return a suggested SimKind.
-/// Used on first launch when no sim is configured, OR via a
-/// "Detect Sim" button in Settings.
-///
-/// Order:
-///   1. UDP probe to 127.0.0.1:49000 — if X-Plane responds, return
-///      X-Plane (12 by default; we have no protocol-level way to
-///      tell 11 vs 12 apart).
-///   2. SimConnect_Open probe (Windows only) — if MSFS is running,
-///      return MSFS 2024.
-///   3. Otherwise: SimKind::Off.
-///
-/// Returns the kind as a string matching the `sim_set_kind` API:
-///   "off" | "msfs2020" | "msfs2024" | "xplane11" | "xplane12"
-#[tauri::command]
-async fn detect_running_sim() -> String {
-    // Run the UDP probe on a blocking-tasks thread so the 500 ms
-    // worst-case latency doesn't tie up the Tauri event loop.
-    let xp = tauri::async_runtime::spawn_blocking(sim_xplane::is_xplane_running)
-        .await
-        .unwrap_or(false);
-    if xp {
-        tracing::info!("auto-detect: X-Plane responding on UDP 49000");
-        return "xplane12".to_string();
-    }
-    // MSFS probe: simplest is to try opening SimConnect briefly. We
-    // don't have a non-invasive variant yet (Phase 3); for now skip
-    // the MSFS probe and let the user pick manually if X-Plane isn't
-    // up. The active MsfsAdapter will report Connected if MSFS is
-    // there anyway, so detection can be inferred from that signal.
-    "off".to_string()
-}
+// v0.7.13: `detect_running_sim` Tauri-Command entfernt — geplanter
+// "Detect Sim"-Button kam nie ins Settings-UI. Frontend zeigt die
+// Sim-Kind-Picker manuell. Audit Q4-2026-05.
 
 /// On login or session restore, check the on-disk active-flight file. If it's
 /// recent enough, recreate the in-memory ActiveFlight and restart position
@@ -17983,32 +17899,15 @@ pub fn run() {
             // own appdata dir), secret reads/writes will return
             // SecretError::NotInitialized and the app degrades to
             // "no persistent login" but keeps running.
+            //
+            // v0.7.13: Der `migrate_from_keyring`-Aufruf ist entfernt
+            // (Audit CC1) — die v0.5.15-Einmal-Migration ist 30+ Releases
+            // her; verbleibende Pilots ohne JSON-Datei loggen sich frisch
+            // ein. Keyring-Dep ist ebenfalls raus.
             match app.path().app_data_dir() {
                 Ok(dir) => {
                     if let Err(e) = secrets::init(&dir) {
                         tracing::error!(error = %e, "secrets init failed");
-                    } else {
-                        // One-shot migration of any pre-v0.5.15
-                        // credentials from the OS keyring (Apple
-                        // Keychain / Windows Credential Manager) to
-                        // our JSON file. Pilots see one final batch
-                        // of Keychain prompts on the upgrade run;
-                        // every subsequent launch is silent.
-                        let accounts = [
-                            "primary",          // phpVMS API key
-                            "mqtt-username",
-                            "mqtt-password",
-                            "mqtt-va",
-                            "mqtt-pilot-id",
-                            "mqtt-broker-url",
-                        ];
-                        let n = secrets::migrate_from_keyring(&accounts);
-                        if n > 0 {
-                            tracing::info!(
-                                migrated = n,
-                                "v0.5.15 keyring → file migration finished"
-                            );
-                        }
                     }
                 }
                 Err(e) => {
@@ -18091,17 +17990,17 @@ pub fn run() {
             flight_refresh_simbrief,
             bid_simbrief_preview,
             ofp_callsign_warning_get,
-            ofp_callsign_warning_dismiss,
             flight_resume_after_disconnect,
             phpvms_get_aircraft,
             auto_start_skip_status,
             phpvms_refresh_profile,
             divert_nearest_airports,
             fetch_release_notes,
-            get_minimize_to_tray,
             set_minimize_to_tray,
+            // v0.7.13 Discord-Webhook-URL Setting (Audit A1 — kein Hardcode mehr)
+            discord_webhook_get,
+            discord_webhook_set,
             // v0.7.8 SimBrief Integration (Spec §4)
-            get_simbrief_settings,
             set_simbrief_settings,
             verify_simbrief_identifier,
             sim_get_kind,
@@ -18120,7 +18019,6 @@ pub fn run() {
             activity_log_get,
             activity_log_clear,
             landing_list,
-            landing_get,
             landing_get_current,
             landing_delete,
             metar_get,
@@ -18135,8 +18033,6 @@ pub fn run() {
             xplane_premium_status,
             xplane_detect_install_path,
             xplane_install_plugin,
-            xplane_uninstall_plugin,
-            detect_running_sim,
             auto_start_set_enabled,
             auto_start_get_enabled,
             flight_logs_stats,

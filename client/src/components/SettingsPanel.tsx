@@ -90,6 +90,20 @@ export function SettingsPanel({
     text: string;
   } | null>(null);
 
+  // v0.7.13: Discord-Webhook-URL. Persistence file-based im Backend
+  // (`<app_data_dir>/discord-webhook.txt`, chmod 0600 auf Unix).
+  // Frontend laedt initial via `discord_webhook_get`. Audit C1.
+  const [discordWebhook, setDiscordWebhook] = useState<string>("");
+  useEffect(() => {
+    invoke<string | null>("discord_webhook_get")
+      .then((v) => setDiscordWebhook(v ?? ""))
+      .catch(() => null);
+  }, []);
+  function persistDiscordWebhook(url: string) {
+    const trimmed = url.trim();
+    void invoke("discord_webhook_set", { url: trimmed || null }).catch(() => null);
+  }
+
   // v0.7.8: Auto-clear verify-status nach 8s.
   useEffect(() => {
     if (!verifyStatus) return;
@@ -288,6 +302,30 @@ export function SettingsPanel({
             </span>
           )}
         </div>
+      </div>
+
+      {/* v0.7.13: Discord-Webhook-URL — frei konfigurierbar pro Pilot. Vorher
+          war die URL in discord.rs hardcoded (= Public-Repo-Token-Leak,
+          siehe Audit C1). Pilot pasted die VA-eigene Webhook-URL hier ein,
+          leerlassen = keine Posts. */}
+      <div className="settings__section">
+        <h3>{t("settings.discord.title")}</h3>
+        <p className="settings__row-hint">{t("settings.discord.intro")}</p>
+        <label className="settings__field">
+          <span className="settings__field-label">
+            {t("settings.discord.webhook_label")}
+          </span>
+          <input
+            type="password"
+            value={discordWebhook}
+            onChange={(e) => setDiscordWebhook(e.target.value)}
+            onBlur={() => persistDiscordWebhook(discordWebhook)}
+            placeholder="https://discord.com/api/webhooks/..."
+            autoComplete="off"
+            spellCheck={false}
+          />
+          <small>{t("settings.discord.webhook_hint")}</small>
+        </label>
       </div>
 
       <div className="settings__section">

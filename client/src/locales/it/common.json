@@ -4,7 +4,6 @@
     "tagline": "ACARS per phpVMS 7"
   },
   "tabs": {
-    "dashboard": "Dashboard",
     "cockpit": "Cockpit",
     "briefing": "I miei voli",
     "landing": "Atterraggio",
@@ -37,7 +36,6 @@
     "touchdown": "Touchdown",
     "vs_curve": "Curva del rateo di discesa",
     "landing_rate": "Rateo discesa",
-    "peak_vs": "V/S massimo",
     "g_force": "Forza G",
     "peak_g": "G massimo",
     "pitch": "Pitch",
@@ -79,8 +77,6 @@
     "landing_fuel": "Carb. al LDG",
     "tow": "TOW",
     "ldw": "LDW",
-    "plan_tow": "TOW pianificato",
-    "plan_ldw": "LDW pianificato",
     "fuel_table": "Carburante",
     "weight_table": "Peso",
     "trip_burn": "Consumo viaggio",
@@ -435,6 +431,12 @@
       "verify_err_parse_failed": "Impossibile leggere la risposta di SimBrief.",
       "verify_err_unknown": "Errore sconosciuto durante la verifica."
     },
+    "discord": {
+      "title": "Integrazione Discord",
+      "intro": "Opzionale. AeroACARS può postare eventi Takeoff / Landing / PIREP / Divert in un canale Discord — tramite un webhook configurato dalla tua VA. Lascia vuoto per nessun post. Chiedi al tuo VA owner l'URL del webhook.",
+      "webhook_label": "URL Webhook",
+      "webhook_hint": "Formato: https://discord.com/api/webhooks/.../... — il token è praticamente una password, NON condividere in chat."
+    },
     "simulator_section": "Simulatore",
     "simulator_label": "Simulatore attivo",
     "simulator_hint": "Scegli il tuo simulatore. AeroACARS si connette automaticamente non appena il simulatore viene avviato.",
@@ -603,16 +605,6 @@
       "config_parse": "La configurazione salvata è corrotta.",
       "unknown": "Si è verificato un errore imprevisto."
     }
-  },
-  "dashboard": {
-    "welcome": "Benvenuto, {{name}}",
-    "pilot_id": "ID pilota",
-    "airline": "Compagnia",
-    "current_airport": "Aeroporto attuale",
-    "home_airport": "Aeroporto di base",
-    "current_short": "Attuale",
-    "home_short": "Base",
-    "site": "Sito"
   },
   "sim": {
     "title": "Simulatore",
