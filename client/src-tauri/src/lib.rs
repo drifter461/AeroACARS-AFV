@@ -6388,7 +6388,95 @@ async fn flight_start(
     // heute: Flug hatte OFP, aber Landung-Tab zeigte trotzdem keine SOLL-
     // Werte → Fetch war silently fehlgeschlagen, niemand merkte was. Mit
     // Activity-Log-Eintrag sieht der Pilot's beim nächsten Mal sofort.
-    let planned_ofp = if let Some(sb) = bid.flight.simbrief.as_ref() {
+    //
+    // v0.7.17 (N-001): SimBrief-Direct-First. Wenn der Pilot in Settings
+    // einen SimBrief-Identifier (User-ID oder Username) hat, holen wir
+    // zuerst den AKTUELLSTEN SimBrief-OFP direkt von simbrief.com.
+    // Damit greift die "Aktualisieren"-Geste in My-Flights wirklich —
+    // bisher hat flight_start die alte Bid-OFP-ID aus phpVMS gezogen,
+    // selbst wenn der Pilot in SimBrief gerade einen neuen Plan
+    // generiert hatte. Fallback auf den Bid-Pointer wenn Direct
+    // fehlschlaegt oder kein Identifier konfiguriert ist.
+    let simbrief_settings = state
+        .simbrief_settings
+        .lock()
+        .expect("simbrief_settings lock")
+        .clone();
+    let mut planned_ofp: Option<api_client::SimBriefOfp> = None;
+    if has_simbrief_identifier(&simbrief_settings) {
+        let active_dpt = bid.flight.dpt_airport_id.clone();
+        let active_arr = bid.flight.arr_airport_id.clone();
+        let active_airline_icao = bid
+            .flight
+            .airline
+            .as_ref()
+            .map(|a| a.icao.clone())
+            .unwrap_or_default();
+        let active_flight_number = bid.flight.flight_number.clone();
+        let active_bid_callsign = bid.flight.callsign.clone();
+        let active_pilot_callsign = state
+            .cached_pilot_callsign
+            .lock()
+            .expect("cached_pilot_callsign lock")
+            .clone();
+        match try_simbrief_direct_with_match(
+            &client,
+            &simbrief_settings,
+            &active_dpt,
+            &active_arr,
+            &active_airline_icao,
+            &active_flight_number,
+            active_bid_callsign.as_deref(),
+            active_pilot_callsign.as_deref(),
+        )
+        .await
+        {
+            DirectOutcome::Match { ofp }
+            | DirectOutcome::MatchWithCallsignWarning { ofp, .. } => {
+                tracing::info!(
+                    sb_id = %ofp.request_id,
+                    plan_burn_kg = ofp.planned_burn_kg,
+                    plan_tow_kg = ofp.planned_tow_kg,
+                    "SimBrief direct OFP fetched at flight_start",
+                );
+                log_activity(
+                    &state,
+                    ActivityLevel::Info,
+                    "SimBrief OFP geladen (direct, aktueller Stand)".to_string(),
+                    Some(format!(
+                        "Plan-Block {:.0} kg · Trip {:.0} kg · TOW {:.0} kg · OFP {}",
+                        ofp.planned_block_fuel_kg,
+                        ofp.planned_burn_kg,
+                        ofp.planned_tow_kg,
+                        ofp.request_id
+                    )),
+                );
+                planned_ofp = Some(ofp);
+            }
+            DirectOutcome::Mismatch { .. } => {
+                // Direct lieferte einen OFP, aber der ist fuer einen
+                // anderen Flug (DEP/ARR-Mismatch). Bid-Pointer als
+                // Fallback nutzen — ist wahrscheinlich der richtige
+                // Plan fuer diesen konkreten Flug.
+                tracing::warn!(
+                    "SimBrief direct returned mismatching DEP/ARR — falling back to phpVMS bid pointer"
+                );
+            }
+            DirectOutcome::Error(_) => {
+                // Netzwerk/Auth-Fehler bei direct — Bid-Pointer als
+                // Fallback. Pilot kriegt unten den Pointer-Activity-
+                // Log-Eintrag, der reicht.
+                tracing::warn!(
+                    "SimBrief direct fetch failed at flight_start — falling back to phpVMS bid pointer"
+                );
+            }
+        }
+    }
+    // Fallback (Direct nicht versucht oder fehlgeschlagen): klassischer
+    // Bid-Pointer-Pfad. Identisches Verhalten wie vor v0.7.17.
+    let planned_ofp = if planned_ofp.is_some() {
+        planned_ofp
+    } else if let Some(sb) = bid.flight.simbrief.as_ref() {
         match client.fetch_simbrief_ofp(&sb.id).await {
             Ok(Some(ofp)) => {
                 tracing::info!(
@@ -7817,7 +7905,10 @@ fn actual_burn_for_record(stats: &FlightStats) -> Option<f32> {
 /// Returns None wenn keine Sub-Scores berechnet werden konnten
 /// (= Touchdown-Daten fehlen voellig). Caller sollte dann auf
 /// stats.landing_score.numeric() fallback'en.
-fn compute_aggregate_master_score(stats: &FlightStats) -> Option<u8> {
+fn compute_aggregate_master_score(
+    stats: &FlightStats,
+    aircraft_icao: Option<&str>,
+) -> Option<u8> {
     let actual_burn = actual_burn_for_record(stats);
     let scoring_input = landing_scoring::LandingScoringInput {
         vs_fpm: stats.landing_peak_vs_fpm.or(stats.landing_rate_fpm),
@@ -7831,6 +7922,10 @@ fn compute_aggregate_master_score(stats: &FlightStats) -> Option<u8> {
         actual_trip_burn_kg: actual_burn,
         planned_zfw_kg: stats.planned_zfw_kg,
         planned_tow_kg: stats.planned_tow_kg,
+        // v0.7.17 (N-002): Aircraft-ICAO fuer den aircraft-category-
+        // sensitiven Bahn-Auslastung-Score. None → Light-Default-
+        // Schwellen (konservativ).
+        aircraft_icao: aircraft_icao.map(str::to_string),
         ..Default::default()
     };
     let subs = landing_scoring::compute_sub_scores(&scoring_input);
@@ -7998,6 +8093,8 @@ fn build_landing_record(
         actual_trip_burn_kg: actual_burn_for_record(stats),
         planned_zfw_kg: stats.planned_zfw_kg,
         planned_tow_kg: stats.planned_tow_kg,
+        // v0.7.17 (N-002): Aircraft-Category aware rollout-Score.
+        aircraft_icao: aircraft_icao.map(str::to_string),
         ..Default::default()
     };
     let computed_sub_scores = landing_scoring::compute_sub_scores(&scoring_input);
@@ -8960,7 +9057,7 @@ async fn flight_end(
         // "60/100" — Score-Vertragsbruch.
         // Fallback: stats.landing_score.numeric() wenn Crate keinen
         // Aggregate liefert (z.B. komplett leerer Sub-Score-Vec).
-        let score = compute_aggregate_master_score(&stats)
+        let score = compute_aggregate_master_score(&stats, Some(&flight.aircraft_icao))
             .map(|m| m as i32)
             .or_else(|| stats.landing_score.map(|s| s.numeric()));
         let distance_nm = stats.distance_nm;
@@ -9251,6 +9348,8 @@ async fn flight_end(
                             actual_trip_burn_kg: actual_burn,
                             planned_zfw_kg: stats.planned_zfw_kg,
                             planned_tow_kg: stats.planned_tow_kg,
+                            // v0.7.17 (N-002): aircraft-aware rollout score
+                            aircraft_icao: Some(flight.aircraft_icao.clone()),
                             ..Default::default()
                         };
                         let payload_sub_scores =
@@ -14744,7 +14843,7 @@ fn build_pirep_fields(
     // 100/100" unten). Fallback auf Touchdown-Klassifikation wenn
     // Crate keinen Aggregate liefert.
     if let Some(touchdown_class) = stats.landing_score {
-        let aggregate = compute_aggregate_master_score(stats);
+        let aggregate = compute_aggregate_master_score(stats, Some(&flight.aircraft_icao));
         let (label, numeric) = match aggregate {
             Some(m) => (aggregate_score_label(m), m as i32),
             None => (touchdown_class.label(), touchdown_class.numeric()),
@@ -15595,7 +15694,7 @@ fn announce_landing_score(app: &AppHandle, flight: &ActiveFlight) -> Option<Stri
     // Master-Score (das was App/Web/phpVMS jetzt anzeigen). Damit
     // ist klar dass "Touchdown: smooth" nicht das gleiche ist wie
     // "Master 77/100" — Pilot sieht beide Begriffe ohne Verwechslung.
-    let aggregate_master = compute_aggregate_master_score(&stats);
+    let aggregate_master = compute_aggregate_master_score(&stats, Some(&flight.aircraft_icao));
     drop(stats);
     let touchdown_grade = letter_grade(score.numeric());
     let master_text = match aggregate_master {
@@ -17107,51 +17206,11 @@ fn inspector_list(_state: tauri::State<'_, AppState>) -> Vec<serde_json::Value> 
     }
 }
 
-// ---- Fenix A32x Beta toggle (v0.7.16) ----
-//
-// Opt-in flag that gates the additive Fenix-A32x LVAR overrides in the
-// MSFS adapter's telemetry mapping (landing/nose/wing lights + flaps
-// lever cross-check). Default is `false` — current Fenix users on
-// v0.7.15 stable see no behavioral change unless they flip this on
-// from the Settings → Beta panel.
-//
-// Frontend persists the choice in localStorage and re-syncs it on
-// app start / login. Backend lives on the `MsfsAdapter` (atomic bool).
-
-#[tauri::command]
-fn set_fenix_beta_enabled(
-    _state: tauri::State<'_, AppState>,
-    enabled: bool,
-) -> Result<(), UiError> {
-    #[cfg(target_os = "windows")]
-    {
-        let adapter = _state.msfs.lock().expect("msfs lock");
-        adapter.set_fenix_beta_enabled(enabled);
-        tracing::info!(enabled, "fenix_beta_enabled set");
-        Ok(())
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = enabled;
-        Err(UiError::new(
-            "unsupported",
-            "Fenix Beta is only available on the Windows MSFS adapter",
-        ))
-    }
-}
-
-#[tauri::command]
-fn get_fenix_beta_enabled(_state: tauri::State<'_, AppState>) -> bool {
-    #[cfg(target_os = "windows")]
-    {
-        let adapter = _state.msfs.lock().expect("msfs lock");
-        adapter.fenix_beta_enabled()
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        false
-    }
-}
+// v0.7.16 introduced an opt-in `set_fenix_beta_enabled` / `get_fenix_beta_enabled`
+// Tauri-Command-Paar fuer das Fenix-A32x-Profil. v0.7.17 (F-001) hat das wieder
+// entfernt: die Fenix-Erkennung ist jetzt automatisch (siehe AircraftProfile::
+// is_fenix()), die LVAR-Overrides werden bedingungslos fuer Fenix-Aircraft
+// angewendet, ohne dass der Pilot in den Settings einen Haken setzen muss.
 
 /// X-Plane DataRef inspector: returns the static catalog with the
 /// most recent received value per entry. Unlike the MSFS Inspector
@@ -17631,22 +17690,46 @@ fn spawn_auto_start_watcher(app: AppHandle) {
             // hat dann ungewollt einen Auto-Start mit laufenden
             // Triebwerken bekommen.
             //
-            // Lösung: Wir prüfen ob die Snapshot-Daten "warm" sind
-            // (Aircraft-Title vorhanden + Fuel > 100 kg = echtes
-            // Aircraft, nicht Default). Wenn nicht warm, skip ohne
-            // Hint-Banner — die Daten settled binnen 1-3 s und der
-            // Pilot will dafür keinen Banner sehen.
-            let sim_data_warm = snap
+            // v0.7.17 (N-003a/b/c): Differenzierte Diagnose statt
+            // pauschalem Skip. Bisher war der "nicht warm"-Skip stumm
+            // (nur Debug-Log), was Piloten ohne X-Plane-Web-API ratlos
+            // zurueckliess — siehe Michel's „Auto-Start funktioniert
+            // nicht"-Report.
+            //   * `aircraft_title` leer → bei XP12-Profil ist die
+            //     Web-API nicht aktiviert (Settings → Network); bei
+            //     MSFS der Sim noch im Boot.
+            //   * `fuel_total_kg` ≤ 100 → Anti-Race-Sanity ist zu
+            //     strikt fuer Light-GA. Wir lockern auf > 1 kg, was
+            //     den Sim-Boot-Race weiter abfaengt (Default = 0) ohne
+            //     legitime kleine Sprits auszuschliessen.
+            let title_missing = snap
                 .aircraft_title
                 .as_deref()
-                .map(|s| !s.trim().is_empty())
-                .unwrap_or(false)
-                && snap.fuel_total_kg > 100.0;
-            if !sim_data_warm {
-                tracing::debug!("auto-start: sim data not warm yet — skipping");
-                continue;
-            }
-            let skip_reason: Option<(&'static str, &'static str)> = if !snap.on_ground {
+                .map(|s| s.trim().is_empty())
+                .unwrap_or(true);
+            let fuel_zero = snap.fuel_total_kg <= 1.0;
+            let warm_reason: Option<(&'static str, &'static str)> =
+                if title_missing && matches!(snap.simulator, sim_core::Simulator::XPlane11 | sim_core::Simulator::XPlane12) {
+                    Some((
+                        "title_missing_xplane",
+                        "Auto-Start wartet auf Sim-Daten: Aircraft-Titel fehlt. In X-Plane Settings → Network → Web API einschalten, damit AeroACARS den Flugzeug-Namen lesen kann.",
+                    ))
+                } else if title_missing {
+                    Some((
+                        "title_missing",
+                        "Auto-Start wartet auf Sim-Daten: Aircraft-Titel fehlt. Sim ist noch im Boot oder das Flugzeug ist nicht voll geladen.",
+                    ))
+                } else if fuel_zero {
+                    Some((
+                        "fuel_zero",
+                        "Auto-Start wartet auf Sim-Daten: Fuel = 0. Tank ist leer (Cold & Dark ohne Sprit) oder Sim noch im Boot.",
+                    ))
+                } else {
+                    None
+                };
+            let skip_reason: Option<(&'static str, &'static str)> = if let Some(r) = warm_reason {
+                Some(r)
+            } else if !snap.on_ground {
                 Some(("airborne", "Du bist in der Luft — Auto-Start funktioniert nur am Boden"))
             } else if snap.groundspeed_kt > 5.0 {
                 Some(("moving", "Flugzeug rollt schon — Auto-Start greift nur am Stand"))
@@ -17704,6 +17787,33 @@ fn spawn_auto_start_watcher(app: AppHandle) {
                 Ok(v) => v,
                 Err(_) => continue,
             };
+            // v0.7.17 (N-003): Wenn die Bid-Liste leer ist, sagen wir
+            // es dem Piloten — vorher Silent-Skip.
+            if bids.is_empty() {
+                let now = Utc::now();
+                let should_log = {
+                    let mut g = state.auto_start_skip_reason.lock().unwrap();
+                    let log_it = matches!(
+                        g.as_ref(),
+                        None | Some((_, _))
+                    ) && g.as_ref().map_or(true, |(at, code)| {
+                        code != "no_bids" || (now - *at).num_seconds() >= 60
+                    });
+                    if log_it {
+                        *g = Some((now, "no_bids".to_string()));
+                    }
+                    log_it
+                };
+                if should_log {
+                    log_activity_handle(
+                        &app,
+                        ActivityLevel::Info,
+                        "Auto-Start: keine Bids verfuegbar".to_string(),
+                        Some("Im phpVMS-Bid-Tab steht aktuell nichts gebucht. Logged-in?".to_string()),
+                    );
+                }
+                continue;
+            }
             // Don't re-fire for the same bid within the same parked
             // session. Cleared in `flight_end` via the active_flight
             // guard above resetting on the next tick.
@@ -17711,9 +17821,22 @@ fn spawn_auto_start_watcher(app: AppHandle) {
                 let g = state.auto_start_last_bid_id.lock().unwrap();
                 *g
             };
+            let mut any_match_attempt = false;
+            let mut closest_nm: Option<f64> = None;
+            let mut fired = false;
             for bid in &bids {
                 if Some(bid.id) == last_bid {
                     continue;
+                }
+                any_match_attempt = true;
+                // v0.7.17 (N-003): Track nearest-bid distance fuer
+                // den Aktivity-Log-Hint, wenn am Ende KEIN Bid matcht.
+                if let Some((apt_lat, apt_lon)) =
+                    runway::airport_position(&bid.flight.dpt_airport_id)
+                {
+                    let dist_nm = runway::distance_m(snap.lat, snap.lon, apt_lat, apt_lon)
+                        / 1852.0;
+                    closest_nm = Some(closest_nm.map_or(dist_nm, |c| c.min(dist_nm)));
                 }
                 if !bid_matches_current_state(bid, &snap) {
                     continue;
@@ -17755,6 +17878,18 @@ fn spawn_auto_start_watcher(app: AppHandle) {
                             bid_id,
                             "auto-start: flight_start command failed"
                         );
+                        // v0.7.17 (N-003): bisher silent (nur tracing::warn).
+                        // Jetzt auch im Activity-Log, damit der Pilot sieht
+                        // warum sein automatisch erkannter Flug nicht
+                        // gestartet wurde (z.B. „not_at_departure",
+                        // „not_on_ground", „bid_not_found" wegen W5).
+                        let app_log = app_for_call.clone();
+                        log_activity_handle(
+                            &app_log,
+                            ActivityLevel::Warn,
+                            "Auto-Start: flight_start fehlgeschlagen".to_string(),
+                            Some(format!("Bid {} – Fehler: {}", bid_id, e.code)),
+                        );
                         // Clear the last_bid_id so the user can retry
                         // by toggling auto-start off/on or fixing the
                         // condition (e.g. wrong aircraft).
@@ -17763,7 +17898,56 @@ fn spawn_auto_start_watcher(app: AppHandle) {
                         *g = None;
                     }
                 });
+                fired = true;
                 break;
+            }
+            // v0.7.17 (N-003): Wenn die for-Schleife ohne Match endet
+            // (kein break), gib dem Piloten einen Hint mit dem nähesten
+            // Departure-Airport. Vorher silent.
+            if !fired {
+                let now = Utc::now();
+                let (reason_code, reason_msg) = if !any_match_attempt {
+                    // Bid-Liste war zwar nicht leer, aber das einzige Bid
+                    // ist bereits durchs last_bid_id-Lock blockiert.
+                    (
+                        "bid_already_started",
+                        format!(
+                            "Bid {} wurde diese Session schon mal auto-gestartet. \
+                             Neu-Starten via Manual-Toggle oder anderem Bid.",
+                            last_bid.map_or("?".to_string(), |id| id.to_string())
+                        ),
+                    )
+                } else {
+                    let dist_text = closest_nm
+                        .map(|nm| format!("{:.1} nm zum naechsten Departure-Airport", nm))
+                        .unwrap_or_else(|| "kein Departure-Airport in Reichweite".to_string());
+                    (
+                        "no_bid_match",
+                        format!(
+                            "Kein Bid passt zur aktuellen Position ({}). Auto-Start \
+                             greift nur am Stand des Departure-Airports.",
+                            dist_text
+                        ),
+                    )
+                };
+                let should_log = {
+                    let mut g = state.auto_start_skip_reason.lock().unwrap();
+                    let log_it = g.as_ref().map_or(true, |(at, code)| {
+                        code != reason_code || (now - *at).num_seconds() >= 60
+                    });
+                    if log_it {
+                        *g = Some((now, reason_code.to_string()));
+                    }
+                    log_it
+                };
+                if should_log {
+                    log_activity_handle(
+                        &app,
+                        ActivityLevel::Info,
+                        "Auto-Start: kein Match".to_string(),
+                        Some(reason_msg),
+                    );
+                }
             }
         }
     });
@@ -18357,8 +18541,6 @@ pub fn run() {
             inspector_add,
             inspector_remove,
             inspector_list,
-            set_fenix_beta_enabled,
-            get_fenix_beta_enabled,
             xplane_inspector_list,
             xplane_premium_status,
             xplane_detect_install_path,

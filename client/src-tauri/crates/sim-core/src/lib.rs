@@ -631,6 +631,23 @@ impl AircraftProfile {
         matches!(self, Self::FenixA319 | Self::FenixA320 | Self::FenixA321)
     }
 
+    /// v0.7.17 (B-001): ICAO type designator fallback fuer Profile,
+    /// die einen kanonischen ICAO-Code haben. Wird im Adapter genutzt
+    /// wenn `aircraft_icao` aus dem Sim leer kommt (typisch bei Fenix,
+    /// das den Standard-`ATC MODEL`-SimVar nicht zuverlaessig fuellt
+    /// — Pilot saht im Activity-Log „Type ?" trotz erkanntem Profil).
+    /// Gibt nur dann ein Some zurueck wenn das Profil eine eindeutige
+    /// Variante hat (Fenix A319/A320/A321 ja, FbwA32nx je nach
+    /// Repaint mehrdeutig also weiter None).
+    pub fn icao_fallback(self) -> Option<&'static str> {
+        match self {
+            Self::FenixA319 => Some("A319"),
+            Self::FenixA320 => Some("A320"),
+            Self::FenixA321 => Some("A321"),
+            _ => None,
+        }
+    }
+
     /// Short human-readable label for the activity log.
     pub fn label(self) -> &'static str {
         match self {
@@ -824,5 +841,15 @@ mod tests {
         assert!(AircraftProfile::FenixA321.is_fenix());
         assert!(!AircraftProfile::FbwA32nx.is_fenix());
         assert!(!AircraftProfile::Default.is_fenix());
+    }
+
+    #[test]
+    fn icao_fallback_for_fenix_variants() {
+        assert_eq!(AircraftProfile::FenixA319.icao_fallback(), Some("A319"));
+        assert_eq!(AircraftProfile::FenixA320.icao_fallback(), Some("A320"));
+        assert_eq!(AircraftProfile::FenixA321.icao_fallback(), Some("A321"));
+        assert_eq!(AircraftProfile::Default.icao_fallback(), None);
+        assert_eq!(AircraftProfile::FbwA32nx.icao_fallback(), None);
+        assert_eq!(AircraftProfile::Pmdg737.icao_fallback(), None);
     }
 }

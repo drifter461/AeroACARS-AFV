@@ -164,6 +164,14 @@ pub struct LandingScoringInput {
     pub actual_trip_burn_kg: Option<f32>,
     // Phase 3 hook (Flare-Sub-Score kommt in Phase 3/F6).
     pub flare_quality_score: Option<u8>,
+    /// v0.7.17 (N-002): ICAO type designator des geflogenen
+    /// Aircraft (z.B. "A320", "B738", "C172"). Wird vom `sub_rollout`-
+    /// Score genutzt um die Bahn-Auslastung-Schwellen aircraft-
+    /// kategorie-abhaengig zu staffeln — vorher feuerte jeder Airliner
+    /// einen „long_rollout"-Score (25 Pkt) selbst bei voellig normalen
+    /// 2 km auf einer 3 km Bahn. None heisst „unbekannt" → konservative
+    /// (medium-light) Schwellen werden genutzt.
+    pub aircraft_icao: Option<String>,
 }
 
 /// Berechnet alle Sub-Scores.
@@ -189,7 +197,10 @@ pub fn compute_sub_scores(input: &LandingScoringInput) -> Vec<SubScoreEntry> {
     ) {
         out.push(stab);
     }
-    if let Some(ro) = sub_rollout::sub_rollout(input.rollout_distance_m) {
+    if let Some(ro) = sub_rollout::sub_rollout(
+        input.rollout_distance_m,
+        input.aircraft_icao.as_deref(),
+    ) {
         out.push(ro);
     }
 

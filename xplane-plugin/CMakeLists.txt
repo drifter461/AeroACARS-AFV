@@ -25,7 +25,12 @@
 
 cmake_minimum_required(VERSION 3.20)
 project(AeroACARS_XPlane_Plugin
-    VERSION 0.5.0
+    # v0.7.17: Synced to the actual code state. Plugin had drifted
+    # from VERSION 0.5.0 (initial commit) while plugin.cpp got
+    # patches across 6 incremental versions (0.5.3 / 0.5.6 / 0.5.8
+    # / 0.5.11 / 0.5.13). Every Log.txt line was misreporting v0.5.0.
+    # See docs/qs/v0.7.16-fenix-beta-bugs.md N-004.
+    VERSION 0.5.13
     LANGUAGES CXX
     DESCRIPTION "AeroACARS X-Plane Premium Plugin"
 )
@@ -101,6 +106,14 @@ target_include_directories(AeroACARS PRIVATE
     "${XPLM_SDK_ROOT}/CHeaders/XPLM"
     "${XPLM_SDK_ROOT}/CHeaders/Widgets"
     src
+)
+
+# v0.7.17 (N-004 fix): Inject the CMake project version as a macro
+# so plugin.cpp logs the truth instead of a stale hardcoded string.
+# Format: "0.5.13" — plain quoted version, no SDK number (the SDK
+# constant XPLM303 is already a separate define above).
+target_compile_definitions(AeroACARS PRIVATE
+    AEROACARS_PLUGIN_VERSION="${PROJECT_VERSION}"
 )
 
 # ---- Platform-specific linking --------------------------------------------

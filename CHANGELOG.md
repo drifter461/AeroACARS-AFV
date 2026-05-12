@@ -4,6 +4,80 @@ Alle nennenswerten Änderungen an AeroACARS. Format: lose an [Keep a Changelog](
 
 ---
 
+## [v0.7.17] — 2026-05-12 · Fenix-Polish + Bug-Bündel
+
+🛠️ **Bug-Sammel-Release nach Tester-Feedback zu v0.7.16. Fenix-Profil ist jetzt default-on (kein Toggle mehr), Squawk + Aircraft-Type bei Fenix bereinigt, SimBrief-Refresh greift beim Flug-Start, Bahn-Auslastung-Score endlich aircraft-aware, Auto-Start sagt jetzt warum er nicht feuert.**
+
+### F-001 · Fenix-Profil von Opt-in zu Default-on
+
+- Beta-Toggle in Settings ist entfernt (Backend-Flag `fenix_beta_enabled` weg, Tauri-Commands raus, i18n-Strings raus)
+- Bei erkanntem Fenix-Profil greifen die LVAR-Overrides automatisch (Landing-/Nose-/Wing-Light, Park-Brake etc.)
+- localStorage-Key `fenix_beta_enabled` wird beim ersten Start aufgeräumt — keine Pilot-Aktion nötig
+
+### B-001 · Aircraft-Type-Fallback bei Fenix
+
+- Vorher: Activity-Log zeigte „Type ?" weil Fenix den Standard-`ATC MODEL`-SimVar nicht zuverlässig füllt
+- Jetzt: `AircraftProfile::icao_fallback()` setzt bei FenixA319/A320/A321 den ICAO-Code aus dem Profile-Match (`A319`/`A320`/`A321`)
+- Profile ohne eindeutigen Variant (Default, FBW, PMDG) behalten `None` — keine Phantasie-ICAOs
+
+### B-002 · Squawk-Logging bei Fenix unterdrückt
+
+- Standard-`TRANSPONDER CODE:1`-SimVar ist bei Fenix nicht mit dem cockpit-seitigen RMP synchronisiert (= zeigte falsche / eingefrorene Codes)
+- Bis ein Fenix-eigener LVAR identifiziert ist, gibt der Snapshot bei `is_fenix()` jetzt `transponder_code: None` → keine falschen Squawk-Einträge mehr im Activity-Log und PIREP
+
+### N-001 · SimBrief-Refresh greift jetzt beim Flug-Start
+
+- Vorher: Pilot drückt im Bid-Tab „Aktualisieren" (zeigt frische SimBrief-Daten), klickt Flug-Start → `flight_start` ignoriert das und holt den alten OFP aus dem phpVMS-Bid-Pointer
+- Jetzt: wenn der Pilot in Settings → SimBrief einen Identifier (User-ID oder Username) gesetzt hat, holt `flight_start` **zuerst** den aktuellsten OFP direkt von simbrief.com (mit DEP/ARR-Match-Verifikation); Fallback auf den Bid-Pointer nur wenn Direct fehlschlägt
+- Identisches Verhalten wie der `flight_refresh_simbrief`-Pfad — Direct-First mit Pointer-Fallback
+
+### N-002 · Bahn-Auslastung-Score aircraft-aware
+
+- Vorher: Rollout-Schwellen waren absolute Meter (800/1200/1800/2500) → jeder Airliner mit 2 km Rollout bekam „long_rollout" / 25 Pkt, obwohl 2 km für einen A320 völlig normal sind
+- Jetzt: 3 Aircraft-Kategorien (Light / Medium / Heavy) mit angepassten Schwellen:
+  - Light (Default): unverändert
+  - Medium (A32x-Family, B737, E170/190, CRJ, ATR, Dash-8 etc.): 1200/1800/2400/3000 m
+  - Heavy (A330/340/350/380, B747/767/777/787, MD11): 1500/2300/3000/3800 m
+- Aircraft-Klassifizierung via ICAO-Type-Designator-Lookup, robust gegen Whitespace / Groß-Kleinschreibung
+- Beide Stellen (Pilot-Client Rust-Crate UND aeroacars-live Webapp) sind in Sync zu fixen — diese Version fixt den Pilot-Client; das Webapp-Repo bekommt einen separaten Patch
+
+### N-003 · Auto-Start sagt jetzt warum er nicht feuert
+
+- Vorher: 3 stille Skip-Pfade (`sim_data_warm`, `bids empty`, `no_bid_match`) → Pilot saß ratlos da, Watcher loggte nur Debug
+- Jetzt: alle Skip-Pfade haben einen Activity-Log-Hint mit 60-Sekunden-Throttle:
+  - **Aircraft-Titel fehlt** (X-Plane-spezifisch: „Web-API in Settings → Network einschalten"; MSFS: „Sim noch im Boot")
+  - **Fuel = 0** (Sanity-Schwelle von 100 kg → 1 kg gelockert, damit Light-GA mit halbvollem Tank nicht ausgeschlossen wird)
+  - **Keine Bids verfügbar** („eingeloggt?")
+  - **Kein Bid matched aktuelle Position** (mit Entfernung zum nächsten Departure)
+  - **`flight_start` failed** (Bid + Error-Code als Warn-Eintrag)
+
+### N-004 · X-Plane Plugin-Version-Sync
+
+- `xplane-plugin/CMakeLists.txt` hat seit Initial-Commit `VERSION 0.5.0` getragen, während `plugin.cpp` über 6 Patches (v0.5.3/.5.6/.5.8/.5.11/.5.13) ging
+- Plugin loggte deshalb fälschlicherweise „v0.5.0" in X-Plane `Log.txt` — bei Bug-Reports verwirrend
+- Jetzt: `VERSION 0.5.13` (= echter Code-Stand), per `target_compile_definitions` als Macro `AEROACARS_PLUGIN_VERSION` ins Plugin gezogen → Log meldet die Wahrheit
+- Künftig synchron mit Code-Changes hochziehen
+
+### Tests
+
+- 15 neue Rust-Unit-Tests (sim-core: 1 icao_fallback, sim-msfs: 5 Fenix-Mapping + 3 ICAO-Fallback + 2 Squawk-Suppression; landing-scoring: 4 Bahn-Auslastung-Cases)
+- `cargo test --workspace --lib`: alle grün
+- `tsc -b` clean, `npm test` grün
+
+### Garantien
+
+- F-001: Nicht-Fenix-Aircraft sind unverändert (nur Profile-Check leitet ins Override)
+- B-001/B-002: greifen nur bei `is_fenix()` Profile-Match
+- N-001: SimBrief-direct nur wenn Identifier gesetzt; sonst Bid-Pointer-Pfad wie vorher
+- N-002: Light-Schwellen identisch zu v0.7.16 → keine Regression für GA-Piloten
+- N-003: Activity-Log-Spam verhindert durch existierenden 60-Sekunden-Throttle pro Reason-Code
+
+### Tracker
+
+Siehe [docs/qs/v0.7.16-fenix-beta-bugs.md](docs/qs/v0.7.16-fenix-beta-bugs.md) für die vollständige Bug-Sammlung und Diagnose-Spuren aus Tester-Feedback.
+
+---
+
 ## [v0.7.16] — 2026-05-12 · Fenix A32x Cockpit-State (Opt-in Beta)
 
 🧪 **Stable-Release mit neuem Opt-in Beta-Feature für Fenix A32x. Standardmäßig deaktiviert. Read-only, kein FSUIPC, keine MSFS Community-Folder-Änderungen. Wer ihn nicht einschaltet, fliegt bit-identisch zu v0.7.15.**
