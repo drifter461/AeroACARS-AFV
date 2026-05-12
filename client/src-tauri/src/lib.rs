@@ -12305,9 +12305,16 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                         let rwy_match = stats.runway_match.as_ref();
                         aeroacars_mqtt::TouchdownPayload {
                             ts: landing_at.timestamp_millis(),
-                            vs_fpm: stats
-                                .landing_rate_fpm
-                                .or(stats.landing_peak_vs_fpm)
+                            // v0.7.17 (B-015a QS-Round-2): Edge-Wert hat
+                            // Vorrang — siehe `score_basis_vs_fpm()` Doc.
+                            // Live-Touchdown-MQTT-Top-Level-Wert war
+                            // bisher der einzige verbleibende Pfad mit
+                            // der alten `landing_rate_fpm.or(peak)`-
+                            // Cascade. Konsumenten (Recorder-DB
+                            // `touchdowns.vs_fpm`, Discord-Touchdown-
+                            // Posts, Live-Hardlanding-Notifications)
+                            // bekommen jetzt durchgaengig den Edge-Wert.
+                            vs_fpm: score_basis_vs_fpm(&stats)
                                 .map(|v| v.round() as i32)
                                 .unwrap_or(0),
                             ias_kt: stats
