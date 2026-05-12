@@ -11426,8 +11426,65 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                     );
                     // fall-through zum naechsten Code-Pfad
                 } else {
-                    // Sim liefert noch keine Daten → weiter pausieren.
-                    // Heartbeat-Code-Pfad unten greift trotzdem.
+                    // Sim liefert keine Daten → weiter pausieren.
+                    //
+                    // QS-Finding HIGH (2026-05-12): Der ALTE Pfad hatte hier
+                    // ein blankes `continue`, welches den Heartbeat-Code-Pfad
+                    // weiter unten (Z. ~12143) komplett ueberspringt. Folge:
+                    // phpVMS sieht nach dem letzten Pre-Pause-Heartbeat keine
+                    // Updates mehr und der `RemoveExpiredLiveFlights`-Cron
+                    // killt den PIREP nach ~6h. Die Spec-Aussage "Heartbeat
+                    // haelt PIREP unbegrenzt am Leben" war damit nicht
+                    // umgesetzt.
+                    //
+                    // Fix: bevor wir continue'n, einen Heartbeat senden wenn
+                    // (a) wir je einen guten Snapshot hatten (sonst gibt's
+                    // nichts zu senden) und (b) das HEARTBEAT_INTERVAL
+                    // erreicht ist. Wir nutzen `last_good_snap` als
+                    // Position-/Phase-Quelle — der Heartbeat-Body braucht
+                    // einen Snapshot fuer level/fuel/etc. Werte sind
+                    // eingefroren auf dem Pre-Pause-Stand, was korrekt ist:
+                    // der Flieger steht "weiterhin" dort, bis ein Sim-
+                    // Snapshot beweist dass er weiter geflogen ist.
+                    if let Some(ref last_snap) = last_good_snap {
+                        if last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
+                            let (phase, body) = {
+                                let stats = flight.stats.lock().expect("flight stats");
+                                let p = stats.phase;
+                                (p, build_heartbeat_body(last_snap, &stats, p))
+                            };
+                            match client.update_pirep(&flight.pirep_id, &body).await {
+                                Ok(()) => {
+                                    last_heartbeat = std::time::Instant::now();
+                                    {
+                                        let mut stats =
+                                            flight.stats.lock().expect("flight stats");
+                                        stats.last_heartbeat_at = Some(Utc::now());
+                                    }
+                                    tracing::debug!(
+                                        pirep_id = %flight.pirep_id,
+                                        phase = ?phase,
+                                        "PIREP heartbeat sent during sim-disconnect pause"
+                                    );
+                                }
+                                Err(ApiError::NotFound) => {
+                                    // phpVMS hat den PIREP soft-deleted —
+                                    // gleiches Verhalten wie im Standard-
+                                    // Heartbeat-Pfad weiter unten.
+                                    handle_remote_cancellation(&app, &flight, "POST update (paused)");
+                                    break;
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        pirep_id = %flight.pirep_id,
+                                        phase = ?phase,
+                                        error = %e,
+                                        "PIREP heartbeat failed during pause"
+                                    );
+                                }
+                            }
+                        }
+                    }
                     tokio::time::sleep(Duration::from_secs(5)).await;
                     continue;
                 }
@@ -14277,6 +14334,21 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
 /// phase-change callbacks. Sends monotonically growing `flight_time` and
 /// `distance` so Eloquent always sees the model as dirty and bumps
 /// `pireps.updated_at`, which is what the cleanup cron checks.
+/// Spec sim-disconnect-auto-resume F3 (Block-Time-Korrektur):
+/// Reine Subtraktions-Helper, extrahiert damit Unit-Tests gegen die
+/// Saturating-Arithmetik laufen koennen ohne den vollen FlightStats-
+/// Snapshot bauen zu muessen.
+///
+/// Verhalten:
+/// - `pause_total_secs <= 0`             → raw_secs unveraendert
+/// - `pause_total_secs > i32::MAX`       → clamp auf i32::MAX
+/// - `pause_total_secs >= raw_secs`      → 0 (Underflow-Schutz)
+/// - sonst                               → `raw_secs - pause_total_secs`
+fn flight_time_with_pause_secs(raw_secs: i32, pause_total_secs: i64) -> i32 {
+    let pause_secs_i32 = pause_total_secs.clamp(0, i32::MAX as i64) as i32;
+    raw_secs.saturating_sub(pause_secs_i32).max(0)
+}
+
 fn build_heartbeat_body(
     snap: &SimSnapshot,
     stats: &FlightStats,
@@ -14296,15 +14368,10 @@ fn build_heartbeat_body(
     // Spec sim-disconnect-auto-resume F3 (Block-Time-Korrektur):
     // Pause-Akkumulator von der Wall-Clock-Flugzeit abziehen damit
     // 23 min Sim-Crash oder 30 min MSFS-Esc-Pause nicht als 23/30
-    // zusaetzliche Flugminuten im PIREP-Heartbeat landen.
-    //
-    // saturating_sub: wenn pause_total_duration_secs aus irgendeinem
-    // Grund (Clock-Skew bei App-Restart, future-Bug) groesser ist als
-    // raw_flight_time_secs, returnt es 0 statt einen Underflow zu
-    // produzieren. Defensive Programmierung gegen kuenftige Aenderungen.
-    let pause_secs_i32 =
-        stats.pause_total_duration_secs.clamp(0, i32::MAX as i64) as i32;
-    let flight_time_secs = raw_flight_time_secs.saturating_sub(pause_secs_i32).max(0);
+    // zusaetzliche Flugminuten im PIREP-Heartbeat landen. Saturating-
+    // Arithmetik via Helper.
+    let flight_time_secs =
+        flight_time_with_pause_secs(raw_flight_time_secs, stats.pause_total_duration_secs);
     // Same fuel arithmetic as the file body: block - remaining, in pounds.
     // Round to whole kg before lb conversion so the live-map / dashboard
     // shows clean integer kg values (no `5890.29 kg` artefacts from the
@@ -19371,6 +19438,164 @@ mod v0_7_8_simbrief_direct_match_tests {
         assert!(candidates.contains(&"CFG1504".to_string()));
         assert!(candidates.contains(&"1504".to_string()));
         assert_eq!(candidates.len(), 2, "no pilot callsign → only 2 candidates");
+    }
+}
+
+// ----------------------------------------------------------------------
+// Spec sim-disconnect-auto-resume v0.4 (Phase 1) — Tests
+//
+// Decken die reine Arithmetik des Block-Time-Abzugs (F3) und der Drift-
+// Klassifikation (F2) ab. Volle `apply_pause_resume`-Tests sind ohne
+// Tauri-AppHandle nicht moeglich; sind in Spec § Test-Plan dem Pilot-QS
+// (Q1-Q8 manuell) zugeordnet.
+// ----------------------------------------------------------------------
+#[cfg(test)]
+mod sim_pause_tests {
+    use super::*;
+
+    // ─── flight_time_with_pause_secs: F3 Saturating-Arithmetik ───
+
+    #[test]
+    fn flight_time_no_pause_returns_raw() {
+        // 60 min Roh-Flugzeit, 0 Pause → 60 min unveraendert.
+        assert_eq!(flight_time_with_pause_secs(3600, 0), 3600);
+    }
+
+    #[test]
+    fn flight_time_pause_subtracted() {
+        // 60 min Roh, 10 min Pause → 50 min.
+        assert_eq!(flight_time_with_pause_secs(3600, 600), 3000);
+    }
+
+    #[test]
+    fn flight_time_pause_equals_raw_returns_zero() {
+        // Pause genauso lang wie Roh → 0, kein Unterlauf.
+        assert_eq!(flight_time_with_pause_secs(600, 600), 0);
+    }
+
+    #[test]
+    fn flight_time_pause_larger_than_raw_returns_zero() {
+        // Pause-Akkumulator groesser als Roh-Wert (defensiv gegen
+        // Clock-Skew nach App-Restart): saturating auf 0.
+        assert_eq!(flight_time_with_pause_secs(600, 99999), 0);
+    }
+
+    #[test]
+    fn flight_time_negative_pause_is_clamped_to_zero() {
+        // Negative Pause (sollte nie vorkommen, defensive
+        // Programmierung): clamp auf 0 → raw bleibt.
+        assert_eq!(flight_time_with_pause_secs(3600, -100), 3600);
+    }
+
+    #[test]
+    fn flight_time_pause_exceeding_i32_max_is_clamped() {
+        // i64-Pause > i32::MAX wird auf i32::MAX gecapped, dann
+        // saturating_sub → 0 (defensive).
+        let huge_pause: i64 = i32::MAX as i64 + 1000;
+        assert_eq!(flight_time_with_pause_secs(3600, huge_pause), 0);
+    }
+
+    #[test]
+    fn flight_time_zero_raw_returns_zero() {
+        // Pre-Takeoff (raw=0) ohne Pause → 0; mit Pause → 0.
+        assert_eq!(flight_time_with_pause_secs(0, 0), 0);
+        assert_eq!(flight_time_with_pause_secs(0, 600), 0);
+    }
+
+    // ─── Drift-Schwellen-Konstanten: F2 UI-Stufen-Mapping ───
+
+    #[test]
+    fn drift_threshold_constants_are_monotonic() {
+        // Schwellen muessen in aufsteigender Reihenfolge stehen,
+        // sonst greifen die match-Arms in apply_pause_resume nicht
+        // in der erwarteten Reihenfolge.
+        assert!(RESUME_DRIFT_TOAST_NM < RESUME_DRIFT_WARN_NM);
+        assert!(RESUME_DRIFT_WARN_NM < RESUME_DRIFT_EXTREME_NM);
+    }
+
+    #[test]
+    fn drift_threshold_values_match_spec_v0_4() {
+        // Spec sim-disconnect-auto-resume v0.4 § "Drift-Level fuer MVP":
+        //   < 1 NM   Info ohne Suffix
+        //   1-50 NM  Info "repositioniert X nm"
+        //   50-200   Warn
+        //   > 200    Warn "Sehr grosse Reposition"
+        assert_eq!(RESUME_DRIFT_TOAST_NM, 1.0);
+        assert_eq!(RESUME_DRIFT_WARN_NM, 50.0);
+        assert_eq!(RESUME_DRIFT_EXTREME_NM, 200.0);
+    }
+
+    // ─── PauseSegment: serde-Roundtrip damit Persistence haelt ───
+
+    #[test]
+    fn pause_segment_serde_roundtrip() {
+        let original = PauseSegment {
+            started_at: Utc::now(),
+            ended_at: Utc::now(),
+            duration_secs: 60,
+            reason: PauseReason::SimDisconnect,
+            drift_nm: Some(2.5),
+            altitude_delta_ft: Some(50.0),
+            fuel_delta_kg: Some(10.0),
+        };
+        let json = serde_json::to_string(&original).expect("serialize");
+        let decoded: PauseSegment = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded.duration_secs, 60);
+        assert_eq!(decoded.reason, PauseReason::SimDisconnect);
+        assert_eq!(decoded.drift_nm, Some(2.5));
+    }
+
+    #[test]
+    fn pause_segment_handles_missing_optional_fields() {
+        // Vorgaenger-PauseSegment-Records ohne drift/alt/fuel-Felder
+        // muessen weiter ladbar sein (Spec F2: serde(default)).
+        let minimal_json = r#"{
+            "started_at": "2026-05-11T11:00:00Z",
+            "ended_at": "2026-05-11T11:01:00Z",
+            "duration_secs": 60,
+            "reason": "sim_disconnect"
+        }"#;
+        let decoded: PauseSegment = serde_json::from_str(minimal_json).expect("deserialize");
+        assert_eq!(decoded.duration_secs, 60);
+        assert_eq!(decoded.drift_nm, None);
+        assert_eq!(decoded.altitude_delta_ft, None);
+        assert_eq!(decoded.fuel_delta_kg, None);
+    }
+
+    // ─── PersistedFlightStats: serde-default Backward-Compat ───
+
+    #[test]
+    fn persisted_flight_stats_loads_without_pause_fields() {
+        // Pre-Spec active_flight.json (v0.7.14) hat weder
+        // `pause_total_duration_secs` noch `pause_segments`. Beide
+        // muessen mit serde(default) sauber default-en.
+        let pre_spec_json = r#"{"distance_nm": 12.5}"#;
+        let decoded: PersistedFlightStats =
+            serde_json::from_str(pre_spec_json).expect("legacy json must load");
+        assert_eq!(decoded.pause_total_duration_secs, 0);
+        assert!(decoded.pause_segments.is_empty());
+        assert_eq!(decoded.distance_nm, 12.5);
+    }
+
+    #[test]
+    fn persisted_flight_stats_roundtrips_with_pause_fields() {
+        let mut stats = FlightStats::default();
+        stats.pause_total_duration_secs = 720;
+        stats.pause_segments.push(PauseSegment {
+            started_at: Utc::now(),
+            ended_at: Utc::now(),
+            duration_secs: 720,
+            reason: PauseReason::ManualResume,
+            drift_nm: None,
+            altitude_delta_ft: None,
+            fuel_delta_kg: None,
+        });
+        let snapshot = PersistedFlightStats::snapshot_from(&stats);
+        let json = serde_json::to_string(&snapshot).expect("serialize");
+        let decoded: PersistedFlightStats = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded.pause_total_duration_secs, 720);
+        assert_eq!(decoded.pause_segments.len(), 1);
+        assert_eq!(decoded.pause_segments[0].reason, PauseReason::ManualResume);
     }
 }
 
