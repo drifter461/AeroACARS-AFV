@@ -322,15 +322,25 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 /// bevor phpVMS' Live-Tracking-Cron (default ~2h) den PIREP killt.
 const SIM_DISCONNECT_THRESHOLD_S: i64 = 30;
 
-/// v0.4.1: Repositions-Distanz (in NM) ab der wir den Resume-Eintrag
-/// mit WARN-Level statt INFO im Activity-Log loggen.
+/// Spec sim-disconnect-auto-resume F2 (Drift-Stufen):
 ///
-/// Schwelle absichtlich großzügig: 500 nm berücksichtigt legitime
-/// Pilot-Workflows wie „Sim kracht mid-Atlantik, ich will die letzten
-/// 4 h nicht nochmal fliegen, lade kurz vor Approach". Sub-500 nm ist
-/// gängig und harmlos; > 500 nm fällt im VA-Audit zu Recht auf
-/// (Teleport zur Destination, andere Welt-Hemisphäre, etc.).
-const REPOSITION_WARN_DELTA_NM: f64 = 500.0;
+/// Schwellen fuer die Activity-Log-Eskalation beim Resume. Drift NM
+/// gemessen zwischen `paused_last_known` und dem ersten Post-Resume-
+/// Snapshot. Kein Level blockiert Auto-Resume (Spec-Prinzip P2:
+/// informieren statt blockieren).
+///
+///   <  1 NM : `▶ Flug automatisch fortgesetzt` (kein Distanz-Suffix)
+///   1-50    : Info-Level mit `repositioniert X nm`
+///   50-200  : Warn-Level (auffaellige Reposition)
+///   > 200   : Warn-Level mit Hinweis „pruefe ob der richtige Flug geladen ist"
+///
+/// Schwellen sind empirisch — typischer Autosave bei MSFS ist ~10 min
+/// alt, was bei 480 kt etwa 80 NM Drift produziert (= Warn-Range,
+/// erwartbar). >200 NM ist verdaechtig: entweder Bid-Reload am
+/// Departure-Airport (= falscher Flug?) oder grosser Slew-Move.
+const RESUME_DRIFT_TOAST_NM: f64 = 1.0;
+const RESUME_DRIFT_WARN_NM: f64 = 50.0;
+const RESUME_DRIFT_EXTREME_NM: f64 = 200.0;
 
 /// How close (in nautical miles) the aircraft must be to the departure airport
 /// to start the flight. Generous enough to cover taxi positions and remote
@@ -1080,6 +1090,17 @@ struct PersistedFlightStats {
     /// v0.7.7: raw SimBrief `<params><time_generated>` — siehe FlightStats.
     #[serde(default)]
     simbrief_ofp_generated_at: Option<String>,
+    /// Spec sim-disconnect-auto-resume F2 (Pause-Akkumulator):
+    /// Summe aller Pause-Sekunden seit Flugstart. `#[serde(default)]`
+    /// damit pre-Spec `active_flight.json` weiter ladbar bleibt — alte
+    /// Resume-Files defaulten auf 0 (keine bekannten Pausen, ist OK).
+    #[serde(default)]
+    pause_total_duration_secs: i64,
+    /// Spec sim-disconnect-auto-resume F2: Liste der einzelnen Pause-
+    /// Bloecke (Audit-/Debug-Daten). `#[serde(default)]` damit alte
+    /// Resume-Files weiter laden — defaulten auf leeren Vec.
+    #[serde(default)]
+    pause_segments: Vec<PauseSegment>,
 }
 
 impl PersistedFlightStats {
@@ -1163,6 +1184,9 @@ impl PersistedFlightStats {
             // v0.7.7 OFP-Refresh-Foundation
             simbrief_ofp_id: stats.simbrief_ofp_id.clone(),
             simbrief_ofp_generated_at: stats.simbrief_ofp_generated_at.clone(),
+            // Spec sim-disconnect-auto-resume F2 (Pause-Akkumulator)
+            pause_total_duration_secs: stats.pause_total_duration_secs,
+            pause_segments: stats.pause_segments.clone(),
         }
     }
 
@@ -1251,6 +1275,12 @@ impl PersistedFlightStats {
         // v0.7.7 OFP-Refresh-Foundation
         stats.simbrief_ofp_id = self.simbrief_ofp_id;
         stats.simbrief_ofp_generated_at = self.simbrief_ofp_generated_at;
+        // Spec sim-disconnect-auto-resume F2 (Pause-Akkumulator):
+        // ueber `save_active_flight`/Resume hinweg erhalten. Damit
+        // wird ein App-Restart waehrend laufender Pause die akkumu-
+        // lierte Zeit nicht verlieren (Spec-Szenario 3.4.2).
+        stats.pause_total_duration_secs = self.pause_total_duration_secs;
+        stats.pause_segments = self.pause_segments;
     }
 }
 
@@ -1369,6 +1399,44 @@ struct PausedSnapshot {
     pub zfw_kg: Option<f32>,
 }
 
+/// Spec sim-disconnect-auto-resume F2 (Pause-Akkumulator):
+/// Grund warum der Flug pausiert war.
+///
+/// Heute existiert nur `SimDisconnect` (Snapshot=None > 30 s). Im
+/// v0.3-Master-Spec waren `SimPause` (MSFS-Esc-Pause via SimConnect-
+/// Event) und `Replay` (X-Plane-Plugin-Heartbeat) geplant — die sind
+/// im MVP bewusst out-of-scope, koennen aber spaeter ohne Daten-
+/// migration nachgereicht werden (alle Reasons landen im selben
+/// Akkumulator).
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum PauseReason {
+    SimDisconnect,
+    ManualResume,
+}
+
+/// Spec sim-disconnect-auto-resume F2 (Pause-Akkumulator):
+/// Ein abgeschlossener Pause-Block. Wird beim Resume erzeugt und in
+/// `FlightStats.pause_segments` angehaengt. `pause_total_duration_secs`
+/// haelt die Summe parallel — Segmente sind fuer Audit/Debugging.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct PauseSegment {
+    started_at: DateTime<Utc>,
+    ended_at: DateTime<Utc>,
+    duration_secs: i64,
+    reason: PauseReason,
+    /// Reposition-Distanz (NM) zwischen `paused_last_known` und dem
+    /// ersten Post-Resume-Snapshot. `None` wenn entweder kein
+    /// `paused_last_known` vorhanden war (frueher Disconnect ohne
+    /// guten Snapshot) oder beim Resume kein Snapshot kam.
+    #[serde(default)]
+    drift_nm: Option<f64>,
+    #[serde(default)]
+    altitude_delta_ft: Option<f64>,
+    #[serde(default)]
+    fuel_delta_kg: Option<f64>,
+}
+
 #[derive(Default)]
 struct FlightStats {
     // Position tracking.
@@ -1434,6 +1502,20 @@ struct FlightStats {
     /// + Activity-Log angezeigt damit der Pilot weiß was er für die
     /// Repositionierung braucht. None solange der Flug nicht pausiert.
     paused_last_known: Option<PausedSnapshot>,
+
+    /// Spec sim-disconnect-auto-resume F2 (Pause-Akkumulator):
+    /// Summe aller Pause-Sekunden seit Flugstart. Wird beim
+    /// Resume um die jeweilige Pause-Dauer erhoeht und in
+    /// `build_heartbeat_body` von der Wall-Clock-Flugzeit
+    /// abgezogen, damit eine 30-min MSFS-Esc-Pause oder ein
+    /// 25-min Sim-Crash nicht als 30/25 zusaetzliche Flight-Time-
+    /// Minuten im PIREP landen.
+    pause_total_duration_secs: i64,
+    /// Spec sim-disconnect-auto-resume F2: Liste aller abgeschlossenen
+    /// Pause-Bloecke (Start, Ende, Reason, Drift). Audit-/Debug-Daten —
+    /// `pause_total_duration_secs` haelt die Summe parallel fuer den
+    /// schnellen Flight-Time-Abzug.
+    pause_segments: Vec<PauseSegment>,
 
     /// True once the aircraft has actually been airborne above
     /// `WAS_AIRBORNE_AGL_FT` ft AGL since the flight started. Used to
@@ -8796,10 +8878,17 @@ async fn flight_end(
         // manual file before the FSM advanced through Takeoff). The
         // takeoff→landing range matches what phpVMS expects in its
         // native Flt.Time column.
-        let flight_time = match (stats.takeoff_at, stats.landing_at) {
-            (Some(t), Some(l)) if l > t => Some((l - t).num_minutes() as i32),
-            _ => Some(((Utc::now() - flight.started_at).num_minutes() as i32).max(0)),
+        //
+        // Spec sim-disconnect-auto-resume F3 (Block-Time-Korrektur):
+        // Pause-Akkumulator wird in Minuten umgerechnet und abgezogen,
+        // damit Sim-Crash-/Esc-Pause-Pausen nicht als Flugzeit landen.
+        let raw_flight_time_min = match (stats.takeoff_at, stats.landing_at) {
+            (Some(t), Some(l)) if l > t => (l - t).num_minutes() as i32,
+            _ => ((Utc::now() - flight.started_at).num_minutes() as i32).max(0),
         };
+        let pause_min =
+            (stats.pause_total_duration_secs / 60).clamp(0, i32::MAX as i64) as i32;
+        let flight_time = Some(raw_flight_time_min.saturating_sub(pause_min).max(0));
 
         let fares = if flight.fares.is_empty() {
             None
@@ -9514,14 +9603,25 @@ async fn flight_end_manual(
         // mapping as the regular file path, with manual-overrides
         // taking precedence. phpVMS skips missing values cleanly
         // thanks to `skip_serializing_if`.
-        let flight_time = flight_time_minutes
-            .filter(|m| *m >= 0)
-            .or_else(|| match (stats.takeoff_at, stats.landing_at) {
-                (Some(t), Some(l)) if l > t => Some((l - t).num_minutes() as i32),
-                _ => Some(
-                    ((Utc::now() - flight.started_at).num_minutes() as i32).max(0),
-                ),
-            });
+        //
+        // Spec sim-disconnect-auto-resume F3 (Block-Time-Korrektur):
+        // im Auto-Compute-Pfad (= keine Manual-Override) wird der
+        // Pause-Akkumulator abgezogen. Bei Manual-Override (Pilot
+        // tippt eine Flight-Time im Edit-Dialog ein) wird sein Wert
+        // ungeaendert uebernommen — er hat die Pause bewusst
+        // beruecksichtigt oder absichtlich ignoriert.
+        let flight_time = match flight_time_minutes.filter(|m| *m >= 0) {
+            Some(m) => Some(m),
+            None => {
+                let raw_min = match (stats.takeoff_at, stats.landing_at) {
+                    (Some(t), Some(l)) if l > t => (l - t).num_minutes() as i32,
+                    _ => ((Utc::now() - flight.started_at).num_minutes() as i32).max(0),
+                };
+                let pause_min = (stats.pause_total_duration_secs / 60)
+                    .clamp(0, i32::MAX as i64) as i32;
+                Some(raw_min.saturating_sub(pause_min).max(0))
+            }
+        };
         let fares = if flight.fares.is_empty() {
             None
         } else {
@@ -9841,6 +9941,138 @@ async fn flight_forget(
     Ok(())
 }
 
+/// Spec sim-disconnect-auto-resume F1 (Auto-Resume) + F2 (Akkumulator)
+/// + F3 (Block-Time-Korrektur).
+///
+/// Zentraler Resume-Helper. Wird von zwei Pfaden aufgerufen:
+///   1. Streamer-Loop wenn ein Sim-Snapshot wieder verfuegbar ist
+///      und `paused_since.is_some()` — *Auto-Resume*.
+///   2. Tauri-Command `flight_resume_after_disconnect` wenn der
+///      Pilot manuell den Pause-Button klickt — *Manual-Resume*.
+///
+/// Beide Pfade laufen durch denselben Code damit:
+///   - Pause-Segmente und `pause_total_duration_secs` konsistent
+///     akkumuliert werden (= Block-/Flight-Time-Korrektur in der
+///     PIREP-Berechnung greift egal welcher Resume-Weg)
+///   - `last_lat`/`last_lon` IMMER auf None gesetzt werden, damit
+///     Reposition-Distanz nicht ins `distance_nm` einlaeuft
+///   - Activity-Log und JSONL gleichen Inhalt sehen
+///
+/// Returns das fertige `PauseSegment` (falls Pause wirklich aktiv war)
+/// — oder None wenn `paused_since.is_none()` (= nichts zu tun).
+fn apply_pause_resume(
+    app: &AppHandle,
+    flight: &Arc<ActiveFlight>,
+    current_snap: Option<&SimSnapshot>,
+    reason: PauseReason,
+) -> Option<PauseSegment> {
+    let now = Utc::now();
+    let (started_at, last_known) = {
+        let stats = flight.stats.lock().expect("flight stats");
+        let start = stats.paused_since?;
+        (start, stats.paused_last_known.clone())
+    };
+
+    let duration_secs = (now - started_at).num_seconds().max(0);
+    // MVP Toggle-Debounce: Pausen unter 1s nicht im Akkumulator
+    // verbuchen — verhindert dass eine Esc-Esc-Sequenz oder ein
+    // einzelner verlorener Snapshot-Tick die Statistik verfaelscht.
+    // Der Pause-State wird trotzdem geclearet.
+    let count_toward_accumulator = duration_secs >= 1;
+
+    // Drift-Werte berechnen (None wenn entweder Side fehlt).
+    let (drift_nm, alt_delta_ft, fuel_delta_kg) = match (&last_known, current_snap) {
+        (Some(prev), Some(cur)) => {
+            let d_m = ::geo::distance_m(prev.lat, prev.lon, cur.lat, cur.lon);
+            let nm = d_m / 1852.0;
+            let alt = (cur.altitude_msl_ft - prev.altitude_ft).abs();
+            let fuel = (cur.fuel_total_kg as f64 - prev.fuel_total_kg as f64).abs();
+            (Some(nm), Some(alt), Some(fuel))
+        }
+        _ => (None, None, None),
+    };
+
+    let segment = PauseSegment {
+        started_at,
+        ended_at: now,
+        duration_secs,
+        reason,
+        drift_nm,
+        altitude_delta_ft: alt_delta_ft,
+        fuel_delta_kg,
+    };
+
+    {
+        let mut stats = flight.stats.lock().expect("flight stats");
+        if count_toward_accumulator {
+            stats.pause_total_duration_secs =
+                stats.pause_total_duration_secs.saturating_add(duration_secs);
+            stats.pause_segments.push(segment.clone());
+        }
+        stats.paused_since = None;
+        stats.paused_last_known = None;
+        // Reposition-Distanz darf nicht in distance_nm einlaufen —
+        // last_lat/lon auf None setzt die Distanz-Baseline neu, der
+        // naechste Tick startet frisch (entspricht dem alten Verhalten
+        // von flight_resume_after_disconnect).
+        stats.last_lat = None;
+        stats.last_lon = None;
+    }
+    save_active_flight(app, flight);
+
+    // Activity-Log mit Drift-Stufen aus v0.4-MVP-Spec:
+    //   < 1 NM  : Info ohne Drift-Suffix
+    //   1-50 NM : Info "repositioniert X nm"
+    //   50-200  : Warn "auffaellige Reposition X nm"
+    //   > 200   : Warn "Sehr grosse Reposition X nm — pruefe ob der richtige Flug geladen ist"
+    //
+    // KEIN Drift-Level blockiert Resume (Spec-Prinzip P2: informieren
+    // statt blockieren). Der Pilot kann ueber PIREP-Cancel-UI
+    // korrigieren wenn er einen falschen Flug erwischt hat.
+    let auto_prefix = match reason {
+        PauseReason::SimDisconnect => "▶ Flug automatisch fortgesetzt",
+        PauseReason::ManualResume => "▶ Flug wiederaufgenommen",
+    };
+    let (level, msg) = match drift_nm {
+        Some(d) if d > RESUME_DRIFT_EXTREME_NM => (
+            ActivityLevel::Warn,
+            format!(
+                "{auto_prefix} — Sehr grosse Reposition {:.1} nm. Pruefe ob der richtige Flug geladen ist.",
+                d
+            ),
+        ),
+        Some(d) if d > RESUME_DRIFT_WARN_NM => (
+            ActivityLevel::Warn,
+            format!("{auto_prefix} — Auffaellige Reposition {:.1} nm", d),
+        ),
+        Some(d) if d > RESUME_DRIFT_TOAST_NM => (
+            ActivityLevel::Info,
+            format!("{auto_prefix} — Repositioniert {:.1} nm", d),
+        ),
+        Some(_) => (ActivityLevel::Info, auto_prefix.to_string()),
+        None => (ActivityLevel::Info, auto_prefix.to_string()),
+    };
+    let detail = match (&last_known, current_snap) {
+        (Some(prev), Some(cur)) => Some(format!(
+            "Pause-Dauer: {} s\nVorher: LAT {:.4}° · LON {:.4}° · ALT {:.0} ft\nJetzt:  LAT {:.4}° · LON {:.4}° · ALT {:.0} ft",
+            duration_secs, prev.lat, prev.lon, prev.altitude_ft,
+            cur.lat, cur.lon, cur.altitude_msl_ft,
+        )),
+        _ => Some(format!("Pause-Dauer: {} s", duration_secs)),
+    };
+    log_activity_handle(app, level, msg, detail);
+
+    tracing::info!(
+        pirep_id = %flight.pirep_id,
+        duration_secs,
+        drift_nm = ?drift_nm,
+        reason = ?reason,
+        "pause resume applied"
+    );
+
+    Some(segment)
+}
+
 /// v0.4.1: Pilot klickt „Flug wiederaufnehmen" nachdem der Sim wegbrach
 /// und neu positioniert wurde. Hebt den Pause-State in den FlightStats auf
 /// — der Streamer fängt im nächsten Tick wieder an Position-Posts an
@@ -9867,87 +10099,38 @@ async fn flight_resume_after_disconnect(
         .map(Arc::clone)
         .ok_or_else(|| UiError::new("no_active_flight", "no flight is active"))?;
 
-    // Snapshot grab the pre-pause position before clearing state.
-    let prev_known = {
-        let stats = flight.stats.lock().expect("flight stats");
-        if stats.paused_since.is_none() {
-            return Err(UiError::new(
-                "not_paused",
-                "flight is not currently paused — nothing to resume",
-            ));
-        }
-        stats.paused_last_known.clone()
-    };
+    // Pre-Check: Pause-State muss aktiv sein, sonst UI-Fehler zurueck.
+    // Der Helper unten returnt sonst nur None und der Caller wuesste
+    // nicht warum nichts passierte.
+    if flight
+        .stats
+        .lock()
+        .expect("flight stats")
+        .paused_since
+        .is_none()
+    {
+        return Err(UiError::new(
+            "not_paused",
+            "flight is not currently paused — nothing to resume",
+        ));
+    }
 
     // Read the current sim snapshot (best-effort) for the delta calculation.
     let current_snap = current_snapshot(&app);
 
-    // Clear pause state. Streamer will resume normal posting from next tick.
-    //
-    // **Wichtig:** `last_lat/last_lon` wird auf None gesetzt — das ist der
-    // Anker für die Distance-Akkumulation in `step_flight`. Ohne den Reset
-    // würde der nächste Tick die volle Reposition-Strecke (z.B. 800 nm
-    // wenn der Pilot zur Approach gesprungen ist) als geflogene Distanz
-    // ins `distance_nm` reinschieben. Der Pilot hätte dann einen PIREP
-    // mit künstlich aufgeblähter Distanz — das wäre auch dann „Cheating
-    // im PIREP" wenn der Pilot es nicht beabsichtigt.
-    //
-    // Mit None startet der nächste Tick mit einer frischen Distance-
-    // Baseline, der Reposition-Sprung fließt **nicht** in die geloggte
-    // Flugdistanz ein. Die Reposition-Distanz selbst wird separat in
-    // einer Activity-Log-Zeile festgehalten („▶ Flug wiederaufgenommen
-    // — Repositioniert X nm") und ist damit für VA-Audits nachvoll-
-    // ziehbar, ohne den PIREP-Distance-Counter zu verfälschen.
-    {
-        let mut stats = flight.stats.lock().expect("flight stats");
-        stats.paused_since = None;
-        stats.paused_last_known = None;
-        stats.last_lat = None;
-        stats.last_lon = None;
-    }
-    save_active_flight(&app, &flight);
-
-    // Build the resume audit log entry.
-    let delta_nm = match (&prev_known, &current_snap) {
-        (Some(prev), Some(cur)) => {
-            let d_m = ::geo::distance_m(prev.lat, prev.lon, cur.lat, cur.lon);
-            Some(d_m / 1852.0)
-        }
-        _ => None,
-    };
-
-    let (level, msg) = match delta_nm {
-        Some(d) if d >= REPOSITION_WARN_DELTA_NM => (
-            ActivityLevel::Warn,
-            format!(
-                "▶ Flug wiederaufgenommen — Repositioniert {:.1} nm (auffällig groß)",
-                d
-            ),
-        ),
-        Some(d) => (
-            ActivityLevel::Info,
-            format!("▶ Flug wiederaufgenommen — Repositioniert {:.1} nm", d),
-        ),
-        None => (
-            ActivityLevel::Info,
-            "▶ Flug wiederaufgenommen".to_string(),
-        ),
-    };
-    let detail = match (&prev_known, &current_snap) {
-        (Some(prev), Some(cur)) => Some(format!(
-            "Vorher: LAT {:.4}° · LON {:.4}° · ALT {:.0} ft\nJetzt:  LAT {:.4}° · LON {:.4}° · ALT {:.0} ft",
-            prev.lat, prev.lon, prev.altitude_ft,
-            cur.lat, cur.lon, cur.altitude_msl_ft,
-        )),
-        _ => None,
-    };
-    log_activity(&state, level, msg, detail);
-
-    tracing::info!(
-        pirep_id = %flight.pirep_id,
-        delta_nm = ?delta_nm,
-        "flight resumed after disconnect"
+    // Spec sim-disconnect-auto-resume: Manual-Resume nutzt denselben
+    // Code-Pfad wie Auto-Resume. Pause-Segment wird akkumuliert,
+    // last_lat/lon zurueckgesetzt, Activity-Log geschrieben.
+    let _segment = apply_pause_resume(
+        &app,
+        &flight,
+        current_snap.as_ref(),
+        PauseReason::ManualResume,
     );
+    // state ist nur fuer den Tauri-Command-Signatur-Erhalt da — der
+    // Helper schreibt das Activity-Log via log_activity_handle, was
+    // den State-aware-Pfad ueberbrueckt.
+    let _ = state;
     Ok(())
 }
 
@@ -11200,13 +11383,28 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                 last_good_snap_at = Some(std::time::Instant::now());
             }
 
-            // v0.4.1: paused state check — if we're paused, skip everything
-            // (kein Position-Post, kein Phase-FSM-Step, kein Activity-Log).
-            // Heartbeat unten läuft trotzdem damit phpVMS' Cron den PIREP
-            // nicht killt während der Pilot den Sim neu startet. **Kein**
-            // Auto-Resume — selbst wenn der Sim wieder Daten liefert, der
-            // Streamer wartet auf den Resume-Klick (Tauri-Command
-            // `flight_resume_after_disconnect`).
+            // Spec sim-disconnect-auto-resume F1 (Auto-Resume):
+            //
+            // Frueher (v0.4.1) war Pause ein strikter Block — der Streamer
+            // wartete auf manuellen Klick selbst wenn der Sim wieder Daten
+            // lieferte. Reale Folge im AUA-323-Incident: Pilot hat die
+            // Pause erst nach der Landung gemerkt → 23 min Datenloch +
+            // Server-Splitter macht zwei Sessions.
+            //
+            // Neu: wenn wir wieder einen Sim-Snapshot haben, wird der
+            // Pause-State automatisch beendet (apply_pause_resume), die
+            // Pause-Dauer in den Akkumulator akkumuliert (damit der
+            // Flight-Time-Wert im PIREP korrekt bleibt) und der Streamer
+            // verarbeitet den aktuellen Tick normal weiter.
+            //
+            // Heartbeat (= `POST /pireps/{id}/update`) laeuft auch waehrend
+            // der Pause weiter — siehe Heartbeat-Code-Pfad unten. Damit
+            // bleibt der phpVMS-PIREP aktiv egal wie lange der Sim weg ist.
+            //
+            // Manueller Resume-Button (`flight_resume_after_disconnect`)
+            // bleibt als Fallback erhalten — z.B. wenn der Sim gar keine
+            // Snapshots mehr liefert, der Pilot aber den PIREP weiter-
+            // fuehren will.
             let is_paused = flight
                 .stats
                 .lock()
@@ -11214,12 +11412,25 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                 .paused_since
                 .is_some();
             if is_paused {
-                // Heartbeat trotzdem feuern (siehe weiter unten — wir lassen
-                // den Heartbeat-Code-Pfad ungestört durchlaufen, müsste hier
-                // also eigentlich `continue` sein. Der Heartbeat fired
-                // unten am Schleifen-Ende, deshalb erstmal next-iteration.
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                continue;
+                if snapshot.is_some() {
+                    // Auto-Resume: Helper updated State, schreibt Activity-
+                    // Log, persistiert active_flight.json. Anschliessend
+                    // faellt der Tick durch zum normalen Position-Stream-
+                    // Pfad — der aktuelle `snapshot` wird also genauso
+                    // verarbeitet wie nach einem manuellen Resume.
+                    let _ = apply_pause_resume(
+                        &app,
+                        &flight,
+                        snapshot.as_ref(),
+                        PauseReason::SimDisconnect,
+                    );
+                    // fall-through zum naechsten Code-Pfad
+                } else {
+                    // Sim liefert noch keine Daten → weiter pausieren.
+                    // Heartbeat-Code-Pfad unten greift trotzdem.
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    continue;
+                }
             }
 
             // Sim-Disconnect-Detection: hatten irgendwann mal Daten, aber
@@ -11778,6 +11989,11 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                         // v0.5.19: phpVMS-side registration overrides
                         // sim's ATC-ID for the live-tracking stream.
                         planned_registration: flight.planned_registration.clone(),
+                        // Spec sim-disconnect-auto-resume F4: pirep_id wird
+                        // in jedem Position-Tick mitgegeben damit der Server
+                        // Sessions ueber pirep_id joinen kann — verhindert
+                        // den AUA-323-Split bei langer Positions-Luecke.
+                        pirep_id: flight.pirep_id.clone(),
                     };
                     // v0.5.14: pass current phase so it's inlined into
                     // the position payload — Monitor doesn't have to
@@ -14067,7 +14283,7 @@ fn build_heartbeat_body(
     current_phase: FlightPhase,
 ) -> UpdateBody {
     let now = Utc::now();
-    let flight_time_secs = match (stats.takeoff_at, stats.landing_at) {
+    let raw_flight_time_secs = match (stats.takeoff_at, stats.landing_at) {
         (Some(t), Some(l)) if l > t => (l - t).num_seconds().max(0) as i32,
         (Some(t), None) => (now - t).num_seconds().max(0) as i32,
         // Pre-takeoff: fall back to block-off so cancellation cron sees
@@ -14077,6 +14293,18 @@ fn build_heartbeat_body(
             .map(|b| (now - b).num_seconds().max(0) as i32)
             .unwrap_or(0),
     };
+    // Spec sim-disconnect-auto-resume F3 (Block-Time-Korrektur):
+    // Pause-Akkumulator von der Wall-Clock-Flugzeit abziehen damit
+    // 23 min Sim-Crash oder 30 min MSFS-Esc-Pause nicht als 23/30
+    // zusaetzliche Flugminuten im PIREP-Heartbeat landen.
+    //
+    // saturating_sub: wenn pause_total_duration_secs aus irgendeinem
+    // Grund (Clock-Skew bei App-Restart, future-Bug) groesser ist als
+    // raw_flight_time_secs, returnt es 0 statt einen Underflow zu
+    // produzieren. Defensive Programmierung gegen kuenftige Aenderungen.
+    let pause_secs_i32 =
+        stats.pause_total_duration_secs.clamp(0, i32::MAX as i64) as i32;
+    let flight_time_secs = raw_flight_time_secs.saturating_sub(pause_secs_i32).max(0);
     // Same fuel arithmetic as the file body: block - remaining, in pounds.
     // Round to whole kg before lb conversion so the live-map / dashboard
     // shows clean integer kg values (no `5890.29 kg` artefacts from the
