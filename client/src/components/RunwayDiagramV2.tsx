@@ -15,6 +15,7 @@
 //   4. 4 Detail-Karten (Aufsetz-Bewertung / Position / Anflug-Profil / Datenquelle)
 
 import { useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { GlossaryModal } from "./RunwayGlossaryModal";
 import { useV2Skin } from "./SkinContext";
 
@@ -102,6 +103,7 @@ function tdColor(p: RunwayDiagramV2Props, tokens: { tdSevere: string; tdPerfect:
 export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
   const skin = useV2Skin();
   const TOKENS = skin.tokens;
+  const { t } = useTranslation();
   const [glossaryOpen, setGlossaryOpen] = useState(false);
 
   const W = skin.geometry.svgWidth;
@@ -184,12 +186,12 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
   // UI sagt "VPS Navdata (AIRAC X)" statt direkt "Navigraph".
   const sourceLabel = (() => {
     if (props.source === "navigraph") {
-      return `VPS Navdata (AIRAC ${props.nav_cycle ?? "?"}) ✓`;
+      return `${t("runway_v2.source_vps_navdata")} (AIRAC ${props.nav_cycle ?? "?"}) ✓`;
     }
     if (props.source === "ourairports_fallback") {
-      return "OurAirports (Fallback) — Schwellen-Position kann abweichen";
+      return t("runway_v2.source_ourairports_fallback");
     }
-    return "OurAirports";
+    return t("runway_v2.source_ourairports_legacy");
   })();
 
   return (
@@ -230,13 +232,13 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
             <strong style={{ fontSize: "1.05rem" }}>{props.airport_ident}</strong>
             {props.airport_name ? <span>({props.airport_name})</span> : null}
             <span style={{ opacity: 0.5 }}>·</span>
-            <strong style={{ fontSize: "1.05rem" }}>Bahn {props.runway_ident}</strong>
+            <strong style={{ fontSize: "1.05rem" }}>{t("runway_v2.rwy_label_prefix")} {props.runway_ident}</strong>
             <span style={{ opacity: 0.5 }}>·</span>
             <span>{props.length_m.toFixed(0)} m</span>
             {props.surface ? (
               <>
                 <span style={{ opacity: 0.5 }}>·</span>
-                <span>{surfaceLabel(props.surface)}</span>
+                <span>{t(surfaceLabelKey(props.surface)) || props.surface}</span>
               </>
             ) : null}
           </div>
@@ -249,7 +251,7 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
                 props.source === "ourairports_fallback" ? "#fbbf24" : undefined,
             }}
           >
-            Datenquelle: {sourceLabel}
+            {t("runway_v2.data_source")}: {sourceLabel}
           </div>
         </div>
         <button
@@ -267,7 +269,7 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
             whiteSpace: "nowrap",
           }}
         >
-          ⓘ Begriffe erklärt
+          ⓘ {t("runway_v2.glossary_open")}
         </button>
       </header>
 
@@ -361,7 +363,7 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
                 strokeWidth="2.5"
                 paintOrder="stroke"
               >
-                DDS {ddsM.toFixed(0)} m
+                {t("runway_v2.dds_prefix")} {ddsM.toFixed(0)} m
               </text>
               <text
                 x={(padX + thresholdX) / 2}
@@ -375,7 +377,7 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
                 strokeWidth="2.5"
                 paintOrder="stroke"
               >
-                ⚠ LANDUNG VERBOTEN
+                {t("runway_v2.dds_forbidden")}
               </text>
             </g>
           )}
@@ -489,7 +491,7 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
                 fontFamily="monospace"
                 textAnchor="middle"
               >
-                AUFSETZZONE (TDZ) {props.td_tdz_length_m?.toFixed(0)} m
+                {t("runway_v2.aufsetzzone_prefix")} {props.td_tdz_length_m?.toFixed(0)} m
               </text>
             </g>
           )}
@@ -546,7 +548,7 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
                 fontWeight="700"
                 fontFamily="monospace"
               >
-                AIM-POINT {props.aim_point_m?.toFixed(0)} m
+                {t("runway_v2.aim_point_prefix")} {props.aim_point_m?.toFixed(0)} m
               </text>
               <text
                 x={aimX}
@@ -557,7 +559,7 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
                 fontFamily="monospace"
                 opacity="0.85"
               >
-                ↓ Soll-Aufsetz-Stelle
+                {t("runway_v2.aim_subtitle")}
               </text>
               <title>
                 Aim-Point — die zwei großen weißen Quadrate auf der echten
@@ -666,7 +668,7 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
                   fontFamily="monospace"
                   textAnchor={isLeft ? "end" : "start"}
                 >
-                  {Math.abs(props.td_centerline_offset_m).toFixed(1)} m {isLeftOffset ? "LINKS" : "RECHTS"}
+                  {Math.abs(props.td_centerline_offset_m).toFixed(1)} m {isLeftOffset ? t("runway_v2.centerline_left") : t("runway_v2.centerline_right")}
                 </text>
               </g>
             );
@@ -733,7 +735,7 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
                 {mode === "right" && (
                   <>
                     <text x={exitX + 18} y={tdY - 4} textAnchor="start" fontSize="14" {...textProps}>
-                      Bremspunkt
+                      {t("runway_v2.bremspunkt_title")}
                     </text>
                     <text x={exitX + 18} y={tdY + 12} textAnchor="start" fontSize="13" {...textProps}>
                       40 kt
@@ -743,7 +745,7 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
                 {mode === "below" && (
                   <>
                     <text x={exitX} y={tdY + 22} textAnchor="middle" fontSize="14" {...textProps}>
-                      Bremspunkt
+                      {t("runway_v2.bremspunkt_title")}
                     </text>
                     <text x={exitX} y={tdY + 38} textAnchor="middle" fontSize="13" {...textProps}>
                       40 kt
@@ -753,7 +755,7 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
                 {mode === "above" && (
                   <>
                     <text x={exitX} y={tdY - 36} textAnchor="middle" fontSize="14" {...textProps}>
-                      Bremspunkt
+                      {t("runway_v2.bremspunkt_title")}
                     </text>
                     <text x={exitX} y={tdY - 20} textAnchor="middle" fontSize="13" {...textProps}>
                       40 kt
@@ -829,7 +831,7 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
               fontFamily="monospace"
             >
               TD {props.td_distance_from_threshold_m.toFixed(0)} m
-              {Math.abs(props.td_centerline_offset_m) < 0.5 ? " · auf CL" : ""}
+              {Math.abs(props.td_centerline_offset_m) < 0.5 ? " · " + t("runway_v2.auf_cl") : ""}
             </text>
           </g>
 
@@ -883,12 +885,12 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
           padding: "0 4px",
         }}
       >
-        <LegendItem swatch={TOKENS.threshold} label="Schwelle" />
-        {tdzEndX && <LegendItem swatch={TOKENS.tdzStroke} label="Aufsetzzone (TDZ)" />}
-        {aimX && <LegendItem swatch={TOKENS.aimMarker} label="Ziel-Markierung (AIM)" />}
-        <LegendDot color={dotColor} label="Aufsetzpunkt (TD)" />
-        {exitX && <LegendDot color={TOKENS.exitDot} label="Bremspunkt (40 kt)" />}
-        {ddsActive && <LegendItem swatch={TOKENS.ddsBorder} label="Pre-Threshold — Landung verboten" />}
+        <LegendItem swatch={TOKENS.threshold} label={t("runway_v2.legend_threshold")} />
+        {tdzEndX && <LegendItem swatch={TOKENS.tdzStroke} label={t("runway_v2.legend_tdz")} />}
+        {aimX && <LegendItem swatch={TOKENS.aimMarker} label={t("runway_v2.legend_aim")} />}
+        <LegendDot color={dotColor} label={t("runway_v2.legend_td")} />
+        {exitX && <LegendDot color={TOKENS.exitDot} label={t("runway_v2.legend_brakepoint")} />}
+        {ddsActive && <LegendItem swatch={TOKENS.ddsBorder} label={t("runway_v2.legend_pre_threshold")} />}
       </div>
 
       {/* ─── 4. DETAIL-PILLS ─────────────────────────────────────────
@@ -903,10 +905,10 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
           gap: 8,
         }}
       >
-        <Pill label="Bahn" value={`${props.airport_ident}/${props.runway_ident}${props.surface ? ` (${surfaceLabel(props.surface)})` : ""}`} />
-        <Pill label="Länge" value={`${props.length_m.toFixed(0)} m`} />
+        <Pill label={t("runway_v2.pill_bahn")} value={`${props.airport_ident}/${props.runway_ident}${props.surface ? ` (${t(surfaceLabelKey(props.surface)) || props.surface})` : ""}`} />
+        <Pill label={t("runway_v2.pill_laenge")} value={`${props.length_m.toFixed(0)} m`} />
         <Pill
-          label="Hinter Schwelle"
+          label={t("runway_v2.pill_hinter_schwelle")}
           value={`${props.td_distance_from_threshold_m.toFixed(0)} m`}
           tone={
             props.pre_displaced_threshold === true
@@ -919,12 +921,12 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
           }
         />
         <Pill
-          label="Mittellinie"
+          label={t("runway_v2.pill_mittellinie")}
           value={
             Math.abs(props.td_centerline_offset_m) < 0.5
-              ? "auf CL"
+              ? t("runway_v2.auf_cl")
               : `${Math.abs(props.td_centerline_offset_m).toFixed(1)} m ${
-                  props.td_centerline_offset_m > 0 ? "RECHTS" : "LINKS"
+                  props.td_centerline_offset_m > 0 ? t("runway_v2.centerline_right") : t("runway_v2.centerline_left")
                 }`
           }
           tone={
@@ -936,55 +938,55 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
           }
         />
         {props.rollout_m != null && (
-          <Pill label="Ausrollstrecke" value={`${props.rollout_m.toFixed(0)} m`} />
+          <Pill label={t("runway_v2.pill_ausrollstrecke")} value={`${props.rollout_m.toFixed(0)} m`} />
         )}
         {bahnUsedPct != null && (
           <Pill
-            label="Bahn-Auslastung"
+            label={t("runway_v2.pill_bahn_auslastung")}
             value={`${bahnUsedPct.toFixed(0)} %`}
             tone={bahnUsedPct > 85 ? "warn" : "good"}
           />
         )}
         {props.td_in_tdz != null && (
           <Pill
-            label="Touchdown-Zone"
+            label={t("runway_v2.pill_tdz")}
             value={
               props.td_in_tdz
-                ? `✓ ${props.td_third ? thirdLabel(props.td_third) : "im Marker"}`
-                : `✗ ${props.td_third ? thirdLabel(props.td_third) : "verfehlt"}`
+                ? `✓ ${props.td_third ? t(thirdLabelKey(props.td_third)) : t("runway_v2.tdz_hit_marker")}`
+                : `✗ ${props.td_third ? t(thirdLabelKey(props.td_third)) : t("runway_v2.tdz_missed_marker")}`
             }
             tone={props.td_in_tdz ? "good" : "warn"}
           />
         )}
         {props.aim_class && props.aim_delta_m != null && props.aim_point_m != null && (
           <Pill
-            label="Aim-Point"
-            value={`${props.aim_point_m.toFixed(0)} m · Δ ${props.aim_delta_m >= 0 ? "+" : ""}${props.aim_delta_m.toFixed(0)} m · ${aimClassLabel(props.aim_class)}`}
+            label={t("runway_v2.pill_aim_point")}
+            value={`${props.aim_point_m.toFixed(0)} m · Δ ${props.aim_delta_m >= 0 ? "+" : ""}${props.aim_delta_m.toFixed(0)} m · ${t(aimClassLabelKey(props.aim_class))}`}
             tone={aimTone(props.aim_class)}
           />
         )}
         {props.tch_actual_ft != null && props.tch_class && (
           <Pill
-            label="Anflug-Profil (TCH)"
-            value={`${props.tch_actual_ft.toFixed(0)} ft${props.tch_delta_ft != null ? ` · Δ ${props.tch_delta_ft >= 0 ? "+" : ""}${props.tch_delta_ft.toFixed(0)} ft` : ""} · ${tchClassLabel(props.tch_class)}`}
+            label={t("runway_v2.pill_tch")}
+            value={`${props.tch_actual_ft.toFixed(0)} ft${props.tch_delta_ft != null ? ` · Δ ${props.tch_delta_ft >= 0 ? "+" : ""}${props.tch_delta_ft.toFixed(0)} ft` : ""} · ${t(tchClassLabelKey(props.tch_class))}`}
             tone={tchTone(props.tch_class)}
           />
         )}
         {props.pre_displaced_threshold === true && (
           <Pill
-            label="⚠ Pre-Threshold"
-            value="Aufsetzen VOR der Landeschwelle (illegal IRL)"
+            label={t("runway_v2.pill_pre_threshold")}
+            value={t("runway_v2.pill_pre_threshold_value")}
             tone="bad"
           />
         )}
         <Pill
-          label="Navdata-Quelle"
+          label={t("runway_v2.pill_navdata")}
           value={
             props.source === "navigraph"
-              ? `VPS Navdata · AIRAC ${props.nav_cycle ?? "?"}`
+              ? `${t("runway_v2.source_vps_navdata")} · AIRAC ${props.nav_cycle ?? "?"}`
               : props.source === "ourairports_fallback"
-              ? "OurAirports (Fallback)"
-              : "OurAirports"
+              ? t("runway_v2.source_ourairports_fallback_short")
+              : t("runway_v2.source_ourairports_legacy")
           }
           tone={
             props.source === "navigraph"
@@ -1012,6 +1014,7 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
 // die Pill bleibt damit auf einer Bildschirm-Zeile so lang wie nötig,
 // nicht "höher" durch gestapelte Rows.
 function FlugzeugBar({ props }: { props: RunwayDiagramV2Props }) {
+  const { t } = useTranslation();
   const has =
     props.aircraft_icao ||
     props.aircraft_title ||
@@ -1029,10 +1032,10 @@ function FlugzeugBar({ props }: { props: RunwayDiagramV2Props }) {
   // Aircraft-Header
   const acName = props.aircraft_title || props.aircraft_icao;
   if (acName) {
-    items.push({ label: "Type", value: String(acName) });
+    items.push({ label: t("runway_v2.flugzeug_type"), value: String(acName) });
   }
   if (props.aircraft_registration) {
-    items.push({ label: "Reg", value: props.aircraft_registration });
+    items.push({ label: t("runway_v2.flugzeug_reg"), value: props.aircraft_registration });
   }
 
   // Landegewicht ± Plan
@@ -1042,17 +1045,17 @@ function FlugzeugBar({ props }: { props: RunwayDiagramV2Props }) {
       const deltaT = (props.landing_weight_kg - props.planned_ldw_kg) / 1000;
       const sign = deltaT >= 0 ? "+" : "";
       items.push({
-        label: "Gewicht",
+        label: t("runway_v2.flugzeug_weight"),
         value: `${realT} t (Δ ${sign}${deltaT.toFixed(1)} t)`,
       });
     } else {
-      items.push({ label: "Gewicht", value: `${realT} t` });
+      items.push({ label: t("runway_v2.flugzeug_weight"), value: `${realT} t` });
     }
   }
 
   // TD-IAS
   if (props.landing_speed_kt != null) {
-    items.push({ label: "TD-IAS", value: `${props.landing_speed_kt.toFixed(0)} kt` });
+    items.push({ label: t("runway_v2.flugzeug_iast"), value: `${props.landing_speed_kt.toFixed(0)} kt` });
   }
 
   // Pitch / Bank
@@ -1062,7 +1065,7 @@ function FlugzeugBar({ props }: { props: RunwayDiagramV2Props }) {
     const tailStrike = props.landing_pitch_deg != null && props.landing_pitch_deg < 0;
     const bankWarn = props.landing_bank_deg != null && Math.abs(props.landing_bank_deg) > 5;
     items.push({
-      label: "P / B",
+      label: t("runway_v2.flugzeug_pb"),
       value: `${p}° / ${b}°`,
       color: tailStrike ? "#ef4444" : bankWarn ? "#fbbf24" : undefined,
     });
@@ -1072,7 +1075,7 @@ function FlugzeugBar({ props }: { props: RunwayDiagramV2Props }) {
   if (props.landing_peak_g_force != null) {
     const g = props.landing_peak_g_force;
     items.push({
-      label: "Peak-G",
+      label: t("runway_v2.flugzeug_peakg"),
       value: `${g.toFixed(2)} g`,
       color: g >= 1.7 ? "#ef4444" : g >= 1.5 ? "#fbbf24" : "#22c55e",
     });
@@ -1093,7 +1096,7 @@ function FlugzeugBar({ props }: { props: RunwayDiagramV2Props }) {
     const xwAbs = xw != null ? Math.abs(xw) : 0;
     const isTw = hw != null && hw < -3;
     const color = xwAbs > 25 || isTw ? "#ef4444" : xwAbs > 15 ? "#fbbf24" : undefined;
-    items.push({ label: "Wind", value: parts.join(" "), color });
+    items.push({ label: t("runway_v2.flugzeug_wind"), value: parts.join(" "), color });
   }
 
   return (
@@ -1123,7 +1126,7 @@ function FlugzeugBar({ props }: { props: RunwayDiagramV2Props }) {
           opacity: 0.65,
         }}
       >
-        Flugzeug
+        {t("runway_v2.flugzeug_label")}
       </div>
       <div
         style={{
@@ -1253,34 +1256,35 @@ function oppositeRunway(ident: string): string {
   return String(opp).padStart(2, "0") + oppSuffix;
 }
 
-function surfaceLabel(s: string): string {
+// Helper liefern i18n-Keys (nicht direkt Strings) — Caller löst via t() auf.
+function surfaceLabelKey(s: string): string {
   const map: Record<string, string> = {
-    ASP: "Asphalt",
-    CON: "Beton",
-    GRV: "Schotter",
-    GRS: "Gras",
-    DIRT: "Erde",
-    TURF: "Rasen",
+    ASP: "runway_v2.surface_asp",
+    CON: "runway_v2.surface_con",
+    GRV: "runway_v2.surface_grv",
+    GRS: "runway_v2.surface_grs",
+    DIRT: "runway_v2.surface_dirt",
+    TURF: "runway_v2.surface_turf",
   };
-  return map[s.toUpperCase()] ?? s;
+  return map[s.toUpperCase()] ?? "";
 }
 
-function thirdLabel(t: 1 | 2 | 3): string {
-  return t === 1 ? "erstes Drittel" : t === 2 ? "zweites Drittel" : "drittes Drittel";
+function thirdLabelKey(n: 1 | 2 | 3): string {
+  return n === 1 ? "runway_v2.third_1" : n === 2 ? "runway_v2.third_2" : "runway_v2.third_3";
 }
 
-function aimClassLabel(c: AimClass): string {
+function aimClassLabelKey(c: AimClass): string {
   switch (c) {
     case "perfect":
-      return "perfekt";
+      return "runway_v2.aim_perfect";
     case "short_of_aim":
-      return "zu früh";
+      return "runway_v2.aim_short";
     case "past_aim":
-      return "etwas spät";
+      return "runway_v2.aim_past";
     case "long_landing":
-      return "long landing";
+      return "runway_v2.aim_long_landing";
     case "severe":
-      return "kritisch";
+      return "runway_v2.aim_severe";
   }
 }
 
@@ -1290,18 +1294,18 @@ function aimTone(c: AimClass): "good" | "warn" | "bad" {
   return "bad";
 }
 
-function tchClassLabel(c: TchClass): string {
+function tchClassLabelKey(c: TchClass): string {
   switch (c) {
     case "on_profile":
-      return "auf Profil";
+      return "runway_v2.tch_on_profile";
     case "slightly_low":
-      return "leicht niedrig";
+      return "runway_v2.tch_slightly_low";
     case "slightly_high":
-      return "leicht hoch";
+      return "runway_v2.tch_slightly_high";
     case "high":
-      return "zu hoch";
+      return "runway_v2.tch_high";
     case "below_profile":
-      return "unter Profil";
+      return "runway_v2.tch_below_profile";
   }
 }
 
