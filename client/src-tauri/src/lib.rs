@@ -548,6 +548,18 @@ fn aircraft_aliases(code: &str) -> &'static [&'static str] {
         "E290" => &["E190-E2", "E2-190"],
         "E295" => &["E195-E2", "E2-195"],
 
+        // ---- Honda Aircraft Company ----
+        // HondaJet HA-420 — Live-Bug 2026-05-13 (GSG / Michel D., MSFS):
+        // Bid hat ICAO "HDJT" (offizieller Doc-8643 Type-Designator),
+        // MSFS ATC-MODEL liefert aber "HA420" (Hersteller-Marketing-
+        // Designation) und der TITLE ist typisch "mg hjet ha420
+        // [Preset Default]". Ohne Alias schlägt der Pre-Flight-Check
+        // mit "Aircraft mismatch: bid wants HDJT, sim has HA420" fehl.
+        // Bidirektional eingetragen damit beide Vergleichsrichtungen
+        // (bid-vs-sim und sim-vs-bid) matchen.
+        "HDJT" => &["HA420", "HA-420", "HONDAJET", "HJET"],
+        "HA420" => &["HDJT", "HA-420", "HONDAJET", "HJET"],
+
         // No alias known — fall through to strict comparison.
         _ => &[],
     }
@@ -22037,6 +22049,32 @@ mod aircraft_alias_tests {
         assert!(!aircraft_types_match("MD11", "B77W"));
         assert!(!aircraft_types_match("MD11", "A359"));
         assert!(!aircraft_types_match("MD11", "B748"));
+    }
+
+    /// Live bug 2026-05-13 (GSG / Michel D., MSFS): HondaJet-Bid mit
+    /// ICAO "HDJT" geblockt, weil MSFS den ATC-MODEL-String "HA420"
+    /// (Hersteller-Marketing-Designation) liefert und der TITLE typisch
+    /// "mg hjet ha420 [Preset Default]" ist. Beide Codes meinen dasselbe
+    /// Aircraft — bidirektional in der Alias-Tabelle eingetragen.
+    #[test]
+    fn hdjt_matches_ha420_hondajet() {
+        // Bid (HDJT) gegen sim ATC-MODEL (HA420)
+        assert!(aircraft_types_match("HDJT", "HA420"));
+        // Inverse: Bid (HA420 — falls eine VA das so führt) gegen sim (HDJT)
+        assert!(aircraft_types_match("HA420", "HDJT"));
+        // Bid HDJT gegen Sim-TITLE (Substring-Match auf Long-Form)
+        assert!(aircraft_types_match("HDJT", "mg hjet ha420 [Preset Default]"));
+        assert!(aircraft_types_match("HDJT", "Asobo HondaJet HA-420"));
+        // HA-420 (mit Bindestrich, wie Honda offiziell schreibt)
+        assert!(aircraft_types_match("HDJT", "HA-420"));
+    }
+
+    #[test]
+    fn hdjt_does_not_match_unrelated_jets() {
+        // HondaJet darf NICHT mit anderen Light-Jets matchen
+        assert!(!aircraft_types_match("HDJT", "C25A"));   // CitationJet
+        assert!(!aircraft_types_match("HDJT", "E50P"));   // Phenom 100
+        assert!(!aircraft_types_match("HDJT", "TBM9"));   // TBM 930
     }
 
     // ─── v0.7.3 Cargo-Aliases (Spec §4 HOHE-Prio Arbeitsliste) ──────
