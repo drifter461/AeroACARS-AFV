@@ -63,9 +63,13 @@ export interface RunwayDiagramV2Props {
 
 const TOKENS = {
   svgWidth: 1200,
-  svgHeight: 320,
+  // v2.1: H 320→380, padY 70→95 — frühere Versionen schnitten die
+  // Skala-Labels am unteren SVG-Rand ab (rwyBot+70 fiel exakt auf
+  // viewBox-Bottom). Jetzt 40 px Margin unten + 25 px mehr oben für
+  // die ZIEL-Annotation.
+  svgHeight: 380,
   rwyPaddingX: 70,
-  rwyPaddingY: 70,
+  rwyPaddingY: 95,
   tarmac: "#1a2030",
   tarmacBorder: "rgba(255,255,255,0.18)",
   threshold: "rgba(255,255,255,0.65)",
@@ -363,16 +367,16 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
               </defs>
               <rect
                 x={padX + 24}
-                y={rwyTop + 4}
+                y={rwyTop + 30}
                 width={tdzEndX - padX - 24}
-                height={innerH - 8}
+                height={innerH - 60}
                 fill="url(#tdz-hatch)"
               />
               <rect
                 x={padX + 24}
-                y={rwyTop + 4}
+                y={rwyTop + 30}
                 width={tdzEndX - padX - 24}
-                height={innerH - 8}
+                height={innerH - 60}
                 fill={TOKENS.tdzFill}
                 stroke={TOKENS.tdzStroke}
                 strokeDasharray="6,5"
@@ -540,7 +544,6 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
             fill="#f1f5f9"
             fontWeight="800"
             fontFamily="monospace"
-            letterSpacing="2"
           >
             {props.runway_ident}
           </text>
