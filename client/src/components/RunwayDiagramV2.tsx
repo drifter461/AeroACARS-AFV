@@ -67,7 +67,7 @@ const TOKENS = {
   // Skala-Labels am unteren SVG-Rand ab (rwyBot+70 fiel exakt auf
   // viewBox-Bottom). Jetzt 40 px Margin unten + 25 px mehr oben für
   // die ZIEL-Annotation.
-  svgHeight: 380,
+  svgHeight: 400,
   rwyPaddingX: 70,
   rwyPaddingY: 95,
   tarmac: "#1a2030",
@@ -492,47 +492,64 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
             </g>
           )}
 
-          {/* Offset-Indikator: senkrechter Pfeil von der Mittellinie zum
-              TD-Dot. Macht das L/R-Offset visuell (statt nur über die
-              y-Position) erkennbar. Nur wenn der Offset > 0.5 m ist —
-              sonst überlappt der Pfeil mit dem Dot selbst. */}
-          {Math.abs(props.td_centerline_offset_m) > 0.5 && (
-            <g>
-              {/* Senkrechte Linie CL → TD */}
-              <line
-                x1={tdX}
-                y1={rwyCl}
-                x2={tdX}
-                y2={tdY > rwyCl ? tdY - 11 : tdY + 11}
-                stroke={dotColor}
-                strokeWidth="1.5"
-                strokeDasharray="3,3"
-                opacity="0.8"
-              />
-              {/* Pfeilspitze am TD-Ende */}
-              <polygon
-                points={
-                  tdY > rwyCl
-                    ? `${tdX},${tdY - 9} ${tdX - 4},${tdY - 14} ${tdX + 4},${tdY - 14}`
-                    : `${tdX},${tdY + 9} ${tdX - 4},${tdY + 14} ${tdX + 4},${tdY + 14}`
-                }
-                fill={dotColor}
-              />
-              {/* Kleine L/R-Label neben dem Dot */}
-              <text
-                x={tdX + 14}
-                y={tdY + 4}
-                fontSize="11"
-                fill={dotColor}
-                fontWeight="800"
-                fontFamily="monospace"
-              >
-                {props.td_centerline_offset_m > 0 ? "→ R" : "← L"}
-                {" "}
-                {Math.abs(props.td_centerline_offset_m).toFixed(1)} m
-              </text>
-            </g>
-          )}
+          {/* Offset-Indikator: großer Pfeil + Label UNTER der Bahn, mit
+              dünner Anker-Linie zum TD-Dot. Bewusst außerhalb der
+              Bahn-Fläche, damit es nicht hinter den AIM-Quadraten
+              verschwindet wenn TD und Aim-Position fast übereinander
+              liegen. Nur wenn |offset| > 0.5 m. */}
+          {Math.abs(props.td_centerline_offset_m) > 0.5 && (() => {
+            const isLeft = props.td_centerline_offset_m < 0;
+            // Pfeil-Group direkt unter der Bahn — über dem TD-Distanz-Label.
+            const arrowY = rwyBot + 22;
+            const arrowLen = 56;
+            const ax1 = isLeft ? tdX + arrowLen / 2 : tdX - arrowLen / 2;
+            const ax2 = isLeft ? tdX - arrowLen / 2 : tdX + arrowLen / 2;
+            return (
+              <g>
+                {/* Dünne Anker-Linie vom TD-Dot zum Pfeil */}
+                <line
+                  x1={tdX}
+                  y1={tdY}
+                  x2={tdX}
+                  y2={arrowY - 8}
+                  stroke={dotColor}
+                  strokeWidth="1"
+                  strokeDasharray="2,3"
+                  opacity="0.5"
+                />
+                {/* Großer Pfeil-Schaft */}
+                <line
+                  x1={ax1}
+                  y1={arrowY}
+                  x2={ax2}
+                  y2={arrowY}
+                  stroke={dotColor}
+                  strokeWidth="3.5"
+                />
+                {/* Große Pfeilspitze */}
+                <polygon
+                  points={
+                    isLeft
+                      ? `${ax2 - 10},${arrowY - 8} ${ax2},${arrowY} ${ax2 - 10},${arrowY + 8}`
+                      : `${ax2 + 10},${arrowY - 8} ${ax2},${arrowY} ${ax2 + 10},${arrowY + 8}`
+                  }
+                  fill={dotColor}
+                />
+                {/* Großes Label neben dem Pfeil */}
+                <text
+                  x={isLeft ? ax2 - 14 : ax2 + 14}
+                  y={arrowY + 5}
+                  fontSize="15"
+                  fill={dotColor}
+                  fontWeight="800"
+                  fontFamily="monospace"
+                  textAnchor={isLeft ? "end" : "start"}
+                >
+                  {Math.abs(props.td_centerline_offset_m).toFixed(1)} m {isLeft ? "LINKS" : "RECHTS"}
+                </text>
+              </g>
+            );
+          })()}
 
           {/* Touchdown-Punkt — Doppel-Glow + Solid Dot. */}
           <g>
@@ -604,32 +621,21 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
             <title>Landerichtung</title>
           </g>
 
-          {/* TD-Label unter dem Dot. */}
+          {/* TD-Label unter dem Dot — nur Distanz. L/R wird durch den
+              großen L/R-Pfeil oben dargestellt. Bei Offset < 0.5 m
+              steht hier zusätzlich "auf CL". */}
           <g>
             <text
               x={tdX}
-              y={rwyBot + 18}
+              y={rwyBot + 46}
               textAnchor="middle"
-              fontSize="12"
+              fontSize="13"
               fill={dotColor}
               fontWeight="700"
               fontFamily="monospace"
             >
               TD {props.td_distance_from_threshold_m.toFixed(0)} m
-            </text>
-            <text
-              x={tdX}
-              y={rwyBot + 32}
-              textAnchor="middle"
-              fontSize="11"
-              fill={dotColor}
-              fontFamily="monospace"
-            >
-              {Math.abs(props.td_centerline_offset_m) < 0.5
-                ? "auf CL"
-                : `${Math.abs(props.td_centerline_offset_m).toFixed(1)} m ${
-                    props.td_centerline_offset_m > 0 ? "RECHTS" : "LINKS"
-                  }`}
+              {Math.abs(props.td_centerline_offset_m) < 0.5 ? " · auf CL" : ""}
             </text>
           </g>
 
@@ -637,9 +643,9 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
           <g>
             <line
               x1={padX}
-              y1={rwyBot + 52}
+              y1={rwyBot + 62}
               x2={padX + innerW}
-              y2={rwyBot + 52}
+              y2={rwyBot + 62}
               stroke="rgba(255,255,255,0.25)"
               strokeWidth="1"
             />
@@ -649,15 +655,15 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
                 <g key={d}>
                   <line
                     x1={x}
-                    y1={rwyBot + 47}
+                    y1={rwyBot + 57}
                     x2={x}
-                    y2={rwyBot + 57}
+                    y2={rwyBot + 67}
                     stroke="rgba(255,255,255,0.5)"
                     strokeWidth="1.2"
                   />
                   <text
                     x={x}
-                    y={rwyBot + 70}
+                    y={rwyBot + 80}
                     textAnchor="middle"
                     fontSize="10"
                     fill="rgba(255,255,255,0.55)"
