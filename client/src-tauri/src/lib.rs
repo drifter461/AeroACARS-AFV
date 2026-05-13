@@ -2705,6 +2705,20 @@ pub struct ActiveFlightInfo {
     /// Aktuelles Total-Weight (= TOW wenn am Boden voll beladen).
     /// None wenn der Sim das nicht meldet.
     sim_tow_kg: Option<f32>,
+
+    // v0.7.19 GAF-707 Accident-Detection (QS-R1 Finding 3): UI muss
+    // schon waehrend des aktiven Flugs wissen ob ein Accident gelatcht
+    // wurde — damit der Flight-End-Dialog "War das ein Absturz?" greifen
+    // kann statt den PIREP blind zu filen. Felder spiegeln 1:1 die
+    // FlightStats-Werte aus dem Klassifikator-Pfad. Spec §AeroACARS
+    // Client Tab "Landung" + §Active Flight / Flight End.
+    accident_detected: bool,
+    /// "sim_crash" | "impact" | "off_airport_impact" | None
+    accident_kind: Option<String>,
+    /// "high" (Confirmed) | "medium" (Suspected) | None
+    accident_confidence: Option<String>,
+    accident_reasons: Vec<String>,
+    accident_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5934,6 +5948,15 @@ fn flight_info(flight: &ActiveFlight) -> ActiveFlightInfo {
         planned_ldw_kg: stats.planned_ldw_kg,
         planned_route: stats.planned_route.clone(),
         planned_alternate: stats.planned_alternate.clone(),
+
+        // v0.7.19 GAF-707 (QS-R1 Finding 3): Accident-Status fuer das
+        // Frontend exponieren — sonst kann der Flight-End-Dialog nicht
+        // entscheiden ob "War das ein Absturz?" gezeigt werden muss.
+        accident_detected: stats.accident_detected,
+        accident_kind: stats.accident_kind.clone(),
+        accident_confidence: stats.accident_confidence.clone(),
+        accident_reasons: stats.accident_reasons.clone(),
+        accident_at: stats.accident_at.map(|t| t.to_rfc3339()),
     }
 }
 
@@ -7703,7 +7726,6 @@ fn spawn_pirep_queue_worker(app: AppHandle) {
         loop {
             tokio::time::sleep(TICK).await;
             let queued = pirep_queue::list_all(&app);
-            if queued.is_empty() { continue; }
             // Client aus dem AppState holen — könnte fehlen wenn Pilot
             // nicht eingeloggt ist (= keine Connection). Dann skippen.
             let state = app.state::<AppState>();
@@ -7713,6 +7735,15 @@ fn spawn_pirep_queue_worker(app: AppHandle) {
                 .expect("client lock")
                 .clone();
             let Some(client) = client_opt else { continue; };
+
+            // v0.7.19 GAF-707 (QS-R1 Finding 1): Pending-Bid-Cleanup-Queue
+            // bei jedem Tick mit drainen — unabhaengig davon ob auch
+            // pireps queued sind. Sonst bleibt der Bid nach einem
+            // erfolgreichen FILED + transientem delete_bid-Fail haengen
+            // bis zufaellig ein anderer PIREP queued wird.
+            drain_pending_bid_cleanup(&app, &client).await;
+
+            if queued.is_empty() { continue; }
             tracing::info!(queued_count = queued.len(), "PIREP-queue worker tick");
             for mut q in queued {
                 if q.attempt_count >= MAX_ATTEMPTS {
@@ -7736,8 +7767,14 @@ fn spawn_pirep_queue_worker(app: AppHandle) {
                             ),
                             Some(format!("Nach {} Versuch(en) — Verbindung war wieder da", q.attempt_count)),
                         );
-                        // Best-effort Bid-Cleanup
-                        consume_bid_best_effort(&client, q.bid_id).await;
+                        // Best-effort Bid-Cleanup. v0.7.19 (QS-R1 Finding 1):
+                        // transientes Scheitern landet in pending_bid_cleanup
+                        // und wird im naechsten Tick erneut probiert.
+                        consume_bid_best_effort(
+                            &app, &client, &q.pirep_id, q.bid_id, "queued_filed",
+                        ).await;
+                        // Selber Tick: Pending-Bid-Cleanup-Queue drainen
+                        drain_pending_bid_cleanup(&app, &client).await;
                         // Best-effort: JSONL-Upload (wenn das Recorder-File noch da ist)
                         spawn_flight_log_upload(&app, q.pirep_id.clone());
                     }
@@ -9380,11 +9417,61 @@ async fn flight_end(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
     divert_to: Option<String>,
+    accident_decision: Option<String>,
 ) -> Result<(), UiError> {
     let divert_to = divert_to
         .as_deref()
         .map(|s| s.trim().to_uppercase())
         .filter(|s| !s.is_empty());
+
+    // v0.7.19 GAF-707 (QS-R1 Finding 3): Pilot-Override-Pfad. Werte:
+    // - None / "auto"        → Stats-Werte bleiben unveraendert.
+    //   Pilot bestaetigt im Dialog dass die Klassifikation stimmt.
+    // - "as_accident"        → wie None, expliziter "ja, war Unfall"-
+    //   Klick. Wird nicht ueberschrieben, nur fuer Audit-Notes geloggt.
+    // - "as_hard_landing"    → Pilot widerspricht der Klassifikation
+    //   und filed den Flug als regulaere Landung. Setzt
+    //   stats.accident_detected=false, kind/confidence=None,
+    //   ergaenzt reasons um "pilot_override=as_hard_landing(...)".
+    //   Die Notes/Custom-Fields zeigen den Override transparent.
+    //
+    // Spec §Active Flight / Flight End "Nein, als harte Landung
+    // behandeln".
+    let accident_decision = accident_decision
+        .as_deref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if let Some(decision) = accident_decision.as_deref() {
+        if decision == "as_hard_landing" {
+            let guard = state.active_flight.lock().expect("active_flight lock");
+            if let Some(flight) = guard.as_ref() {
+                let mut stats = flight.stats.lock().expect("flight stats");
+                if stats.accident_detected
+                    || stats.accident_confidence.as_deref() == Some("medium")
+                {
+                    let prev_kind = stats.accident_kind.clone().unwrap_or_default();
+                    let prev_reasons = stats.accident_reasons.join(", ");
+                    stats.accident_detected = false;
+                    stats.accident_kind = None;
+                    stats.accident_confidence = None;
+                    stats.accident_reasons = vec![format!(
+                        "pilot_override=as_hard_landing (was: {prev_kind}; reasons: {prev_reasons})"
+                    )];
+                    // accident_at wird NICHT geloescht — Audit-Spur fuer den
+                    // Override-Zeitpunkt bleibt. Notes-Builder ignoriert sie
+                    // wenn accident_detected=false.
+                    log_activity(
+                        &state,
+                        ActivityLevel::Warn,
+                        "Pilot hat Accident-Klassifikation widersprochen — filing als harte Landung".to_string(),
+                        Some(format!(
+                            "Vorherige Klassifikation: kind={prev_kind}, reasons=[{prev_reasons}]"
+                        )),
+                    );
+                }
+            }
+        }
+    }
 
     // Pull the arrival ICAO so we can resolve its coords without holding
     // the active_flight lock across the network call.
@@ -9724,7 +9811,10 @@ async fn flight_end(
         // Divert-Info ist im PirepPayload (divert + diverted_to) und kommt
         // automatisch beim Recorder an wenn der MQTT-PIREP-Event publisht.
         // Audit Q4-2026-05 (C1).
-        consume_bid_best_effort(&client, flight.bid_id).await;
+        // v0.7.19 (QS-R1 Finding 1): Bei delete_bid-fail in pending_bid_cleanup.
+        consume_bid_best_effort(
+            &app, &client, &flight.pirep_id, flight.bid_id, "divert_filed",
+        ).await;
         // Drop the in-memory active flight: divert is finalized.
         let _ = state.active_flight.lock().expect("active_flight lock").take();
         return Ok(());
@@ -9951,6 +10041,36 @@ async fn flight_end(
                                 );
                                 reason.map(String::from)
                             },
+                            // v0.7.19 GAF-707 Accident-Detection (QS-R1
+                            // Finding 2): PIREP-Payload bekommt die
+                            // gelatchten Accident-Felder. Sentinel
+                            // (`accident_classifier_version`) wird IMMER
+                            // gesetzt — auch ohne Accident — damit die
+                            // VPS-History v0.7.19+ vs historische PIREPs
+                            // unterscheiden kann.
+                            accident_classifier_version: Some(
+                                accident::ACCIDENT_CLASSIFIER_VERSION.into(),
+                            ),
+                            accident: if stats.accident_detected {
+                                Some(true)
+                            } else {
+                                None
+                            },
+                            accident_kind: stats.accident_kind.clone(),
+                            accident_confidence: stats
+                                .accident_confidence
+                                .clone(),
+                            accident_reasons: if stats
+                                .accident_reasons
+                                .is_empty()
+                            {
+                                None
+                            } else {
+                                Some(stats.accident_reasons.clone())
+                            },
+                            accident_at: stats
+                                .accident_at
+                                .map(|t| t.timestamp_millis()),
                         }
                     };
                     // v0.5.34: PIREP-Forensik ins JSONL — Block/Flight-Time,
@@ -9994,7 +10114,18 @@ async fn flight_end(
             // Session abrufen kann. Fire-and-forget, blockt PIREP-File
             // nicht — Failure landet nur im Log.
             spawn_flight_log_upload(&app, flight.pirep_id.clone());
-            consume_bid_best_effort(&client, flight.bid_id).await;
+            // v0.7.19 (QS-R1 Finding 1): Bei delete_bid-fail wird der Bid
+            // in pending_bid_cleanup eingereiht und vom Background-Worker
+            // retried — keine haengenden Aircraft/Bid mehr nach Accident-
+            // FILED. Reason-String spiegelt die Filing-Variante.
+            let bid_reason = if flight.stats.lock().expect("stats lock").accident_detected {
+                "accident_filed"
+            } else {
+                "normal_filed"
+            };
+            consume_bid_best_effort(
+                &app, &client, &flight.pirep_id, flight.bid_id, bid_reason,
+            ).await;
             Ok(())
         }
         Err(e) => {
@@ -10082,22 +10213,148 @@ async fn flight_end(
 
 /// Best-effort: drop the bid that was used for this flight. phpVMS does NOT
 /// auto-consume bids on PIREP file, so without this the booked flight stays
-/// in the pilot's bid list even after Accepted. A failure here is non-fatal
-/// — the user can clean up via the phpVMS UI if needed.
-async fn consume_bid_best_effort(client: &Client, bid_id: i64) {
+/// in the pilot's bid list even after Accepted.
+///
+/// v0.7.19 GAF-707 (QS-R1 Finding 1): Bei transientem Fehler wird der
+/// Bid-Drop in die persistente `PendingBidCleanupQueue` enqueued — der
+/// Background-Worker retried das spaeter. So bleibt nach Accident-FILED
+/// kein Aircraft + Bid auf phpVMS haengen wenn der delete_bid-Aufruf
+/// transient versagt (Netz weg, 5xx). Spec §Pending Bid Cleanup Queue.
+async fn consume_bid_best_effort(
+    app: &AppHandle,
+    client: &Client,
+    pirep_id: &str,
+    bid_id: i64,
+    reason: &str,
+) {
     if bid_id <= 0 {
         return;
     }
-    // v0.7.18 (B-011): delete_bid Signatur erweitert um optionalen
-    // flight_id-Fallback. Hier (consume_bid_best_effort) reicht der
-    // bid_id-Pfad — flight_id wird nur im Orphan-Cleanup-Flow gebraucht.
     match client.delete_bid(Some(bid_id), None).await {
         Ok(()) => tracing::info!(bid_id, "bid removed after PIREP filing"),
-        Err(e) => tracing::warn!(
-            bid_id,
+        Err(e) => {
+            tracing::warn!(
+                bid_id,
+                pirep_id,
+                error = %e,
+                "delete_bid failed — enqueueing for pending_bid_cleanup retry"
+            );
+            enqueue_pending_bid_cleanup(app, pirep_id, Some(bid_id), None, reason);
+        }
+    }
+}
+
+/// v0.7.19 GAF-707: Helper-Wrapper um PendingBidCleanupQueue::enqueue
+/// damit Caller nicht das app_data_dir aufloesen muessen. Schluckt
+/// alle I/O-Fehler (warn-log) — diese Queue ist ein Best-Effort-Backup
+/// fuer den primaeren delete_bid-Pfad und darf NIE den File-Flow
+/// brechen.
+fn enqueue_pending_bid_cleanup(
+    app: &AppHandle,
+    pirep_id: &str,
+    bid_id: Option<i64>,
+    flight_id: Option<String>,
+    reason: &str,
+) {
+    let Ok(dir) = app.path().app_data_dir() else {
+        tracing::warn!(
+            pirep_id,
+            "pending_bid_cleanup: konnte app_data_dir nicht aufloesen — Eintrag verloren"
+        );
+        return;
+    };
+    let queue = match storage::PendingBidCleanupQueue::open(dir) {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::warn!(
+                pirep_id,
+                error = %e,
+                "pending_bid_cleanup: konnte Queue nicht oeffnen"
+            );
+            return;
+        }
+    };
+    let entry = storage::PendingBidCleanup {
+        pirep_id: pirep_id.to_string(),
+        bid_id,
+        flight_id,
+        reason: reason.to_string(),
+        created_at: Utc::now(),
+        last_attempt_at: None,
+        attempts: 0,
+    };
+    if let Err(e) = queue.enqueue(entry) {
+        tracing::warn!(
+            pirep_id,
             error = %e,
-            "could not remove bid after PIREP filing — please clean up manually"
-        ),
+            "pending_bid_cleanup: enqueue fehlgeschlagen"
+        );
+    } else {
+        tracing::info!(
+            pirep_id,
+            bid_id = ?bid_id,
+            reason,
+            "pending_bid_cleanup: Eintrag persistiert fuer Background-Retry"
+        );
+    }
+}
+
+/// v0.7.19 GAF-707: drain-Pass fuer den PendingBidCleanupQueue. Wird im
+/// spawn_pirep_queue_worker-Tick mit aufgerufen (selbe 60s-Frequenz).
+/// Cap auf 8 Versuche pro Eintrag, danach bleibt der Eintrag liegen
+/// und wird ueber den B-011 Orphan-Cleanup-Flow sichtbar.
+async fn drain_pending_bid_cleanup(app: &AppHandle, client: &Client) {
+    const MAX_ATTEMPTS: u32 = 8;
+    let Ok(dir) = app.path().app_data_dir() else { return; };
+    let Ok(queue) = storage::PendingBidCleanupQueue::open(dir) else { return; };
+    let entries = match queue.read_all() {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, "pending_bid_cleanup drain: read_all failed");
+            return;
+        }
+    };
+    if entries.is_empty() {
+        return;
+    }
+    tracing::info!(count = entries.len(), "pending_bid_cleanup drain tick");
+
+    let mut survivors: Vec<storage::PendingBidCleanup> = Vec::new();
+    for mut e in entries {
+        if e.attempts >= MAX_ATTEMPTS {
+            tracing::warn!(
+                pirep_id = %e.pirep_id,
+                attempts = e.attempts,
+                "pending_bid_cleanup: max attempts reached — leaving in queue for orphan-cleanup UI"
+            );
+            survivors.push(e);
+            continue;
+        }
+        e.attempts += 1;
+        e.last_attempt_at = Some(Utc::now());
+        match client.delete_bid(e.bid_id, e.flight_id.as_deref()).await {
+            Ok(()) => {
+                tracing::info!(
+                    pirep_id = %e.pirep_id,
+                    attempts = e.attempts,
+                    reason = %e.reason,
+                    "pending_bid_cleanup: delete_bid succeeded — Eintrag entfernt"
+                );
+                // Eintrag NICHT in survivors aufnehmen → wird gedroppt.
+            }
+            Err(err) => {
+                tracing::warn!(
+                    pirep_id = %e.pirep_id,
+                    attempt = e.attempts,
+                    error = %err,
+                    "pending_bid_cleanup: delete_bid failed — bleibt in Queue"
+                );
+                survivors.push(e);
+            }
+        }
+    }
+    if let Err(e) = queue.replace(&survivors) {
+        tracing::warn!(error = %e, "pending_bid_cleanup drain: queue write failed");
     }
 }
 
@@ -10408,7 +10665,10 @@ async fn flight_end_manual(
                     outcome: FlightOutcome::Manual,
                 },
             );
-            consume_bid_best_effort(&client, flight.bid_id).await;
+            // v0.7.19 (QS-R1 Finding 1).
+            consume_bid_best_effort(
+                &app, &client, &flight.pirep_id, flight.bid_id, "manual_filed",
+            ).await;
             Ok(())
         }
         Err(e) => {
@@ -10480,7 +10740,7 @@ async fn flight_cancel(
         //                             Kein Auto-Cancel mehr (R2-1 UX-Fix).
         //                             active_flight bleibt erhalten, Pilot
         //                             entscheidet im Frontend nochmal.
-        match flight_end(app.clone(), state.clone(), None).await {
+        match flight_end(app.clone(), state.clone(), None, None).await {
             Ok(()) => {
                 // flight_end hat erfolgreich gefilt ODER gequeued. In
                 // beiden Faellen ist active_flight geleert, der PIREP

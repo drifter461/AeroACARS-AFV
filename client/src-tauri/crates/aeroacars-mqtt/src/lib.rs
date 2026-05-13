@@ -746,6 +746,31 @@ pub struct PirepPayload {
     /// - "negative_float_distance"   — < -100 m
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runway_geometry_reason: Option<String>,
+
+    // ─── v0.7.19 GAF-707 Accident-Detection ──────────────────────────
+    //
+    // Spec docs/spec/v0.7.19-gaf707-crash-accident-detection.md §PIREP-
+    // Payload. Webapp-PIREP-Feed muss auf PIREP-Ebene erkennen koennen
+    // ob ein Flug als Accident eingestuft wurde — sonst kann die VPS-
+    // History nur die einzelnen Touchdowns markieren, der PIREP-Eintrag
+    // bleibt aber unauffaellig. Das ist genau der Worst-Case bei Multi-
+    // Touchdown-Fluegen (T&G + finaler Crash).
+    //
+    // `accident_classifier_version` (Sentinel) wird IMMER gesetzt — auch
+    // wenn kein Accident erkannt wurde. Webapp unterscheidet damit
+    // "Classifier lief, false" von "historischer Payload".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accident_classifier_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accident: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accident_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accident_confidence: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accident_reasons: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accident_at: Option<i64>,
 }
 
 /// Default fuer pre-v0.7.0 PIREPs ohne den marker. Wird von serde

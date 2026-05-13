@@ -460,4 +460,75 @@ mod tests {
         assert!(n.contains("vs_at_edge_fpm=-2249.9"));
         assert!(n.contains("no_runway_match"));
     }
+
+    // ─── Fixture-Replay (QS-R1 Finding 6) ──────────────────────────
+    //
+    // Echte Payloads aus dem GAF-707-Pilot-Export 2026-05-13. Crash =
+    // touchdown id 127 (vs=-2250 fpm, 4.41 G, sideslip=-115°, no runway).
+    // Control = touchdown id 113 aus demselben Export, normale Landung
+    // bei UMKK (vs=-232 fpm, 1.30 G, sideslip=-2.5°, runway match).
+    //
+    // Zweck: beweisen, dass die Heuristik tatsaechlich diskriminiert
+    // und nicht alle Score-0/Hart-Landungen blind als Accident
+    // markiert. Wenn jemand spaeter die Schwellen in classify_accident_
+    // heuristic anfasst, falt einer dieser Tests.
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    struct FixturePayload {
+        vs_at_edge_fpm: Option<f32>,
+        peak_g_load: Option<f32>,
+        sideslip_deg: Option<f32>,
+        landing_wing_strike_severity_pct: Option<f32>,
+        approach_stall_warning_count: Option<u32>,
+        runway_match_icao: Option<String>,
+        rollout_distance_m: Option<f32>,
+    }
+
+    fn fixture_to_input(p: &FixturePayload) -> AccidentHeuristicInput {
+        AccidentHeuristicInput {
+            vs_at_edge_fpm: p.vs_at_edge_fpm,
+            peak_g_load: p.peak_g_load,
+            sideslip_deg: p.sideslip_deg,
+            landing_wing_strike_severity_pct: p.landing_wing_strike_severity_pct,
+            approach_stall_warning_count: p.approach_stall_warning_count,
+            runway_match_found: Some(p.runway_match_icao.is_some()),
+            rollout_distance_m: p.rollout_distance_m,
+        }
+    }
+
+    #[test]
+    fn fixture_gaf707_crash_is_confirmed_accident() {
+        let raw = include_str!("../tests/fixtures/gaf707-crash-touchdown.json");
+        let payload: FixturePayload = serde_json::from_str(raw).expect("fixture parses");
+        let input = fixture_to_input(&payload);
+        let decision = classify_accident_heuristic(&input);
+        match decision {
+            AccidentDecision::Confirmed { kind, reasons } => {
+                // Path 1 (extreme impact) gewinnt das kind-Tag.
+                assert!(matches!(kind, AccidentKind::Impact));
+                assert!(reasons.iter().any(|r| r.contains("peak_g_load")));
+                assert!(reasons.iter().any(|r| r.contains("no_runway_match")));
+            }
+            other => panic!(
+                "GAF 707 crash fixture should be Confirmed(Impact), got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn fixture_gaf707_control_is_not_accident() {
+        // Aus demselben Export: regulaere Landung bei UMKK. Wenn die
+        // Heuristik HIER false-positive markiert, sind die Schwellen
+        // zu locker.
+        let raw = include_str!("../tests/fixtures/gaf707-control-touchdown.json");
+        let payload: FixturePayload = serde_json::from_str(raw).expect("fixture parses");
+        let input = fixture_to_input(&payload);
+        let decision = classify_accident_heuristic(&input);
+        assert_eq!(
+            decision,
+            AccidentDecision::None,
+            "control fixture must not be classified as accident"
+        );
+    }
 }
