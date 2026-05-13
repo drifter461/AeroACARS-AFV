@@ -10439,11 +10439,13 @@ async fn flight_cancel(
         //   - file_pirep_with_retry (3 attempts, transient → pirep_queue)
         //   - record_landing + activity_log + record_event + MQTT publish
         //
-        // Outcome-Mapping (siehe Spec):
-        //   Ok(())                              → Filed ODER Queued (beide OK aus Cancel-Sicht)
-        //   Err(code="blocked")                 → Err propagieren (B-007 Account-Sperre)
-        //   Err(code="flight_validation_failed") → fallthrough zum Cancel-Pfad
-        //   Err(andere)                          → fallthrough zum Cancel-Pfad
+        // Outcome-Mapping (siehe Spec + R2-1):
+        //   Ok(())                  → Filed ODER Queued (beide OK aus Cancel-Sicht)
+        //   Err(code="blocked")     → Err propagieren (B-007 Account-Sperre)
+        //   Err(andere Hard-Fails)  → Err mit code="file_first_failed".
+        //                             Kein Auto-Cancel mehr (R2-1 UX-Fix).
+        //                             active_flight bleibt erhalten, Pilot
+        //                             entscheidet im Frontend nochmal.
         match flight_end(app.clone(), state.clone(), None).await {
             Ok(()) => {
                 // flight_end hat erfolgreich gefilt ODER gequeued. In
@@ -10496,20 +10498,41 @@ async fn flight_cancel(
                 return Err(e);
             }
             Err(e) => {
-                // Validierungs-/Hard-Fehler. flight_end hat state.active_flight
-                // NICHT geleert (Validation kommt vor guard.take()). Fällt
-                // durch zum cancel-Pfad unten.
+                // v0.7.18 (R2-1): Validierungs-/Hard-Fehler beim Auto-File.
+                // Wir fallen NICHT mehr automatisch in den Cancel-Pfad —
+                // der Pilot hat "Lieber filen versuchen" geklickt, nicht
+                // "bei Fehler trotzdem verwerfen". Das wäre UX-seitig eine
+                // versteckte destruktive Aktion.
+                //
+                // state.active_flight bleibt erhalten (flight_end macht
+                // guard.take() nur bei Success), also kann der Pilot:
+                //   1. den Fehler beheben + erneut filen,
+                //   2. den Cancel-Button nochmal drücken und im zweiten
+                //      Dialog explizit "Trotzdem verwerfen" wählen.
+                //
+                // Frontend (ActiveFlightPanel) catched code="file_first_failed"
+                // und zeigt den zweiten Confirm-Dialog.
                 tracing::warn!(
                     code = e.code,
-                    "flight_cancel: File-First fehlgeschlagen, falle durch zum Cancel-Pfad"
+                    "flight_cancel: File-First fehlgeschlagen, gebe an UI zurueck statt Auto-Cancel"
                 );
                 log_activity(
                     &state,
                     ActivityLevel::Warn,
-                    format!("Auto-File vor Cancel fehlgeschlagen ({}) — PIREP wird jetzt abgebrochen", e.code),
+                    format!(
+                        "Auto-File vor Cancel fehlgeschlagen ({}) — Pilot muss erneut bestätigen",
+                        e.code
+                    ),
                     Some(format!("{e:?}")),
                 );
-                // Fall through.
+                return Err(UiError::new(
+                    "file_first_failed",
+                    format!(
+                        "Filen-Versuch vor Cancel fehlgeschlagen: {} ({}). \
+                         Bitte beheben und erneut filen, oder explizit verwerfen.",
+                        e.message, e.code
+                    ),
+                ));
             }
         }
     }
@@ -10578,9 +10601,11 @@ pub enum FlightCancelOutcome {
     /// produziert — PIREP liegt jetzt in der pirep_queue für Background-
     /// Retry. Cancel hat NICHT stattgefunden (sonst Datenverlust).
     Queued { pirep_id: String },
-    /// Pilot hat explizit „Trotzdem verwerfen" gewählt ODER File-First
-    /// scheiterte mit HardFailed (Validierung) → regulärer Cancel-Pfad
-    /// ist gelaufen, PIREP ist CANCELLED auf phpVMS.
+    /// Pilot hat explizit „Trotzdem verwerfen" gewählt (force=true ODER
+    /// nicht-finalisierbarer Flug). Regulärer Cancel-Pfad ist gelaufen,
+    /// PIREP ist CANCELLED auf phpVMS. (R2-1: File-First-HardFail führt
+    /// hier NICHT mehr automatisch hin — der Pilot muss explizit zweiten
+    /// Confirm-Dialog bestätigen.)
     Cancelled { pirep_id: String },
 }
 
@@ -19770,6 +19795,51 @@ pub fn run() {
 // a full `ActiveFlight` setup. The integration coverage comes from
 // real in-sim flights against a dev-server PIREP.
 // ----------------------------------------------------------------------
+
+// ----------------------------------------------------------------------
+// v0.7.18 (B-014 / R2-3): FlightCancelOutcome wire-format guard.
+//
+// Das tagged-union JSON-Format (`{ "kind": "filed_instead", "pirep_id": ... }`)
+// ist die Schnittstelle zur Tauri-Frontend. ActiveFlightPanel.tsx machted
+// auf den `kind`-Strings — wenn jemand die Serde-Attribute ändert (Tag-
+// Name, snake_case, Variant-Renames) bricht das stillschweigend die
+// Cancel-Flow-UX. Dieser Test hält die drei Wire-Shapes fest.
+// ----------------------------------------------------------------------
+#[cfg(test)]
+mod flight_cancel_outcome_wire_format_tests {
+    use super::*;
+
+    #[test]
+    fn filed_instead_serializes_with_snake_case_kind() {
+        let v = FlightCancelOutcome::FiledInstead {
+            pirep_id: "pirep_123".into(),
+        };
+        let json: serde_json::Value = serde_json::to_value(v).unwrap();
+        assert_eq!(json["kind"], "filed_instead");
+        assert_eq!(json["pirep_id"], "pirep_123");
+    }
+
+    #[test]
+    fn queued_serializes_with_snake_case_kind() {
+        let v = FlightCancelOutcome::Queued {
+            pirep_id: "pirep_456".into(),
+        };
+        let json: serde_json::Value = serde_json::to_value(v).unwrap();
+        assert_eq!(json["kind"], "queued");
+        assert_eq!(json["pirep_id"], "pirep_456");
+    }
+
+    #[test]
+    fn cancelled_serializes_with_snake_case_kind() {
+        let v = FlightCancelOutcome::Cancelled {
+            pirep_id: "pirep_789".into(),
+        };
+        let json: serde_json::Value = serde_json::to_value(v).unwrap();
+        assert_eq!(json["kind"], "cancelled");
+        assert_eq!(json["pirep_id"], "pirep_789");
+    }
+}
+
 #[cfg(test)]
 mod touch_and_go_go_around_tests {
     use super::*;

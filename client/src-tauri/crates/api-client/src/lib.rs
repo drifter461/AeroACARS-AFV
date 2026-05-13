@@ -1203,10 +1203,16 @@ impl Client {
         //
         // v0.7.18 (B-011): Signatur akzeptiert beide IDs als Option.
         // Aufruf-Logik:
-        //   - bid_id Some → erster Versuch `{ bid_id }`. Bei 422/400
+        //   - bid_id Some → erster Versuch `{ bid_id }`. Bei 400/404/422
         //     UND flight_id Some → zweiter Versuch `{ flight_id }`.
         //   - bid_id None, flight_id Some → direkt `{ flight_id }`.
         //   - beide None → InvalidUrl-Error (Caller-Bug).
+        //
+        // v0.7.18 (R2-2): 404 in den Fallback aufgenommen. Wenn die VA
+        // den bid_id-Wert serverseitig schon nicht mehr kennt (verwaister
+        // PIREP, Bid wurde manuell gedroppt etc.), liefert phpVMS 404 statt
+        // 422. Der flight_id-Pfad ist dann der einzige Weg den Bid zu
+        // droppen — genau der Orphan-Cleanup-Fall den B-011 fixt.
         //
         // Manche VAs liefern in `PirepSummary` kein `bid_id`, dann ist
         // der flight_id-Pfad der einzige Weg den Bid serverseitig zu
@@ -1235,11 +1241,11 @@ impl Client {
                 .await
                 .map_err(ApiError::from)?;
             let status = response.status();
-            // Bei 422/400 (Validation-Fehler vom phpVMS-Plugin) und
-            // wenn ein flight_id-Fallback verfuegbar ist: Versuch 2.
-            // Bei allen anderen Status-Codes (inkl. 2xx) durch
-            // check_status laufen lassen.
-            if (status.as_u16() == 422 || status.as_u16() == 400) && flight_id.is_some() {
+            // Bei 400/404/422 (Validation-Fehler oder „bid nicht gefunden"
+            // vom phpVMS-Plugin) und wenn ein flight_id-Fallback verfuegbar
+            // ist: Versuch 2. Bei allen anderen Status-Codes (inkl. 2xx)
+            // durch check_status laufen lassen.
+            if matches!(status.as_u16(), 400 | 404 | 422) && flight_id.is_some() {
                 tracing::info!(
                     bid_id,
                     status = status.as_u16(),
@@ -2042,5 +2048,76 @@ mod tests {
         "#;
         let ofp = parse_simbrief_ofp(xml).expect("parses");
         assert_eq!(ofp.request_id, "");
+    }
+
+    // ── v0.7.18 (B-011 / R2-3): PirepSummary Regression-Guards ───────
+    //
+    // get_user_pireps() ist der Datenpfad für den Orphan-Cleanup-Cluster
+    // (B-011). Wenn nur ein einziger PIREP im Response-Array beim Parsen
+    // failt, schlägt der ganze Aufruf fehl → Pilot sieht keine Orphans.
+    // Diese Tests sichern die drei Shape-Varianten ab, die wir in der
+    // Wild bei phpVMS-Installationen gesehen haben.
+
+    /// flight_id als String — canonical phpVMS-Shape.
+    #[test]
+    fn pirep_summary_parses_string_flight_id() {
+        let json = r#"{
+            "id": "pirep_abc",
+            "flight_id": "flightid_42"
+        }"#;
+        let p: PirepSummary = serde_json::from_str(json).expect("parses");
+        assert_eq!(p.id, "pirep_abc");
+        assert_eq!(p.flight_id.as_deref(), Some("flightid_42"));
+    }
+
+    /// flight_id als Integer — manche VAs liefern numeric IDs (R1-3
+    /// QS-Fix: deserialize_with = "de_opt_str_or_int"). Ohne den
+    /// Deserializer wäre der ganze Array-Parse aus get_user_pireps()
+    /// gebrochen.
+    #[test]
+    fn pirep_summary_parses_integer_flight_id() {
+        let json = r#"{
+            "id": "pirep_abc",
+            "flight_id": 4711
+        }"#;
+        let p: PirepSummary = serde_json::from_str(json).expect("parses");
+        assert_eq!(p.flight_id.as_deref(), Some("4711"));
+    }
+
+    /// flight_id fehlend — Forward-/Backward-Compat für VAs ohne das
+    /// Feld. Darf nicht failen, sondern Option::None liefern.
+    #[test]
+    fn pirep_summary_parses_missing_flight_id_as_none() {
+        let json = r#"{
+            "id": "pirep_abc"
+        }"#;
+        let p: PirepSummary = serde_json::from_str(json).expect("parses");
+        assert_eq!(p.flight_id, None);
+    }
+
+    /// Voller IN_PROGRESS-Orphan wie ihn flight_list_orphans erwartet —
+    /// state=0, alle B-011-Felder dabei. Stellt sicher dass das Frontend
+    /// genug Kontext hat um den Cancel-Button anzuzeigen.
+    #[test]
+    fn pirep_summary_parses_in_progress_orphan_shape() {
+        let json = r#"{
+            "id": "pirep_orphan_1",
+            "state": 0,
+            "status": "ENR",
+            "flight_id": "flight_xyz",
+            "airline_id": 1,
+            "flight_number": "GSG123",
+            "dpt_airport_id": "EDDF",
+            "arr_airport_id": "LEBL",
+            "aircraft_icao": "B738",
+            "aircraft_registration": "D-AGSG"
+        }"#;
+        let p: PirepSummary = serde_json::from_str(json).expect("parses");
+        assert_eq!(p.state, Some(0));
+        assert_eq!(p.status.as_deref(), Some("ENR"));
+        assert_eq!(p.flight_id.as_deref(), Some("flight_xyz"));
+        assert_eq!(p.flight_number.as_deref(), Some("GSG123"));
+        assert_eq!(p.aircraft_icao.as_deref(), Some("B738"));
+        assert_eq!(p.aircraft_registration.as_deref(), Some("D-AGSG"));
     }
 }

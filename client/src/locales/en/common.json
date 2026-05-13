@@ -835,6 +835,8 @@
     "cancel_filed_instead": "✓ Flight was filed instead of discarded — PIREP {{pirep_id}}",
     "cancel_queued": "⏳ Auto-file queued — will be submitted automatically once connection is back. PIREP {{pirep_id}}",
     "cancel_blocked": "phpVMS rejects your requests — account suspended or inactive. Please contact your VA admin, then try again.",
+    "confirm_cancel_after_file_failed_title": "Filing failed — discard anyway?",
+    "confirm_cancel_after_file_failed_body": "The auto-file attempt did not succeed:\n\n{{reason}}\n\nYou can fix the issue and try filing again, or explicitly discard the PIREP now. Discarding deletes the PIREP — the flown route will be lost.",
     "forget": "Forget locally",
     "forgetting": "Forgetting…",
     "forget_hint": "Drop local flight state without contacting phpVMS — useful if the PIREP is already gone server-side.",

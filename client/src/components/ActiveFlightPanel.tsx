@@ -143,6 +143,25 @@ export function ActiveFlightPanel({ info, simSnapshot, onEnded }: Props) {
           : String(err);
       if (code === "blocked") {
         setError(t("active_flight.cancel_blocked"));
+      } else if (code === "file_first_failed") {
+        // v0.7.18 (R2-1): File-First-Versuch ist hart fehlgeschlagen.
+        // Backend hat NICHT automatisch gecancelt — Pilot hatte „filen
+        // versuchen" gewaehlt, nicht „bei Fehler trotzdem verwerfen".
+        // Wir zeigen jetzt explizit den zweiten Confirm: „Filen ist
+        // gescheitert (Grund). Trotzdem verwerfen?"
+        const really = await confirm({
+          title: t("active_flight.confirm_cancel_after_file_failed_title"),
+          message: t("active_flight.confirm_cancel_after_file_failed_body", {
+            reason: msg,
+          }),
+          confirmLabel: t("active_flight.confirm_cancel_force_yes"),
+          cancelLabel: t("active_flight.confirm_cancel_force_back"),
+          destructive: true,
+        });
+        if (really) {
+          // force=true bypasst File-First → direkter Cancel.
+          await invokeCancelOrForce(true);
+        }
       } else {
         setError(msg);
       }

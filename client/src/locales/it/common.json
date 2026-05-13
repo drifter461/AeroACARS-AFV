@@ -836,6 +836,8 @@
     "cancel_filed_instead": "✓ Il volo è stato inviato invece di scartato — PIREP {{pirep_id}}",
     "cancel_queued": "⏳ Invio in coda — sarà inviato automaticamente quando la connessione torna. PIREP {{pirep_id}}",
     "cancel_blocked": "phpVMS rifiuta le tue richieste — account sospeso o inattivo. Contatta l'admin VA, poi riprova.",
+    "confirm_cancel_after_file_failed_title": "Filing fallito — annullare comunque?",
+    "confirm_cancel_after_file_failed_body": "Il tentativo di auto-filing non è riuscito:\n\n{{reason}}\n\nPuoi correggere il problema e ritentare il filing, oppure annullare esplicitamente il PIREP ora. L'annullamento elimina il PIREP — la rotta volata andrà persa.",
     "forget": "Dimentica localmente",
     "forgetting": "Dimenticando…",
     "forget_hint": "Scarta lo stato locale del volo senza contattare phpVMS — es. quando il PIREP lato server è già sparito.",

@@ -835,6 +835,8 @@
     "cancel_filed_instead": "✓ Statt verworfen wurde der Flug ordentlich eingereicht — PIREP {{pirep_id}}",
     "cancel_queued": "⏳ Auto-File wartet in der Queue — wird automatisch eingereicht sobald die Verbindung wieder steht. PIREP {{pirep_id}}",
     "cancel_blocked": "phpVMS lehnt deine Anfragen ab — Account gesperrt oder inaktiv. Bitte VA-Admin kontaktieren, dann erneut versuchen.",
+    "confirm_cancel_after_file_failed_title": "Filen ist fehlgeschlagen — trotzdem verwerfen?",
+    "confirm_cancel_after_file_failed_body": "Der Auto-File-Versuch hat nicht funktioniert:\n\n{{reason}}\n\nDu kannst den Fehler beheben und erneut filen, oder den PIREP jetzt explizit verwerfen. Verwerfen löscht den PIREP — die geflogene Strecke ist dann verloren.",
     "forget": "Lokal vergessen",
     "forgetting": "Vergesse…",
     "forget_hint": "Lokalen Flug-Status verwerfen ohne phpVMS zu kontaktieren — z. B. wenn der PIREP serverseitig schon weg ist.",
