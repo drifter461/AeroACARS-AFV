@@ -344,54 +344,51 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
             </title>
           </g>
 
-          {/* TDZ-Box (Schraffur-Pattern). */}
+          {/* TDZ-Marker — ICAO Annex 14 zeigt die Aufsetzzone als PAARE
+              von weißen Querstreifen entlang der Centerline (bei 150 m,
+              300 m, 450 m, ... innerhalb der TDZ-Länge). Wir rendern
+              genau das statt einer flächigen gelben Schraffur, damit
+              die Optik dem entspricht, was ein Pilot auf einer echten
+              Bahn sieht. Plus dünner gelber Rahmen markiert die
+              TDZ-Grenze. */}
           {tdzEndX != null && tdzEndX > padX + 24 && (
             <g>
-              <defs>
-                <pattern
-                  id="tdz-hatch"
-                  patternUnits="userSpaceOnUse"
-                  width="10"
-                  height="10"
-                  patternTransform="rotate(45)"
-                >
-                  <line
-                    x1="0"
-                    y1="0"
-                    x2="0"
-                    y2="10"
-                    stroke={TOKENS.tdzStroke}
-                    strokeWidth="2"
-                  />
-                </pattern>
-              </defs>
+              {/* Subtiler gelber Rahmen, kein Fill */}
               <rect
                 x={padX + 24}
-                y={rwyTop + 30}
+                y={rwyTop + 28}
                 width={tdzEndX - padX - 24}
-                height={innerH - 60}
-                fill="url(#tdz-hatch)"
-              />
-              <rect
-                x={padX + 24}
-                y={rwyTop + 30}
-                width={tdzEndX - padX - 24}
-                height={innerH - 60}
-                fill={TOKENS.tdzFill}
+                height={innerH - 56}
+                fill="none"
                 stroke={TOKENS.tdzStroke}
-                strokeDasharray="6,5"
-                strokeWidth="1"
+                strokeDasharray="5,4"
+                strokeWidth="1.2"
+                opacity="0.7"
               >
                 <title>
                   Aufsetzzone (Touchdown Zone, TDZ): erste {props.td_tdz_length_m?.toFixed(0)} m
                   der Bahn. Soll-Aufsetz-Bereich nach ICAO Annex 14.
                 </title>
               </rect>
+              {/* Weiße TDZ-Streifen-Paare entlang der Centerline */}
+              {[150, 300, 450, 600, 750, 900]
+                .filter((d) => d < (props.td_tdz_length_m ?? 0))
+                .map((d) => {
+                  const mx = mToX(d);
+                  return (
+                    <g key={d}>
+                      <rect x={mx - 14} y={rwyCl - 14} width={10} height={6} fill="rgba(255,255,255,0.85)" />
+                      <rect x={mx + 4} y={rwyCl - 14} width={10} height={6} fill="rgba(255,255,255,0.85)" />
+                      <rect x={mx - 14} y={rwyCl + 8} width={10} height={6} fill="rgba(255,255,255,0.85)" />
+                      <rect x={mx + 4} y={rwyCl + 8} width={10} height={6} fill="rgba(255,255,255,0.85)" />
+                    </g>
+                  );
+                })}
               <text
                 x={padX + 24 + (tdzEndX - padX - 24) / 2}
                 y={rwyTop + 18}
                 fontSize="12"
-                fill="#fde68a"
+                fill={TOKENS.tdzStroke}
                 fontWeight="700"
                 fontFamily="monospace"
                 textAnchor="middle"
@@ -491,6 +488,67 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
               />
             </g>
           )}
+
+          {/* "Bahn verbleibend X m" — Annotation im leeren Bereich
+              hinter dem Exit-Punkt. Übernommen aus dem Pilot-Client-
+              Legacy-Layout, weil Piloten dort sofort sehen wie viel
+              Bahn sie verschenkt haben. Nur wenn nach Exit noch
+              sinnvoller Platz auf der Bahn ist (≥ 200 m). */}
+          {exitX != null &&
+            props.rollout_m != null &&
+            lengthM - (props.td_distance_from_threshold_m + props.rollout_m) >= 200 && (
+              <g>
+                {/* Vertikale Linie an der "Bahn-Ende"-Position */}
+                <line
+                  x1={padX + innerW - 4}
+                  y1={rwyTop + 6}
+                  x2={padX + innerW - 4}
+                  y2={rwyBot - 6}
+                  stroke="rgba(255,255,255,0.55)"
+                  strokeWidth="2"
+                />
+                {/* Doppelpfeil "von Exit bis Bahn-Ende" */}
+                <line
+                  x1={exitX + 14}
+                  y1={rwyCl - 30}
+                  x2={padX + innerW - 8}
+                  y2={rwyCl - 30}
+                  stroke="rgba(148,163,184,0.75)"
+                  strokeWidth="1.5"
+                  strokeDasharray="4,3"
+                />
+                <polygon
+                  points={`${padX + innerW - 8},${rwyCl - 30} ${padX + innerW - 14},${rwyCl - 34} ${padX + innerW - 14},${rwyCl - 26}`}
+                  fill="rgba(148,163,184,0.85)"
+                />
+                <polygon
+                  points={`${exitX + 14},${rwyCl - 30} ${exitX + 20},${rwyCl - 34} ${exitX + 20},${rwyCl - 26}`}
+                  fill="rgba(148,163,184,0.85)"
+                />
+                {/* "Bahn verbleibend X m" Label */}
+                <text
+                  x={(exitX + padX + innerW) / 2}
+                  y={rwyCl - 38}
+                  textAnchor="middle"
+                  fontSize="13"
+                  fill="rgba(226,232,240,0.85)"
+                  fontWeight="600"
+                  fontFamily="monospace"
+                >
+                  Bahn verbleibend {(lengthM - (props.td_distance_from_threshold_m + props.rollout_m)).toFixed(0)} m
+                </text>
+                <text
+                  x={(exitX + padX + innerW) / 2}
+                  y={rwyCl + 8}
+                  textAnchor="middle"
+                  fontSize="11"
+                  fill="rgba(148,163,184,0.7)"
+                  fontFamily="monospace"
+                >
+                  ({(((lengthM - (props.td_distance_from_threshold_m + props.rollout_m)) / lengthM) * 100).toFixed(0)} % unbenutzt)
+                </text>
+              </g>
+            )}
 
           {/* Offset-Indikator: großer Pfeil + Label UNTER der Bahn, mit
               dünner Anker-Linie zum TD-Dot. Bewusst außerhalb der
@@ -697,122 +755,109 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
         {ddsActive && <LegendItem swatch={TOKENS.ddsBorder} label="Pre-Threshold — Landung verboten" />}
       </div>
 
-      {/* ─── 4. DETAIL-KARTEN ──────────────────────────────────────── */}
-      {/* auto-fill statt auto-fit + capped Cell-Width verhindert dass
-          3 Cards (= TCH-Card fehlt bei OurAirports-Fallback) den
-          ganzen Container ausfüllen und visuell überdimensioniert
-          wirken. Cards bleiben jetzt 220–280 px breit, egal wie
-          viele es sind. */}
+      {/* ─── 4. DETAIL-PILLS ─────────────────────────────────────────
+          v2.2 Layout-Switch: vom 3-Box-Layout (jeweils mehrere Rows
+          drin) auf atomare Pill-Cards (1 Stat pro Pill) wie im
+          Pilot-Client-Legacy-Layout. Macht den Block kompakter und
+          info-dichter — Piloten finden den gewünschten Wert schneller. */}
       <div
         style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fill, minmax(220px, 280px))",
-          gap: 12,
-          justifyContent: "start",
+          display: "flex",
+          flexWrap: "wrap",
+          gap: 8,
         }}
       >
-        <DetailCard title="Aufsetz-Bewertung" accent="#22c55e">
-          {props.td_in_tdz != null && (
-            <DetailRow
-              tone={props.td_in_tdz ? "good" : "warn"}
-              label="Aufsetzzone"
-              value={
-                props.td_in_tdz
-                  ? `✓ ${props.td_third ? thirdLabel(props.td_third) : "im Marker"}`
-                  : `✗ ${props.td_third ? thirdLabel(props.td_third) : "verfehlt"}`
-              }
-            />
-          )}
-          {props.aim_class && props.aim_delta_m != null && (
-            <DetailRow
-              tone={aimTone(props.aim_class)}
-              label="Ziel-Markierung"
-              value={`${aimClassLabel(props.aim_class)} · Δ ${props.aim_delta_m >= 0 ? "+" : ""}${props.aim_delta_m.toFixed(0)} m`}
-            />
-          )}
-          {props.pre_displaced_threshold === true && (
-            <DetailRow
-              tone="bad"
-              label="⚠ Pre-Threshold"
-              value="Aufsetzen vor der Landeschwelle (illegal IRL)"
-            />
-          )}
-          {props.td_in_tdz == null && props.aim_class == null && (
-            <DetailRow tone="neutral" label="Bewertung" value="Pre-v0.8.0 — keine Daten" />
-          )}
-        </DetailCard>
-
-        <DetailCard title="Position">
-          <DetailRow
-            label="Hinter Schwelle"
-            value={`${props.td_distance_from_threshold_m.toFixed(0)} m`}
-          />
-          <DetailRow
-            label="Mittellinie"
-            value={
-              Math.abs(props.td_centerline_offset_m) < 0.5
-                ? "auf Mittellinie"
-                : `${Math.abs(props.td_centerline_offset_m).toFixed(1)} m ${
-                    props.td_centerline_offset_m > 0 ? "RECHTS" : "LINKS"
-                  }`
-            }
-          />
-          {props.rollout_m != null && (
-            <DetailRow
-              label="Ausrollen"
-              value={`${props.rollout_m.toFixed(0)} m${bahnUsedPct != null ? ` (${bahnUsedPct.toFixed(0)} %)` : ""}`}
-            />
-          )}
-        </DetailCard>
-
-        {/* TCH-Card NUR rendern wenn actual vorhanden. Spec § Display-Polish. */}
-        {props.tch_actual_ft != null && props.tch_class && (
-          <DetailCard title="Anflug-Profil">
-            <DetailRow
-              label="Schwellen-Höhe (TCH)"
-              value={`${props.tch_actual_ft.toFixed(0)} ft${props.tch_expected_ft != null ? ` (Soll ${props.tch_expected_ft})` : ""}`}
-            />
-            {props.tch_delta_ft != null && (
-              <DetailRow
-                tone={tchTone(props.tch_class)}
-                label="Abweichung"
-                value={`Δ ${props.tch_delta_ft >= 0 ? "+" : ""}${props.tch_delta_ft.toFixed(0)} ft · ${tchClassLabel(props.tch_class)}`}
-              />
-            )}
-          </DetailCard>
+        <Pill label="Bahn" value={`${props.airport_ident}/${props.runway_ident}${props.surface ? ` (${surfaceLabel(props.surface)})` : ""}`} />
+        <Pill label="Länge" value={`${props.length_m.toFixed(0)} m`} />
+        <Pill
+          label="Hinter Schwelle"
+          value={`${props.td_distance_from_threshold_m.toFixed(0)} m`}
+          tone={
+            props.pre_displaced_threshold === true
+              ? "bad"
+              : props.td_distance_from_threshold_m < 0
+              ? "bad"
+              : props.td_distance_from_threshold_m > 1000
+              ? "warn"
+              : "good"
+          }
+        />
+        <Pill
+          label="Mittellinie"
+          value={
+            Math.abs(props.td_centerline_offset_m) < 0.5
+              ? "auf CL"
+              : `${Math.abs(props.td_centerline_offset_m).toFixed(1)} m ${
+                  props.td_centerline_offset_m > 0 ? "RECHTS" : "LINKS"
+                }`
+          }
+          tone={
+            Math.abs(props.td_centerline_offset_m) < 5
+              ? "good"
+              : Math.abs(props.td_centerline_offset_m) < 15
+              ? "warn"
+              : "bad"
+          }
+        />
+        {props.rollout_m != null && (
+          <Pill label="Ausrollstrecke" value={`${props.rollout_m.toFixed(0)} m`} />
         )}
-
-        <DetailCard title="Datenquelle">
-          {props.source === "navigraph" ? (
-            <>
-              <DetailRow
-                tone="good"
-                label="VPS Navdata ✓"
-                value={`AIRAC ${props.nav_cycle ?? "?"}`}
-              />
-              <DetailRow
-                label=""
-                value="Zentrale AIRAC-Daten, vom VA-Admin gepflegt (±0.5 m)"
-              />
-            </>
-          ) : props.source === "ourairports_fallback" ? (
-            <>
-              <DetailRow tone="warn" label="⚠ Fallback" value="OurAirports-Community-Daten" />
-              <DetailRow
-                label=""
-                value="Schwellen-Position kann abweichen — Navigraph beim Flugstart nicht erreichbar"
-              />
-            </>
-          ) : (
-            <>
-              <DetailRow tone="neutral" label="OurAirports" value="Community-Daten" />
-              <DetailRow
-                label=""
-                value="Pre-v0.8.0 Flug — keine zentrale Navdata-Quelle"
-              />
-            </>
-          )}
-        </DetailCard>
+        {bahnUsedPct != null && (
+          <Pill
+            label="Bahn-Auslastung"
+            value={`${bahnUsedPct.toFixed(0)} %`}
+            tone={bahnUsedPct > 85 ? "warn" : "good"}
+          />
+        )}
+        {props.td_in_tdz != null && (
+          <Pill
+            label="Touchdown-Zone"
+            value={
+              props.td_in_tdz
+                ? `✓ ${props.td_third ? thirdLabel(props.td_third) : "im Marker"}`
+                : `✗ ${props.td_third ? thirdLabel(props.td_third) : "verfehlt"}`
+            }
+            tone={props.td_in_tdz ? "good" : "warn"}
+          />
+        )}
+        {props.aim_class && props.aim_delta_m != null && props.aim_point_m != null && (
+          <Pill
+            label="Aim-Point"
+            value={`${props.aim_point_m.toFixed(0)} m · Δ ${props.aim_delta_m >= 0 ? "+" : ""}${props.aim_delta_m.toFixed(0)} m · ${aimClassLabel(props.aim_class)}`}
+            tone={aimTone(props.aim_class)}
+          />
+        )}
+        {props.tch_actual_ft != null && props.tch_class && (
+          <Pill
+            label="Anflug-Profil (TCH)"
+            value={`${props.tch_actual_ft.toFixed(0)} ft${props.tch_delta_ft != null ? ` · Δ ${props.tch_delta_ft >= 0 ? "+" : ""}${props.tch_delta_ft.toFixed(0)} ft` : ""} · ${tchClassLabel(props.tch_class)}`}
+            tone={tchTone(props.tch_class)}
+          />
+        )}
+        {props.pre_displaced_threshold === true && (
+          <Pill
+            label="⚠ Pre-Threshold"
+            value="Aufsetzen VOR der Landeschwelle (illegal IRL)"
+            tone="bad"
+          />
+        )}
+        <Pill
+          label="Navdata-Quelle"
+          value={
+            props.source === "navigraph"
+              ? `VPS Navdata · AIRAC ${props.nav_cycle ?? "?"}`
+              : props.source === "ourairports_fallback"
+              ? "OurAirports (Fallback)"
+              : "OurAirports"
+          }
+          tone={
+            props.source === "navigraph"
+              ? "good"
+              : props.source === "ourairports_fallback"
+              ? "warn"
+              : "neutral"
+          }
+        />
       </div>
 
       {glossaryOpen && (
@@ -823,6 +868,57 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
 }
 
 // ─── Kleine UI-Helpers ──────────────────────────────────────────────
+
+// Atomare Stat-Pille — 1 Label + 1 Value, optionale Tone-Farbe am Wert.
+// Ersetzt das alte 3-Box-DetailCard-Layout (v2.2).
+function Pill({
+  label,
+  value,
+  tone = "neutral",
+}: {
+  label: string;
+  value: string;
+  tone?: "good" | "warn" | "bad" | "neutral";
+}) {
+  const valueColor =
+    tone === "good"
+      ? "#22c55e"
+      : tone === "warn"
+      ? "#fbbf24"
+      : tone === "bad"
+      ? "#ef4444"
+      : "#e2e8f0";
+  return (
+    <div
+      style={{
+        padding: "8px 12px",
+        background: "rgba(255,255,255,0.04)",
+        border: "1px solid rgba(255,255,255,0.10)",
+        borderRadius: 8,
+        display: "flex",
+        flexDirection: "column",
+        gap: 2,
+        minWidth: 110,
+        maxWidth: 320,
+      }}
+    >
+      <div
+        style={{
+          fontSize: "0.68rem",
+          fontWeight: 700,
+          letterSpacing: 1.1,
+          textTransform: "uppercase",
+          opacity: 0.65,
+        }}
+      >
+        {label}
+      </div>
+      <div style={{ fontSize: "0.95rem", fontWeight: 700, color: valueColor }}>
+        {value}
+      </div>
+    </div>
+  );
+}
 
 function LegendItem({ swatch, label }: { swatch: string; label: string }) {
   return (
@@ -855,73 +951,6 @@ function LegendDot({ color, label }: { color: string; label: string }) {
       />
       {label}
     </span>
-  );
-}
-
-function DetailCard({
-  title,
-  accent,
-  children,
-}: {
-  title: string;
-  accent?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div
-      style={{
-        padding: "10px 12px",
-        background: "rgba(255,255,255,0.04)",
-        border: "1px solid rgba(255,255,255,0.10)",
-        borderRadius: 8,
-        borderLeft: accent ? `3px solid ${accent}` : undefined,
-        display: "flex",
-        flexDirection: "column",
-        gap: 6,
-      }}
-    >
-      <div
-        style={{
-          fontSize: "0.72rem",
-          fontWeight: 700,
-          letterSpacing: 1.2,
-          textTransform: "uppercase",
-          opacity: 0.75,
-        }}
-      >
-        {title}
-      </div>
-      {children}
-    </div>
-  );
-}
-
-function DetailRow({
-  label,
-  value,
-  tone = "neutral",
-}: {
-  label: string;
-  value: string;
-  tone?: "good" | "warn" | "bad" | "neutral";
-}) {
-  const toneColor =
-    tone === "good"
-      ? "#22c55e"
-      : tone === "warn"
-      ? "#fbbf24"
-      : tone === "bad"
-      ? "#ef4444"
-      : undefined;
-  return (
-    <div style={{ display: "flex", flexDirection: "column", lineHeight: 1.35 }}>
-      {label && (
-        <div style={{ fontSize: "0.72rem", opacity: 0.65 }}>{label}</div>
-      )}
-      <div style={{ fontSize: "0.92rem", fontWeight: 600, color: toneColor }}>
-        {value}
-      </div>
-    </div>
   );
 }
 
