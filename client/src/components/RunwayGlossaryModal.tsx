@@ -37,13 +37,13 @@ const ENTRIES: GlossaryEntry[] = [
     abbr: "TDZ — Touchdown Zone",
     full: "Aufsetzzone",
     explanation:
-      "Der Soll-Bereich zum Aufsetzen: erste 900 m der Bahn oder das erste Drittel (was kürzer ist). Auf echten Bahnen siehst du sie als Gruppen weißer Querstreifen.",
+      "Der Soll-Bereich zum Aufsetzen — proportional zur Bahnlänge, gedeckelt bei 900 m. Formel im Code: TDZ-Länge = min(Bahnlänge ÷ 3, 900 m). Heißt: bei einer 1500-m-Bahn ist die TDZ 500 m lang, bei 2100 m sind es 700 m, ab 2700 m Bahnlänge greift der 900-m-Cap — egal wie lang die Bahn dann noch wird. Auf echten Bahnen siehst du die TDZ als Gruppen weißer Querstreifen entlang der Centerline (ICAO Annex 14). Beispiel: LIEE 2803 m → 900 m TDZ (Cap), EDDR 1320 m → 440 m TDZ.",
   },
   {
     abbr: "AIM — Aim Point",
     full: "Ziel-Markierung",
     explanation:
-      "ZWEI breite weiße Streifen auf der Bahn — einer direkt OBERHALB, einer direkt UNTERHALB der Mittellinie, symmetrisch (ICAO Annex 14 §5.2.6). Im stabilisierten Anflug zielt dein Blick GENAU dort hin, weil der 3°-Glideslope dich exakt zu diesem Punkt führen würde, wenn du nicht abfangen (flaren) würdest. Beim Flare hebst du die Nase, drosselst — und setzt typisch 50–150 m HINTER dem Aim-Point auf (= Anfang der TDZ). Position: 400 m hinter der Schwelle bei Bahnen ≥ 2400 m, 300 m bei 1500–2399 m, 250 m bei 1200–1499 m. Streifen-Länge auf der Bahn: 30–60 m je nach Bahn-Länge.",
+      "ZWEI breite weiße Streifen auf der Bahn — einer direkt OBERHALB, einer direkt UNTERHALB der Mittellinie, symmetrisch (ICAO Annex 14 §5.2.6). Im stabilisierten Anflug zielt dein Blick GENAU dort hin, weil der 3°-Glideslope dich exakt zu diesem Punkt führen würde, wenn du nicht abfangen (flaren) würdest. Beim Flare hebst du die Nase, drosselst — und setzt typisch 50–150 m HINTER dem Aim-Point auf (= Anfang der TDZ). POSITION (AeroACARS 2-Bucket-Logik, FAA AIM 8-9-1): Bahn ≥ 2400 m → Aim-Point bei 400 m hinter der Schwelle; Bahn < 2400 m → Aim-Point bei 300 m hinter der Schwelle. Beispiel: LIEE 2803 m → 400 m, EDDR 1320 m → 300 m. ICAO Annex 14 hätte feiner gestaffelt (150/250/300/400 m je nach LDA), die FAA-Vereinfachung mit 300/400 reicht aber für die Bewertung. Streifen-Länge auf der echten Bahn: 30–60 m.",
   },
   {
     abbr: "TCH — Threshold Crossing Height",
