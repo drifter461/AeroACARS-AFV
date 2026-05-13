@@ -16,6 +16,7 @@
 
 import { useMemo, useState } from "react";
 import { GlossaryModal } from "./RunwayGlossaryModal";
+import { useV2Skin } from "./SkinContext";
 
 // ─── Public types ───────────────────────────────────────────────────
 
@@ -76,59 +77,37 @@ export interface RunwayDiagramV2Props {
 
 // ─── Visual tokens ───────────────────────────────────────────────────
 
-const TOKENS = {
-  svgWidth: 1200,
-  // v2.1: H 320→380, padY 70→95 — frühere Versionen schnitten die
-  // Skala-Labels am unteren SVG-Rand ab (rwyBot+70 fiel exakt auf
-  // viewBox-Bottom). Jetzt 40 px Margin unten + 25 px mehr oben für
-  // die ZIEL-Annotation.
-  svgHeight: 400,
-  rwyPaddingX: 70,
-  rwyPaddingY: 95,
-  tarmac: "#1a2030",
-  tarmacBorder: "rgba(255,255,255,0.18)",
-  threshold: "rgba(255,255,255,0.85)",
-  centerline: "rgba(255,255,255,0.5)",
-  centerlineDashArray: "14,10",
-  tdzFill: "rgba(253,224,138,0.18)",
-  tdzStroke: "rgba(253,224,138,0.55)",
-  aimMarker: "#fbbf24",
-  rollout: "#22d3ee",
-  rolloutGlow: "rgba(34,211,238,0.18)",
-  exitDot: "#f59e0b",
-  ddsZone: "rgba(124,45,18,0.45)",
-  ddsBorder: "rgba(220,38,38,0.65)",
-  tdPerfect: "#22c55e",
-  tdAcceptable: "#22d3ee",
-  tdWarn: "#fbbf24",
-  tdSevere: "#ef4444",
-} as const;
+// TOKENS-Konstante entfernt — Werte kommen jetzt aus useV2Skin() und sind
+// pro Render zur Laufzeit verfügbar. So kann der VPS-Skin die Werte
+// hot-tauschen ohne Pilot-Client-Release.
 
-function tdColor(p: RunwayDiagramV2Props): string {
-  if (p.pre_displaced_threshold === true) return TOKENS.tdSevere;
+function tdColor(p: RunwayDiagramV2Props, tokens: { tdSevere: string; tdPerfect: string; tdWarn: string; tdAcceptable: string }): string {
+  if (p.pre_displaced_threshold === true) return tokens.tdSevere;
   switch (p.aim_class) {
     case "perfect":
     case "past_aim":
     case "short_of_aim":
-      return TOKENS.tdPerfect;
+      return tokens.tdPerfect;
     case "long_landing":
-      return TOKENS.tdWarn;
+      return tokens.tdWarn;
     case "severe":
-      return TOKENS.tdSevere;
+      return tokens.tdSevere;
     default:
-      return TOKENS.tdAcceptable;
+      return tokens.tdAcceptable;
   }
 }
 
 // ─── Component ───────────────────────────────────────────────────────
 
 export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
+  const skin = useV2Skin();
+  const TOKENS = skin.tokens;
   const [glossaryOpen, setGlossaryOpen] = useState(false);
 
-  const W = TOKENS.svgWidth;
-  const H = TOKENS.svgHeight;
-  const padX = TOKENS.rwyPaddingX;
-  const padY = TOKENS.rwyPaddingY;
+  const W = skin.geometry.svgWidth;
+  const H = skin.geometry.svgHeight;
+  const padX = skin.geometry.rwyPaddingX;
+  const padY = skin.geometry.rwyPaddingY;
   const innerW = W - 2 * padX;
   const innerH = H - 2 * padY;
   const rwyTop = padY;
@@ -151,7 +130,7 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
   );
   const tdY = rwyCl + (clampedOffset / (widthM / 2)) * yMaxOffset;
   const tdX = mToX(props.td_distance_from_threshold_m);
-  const dotColor = tdColor(props);
+  const dotColor = tdColor(props, TOKENS);
 
   // Skala-Ticks anhand Bahn-Länge: 0/300/600/900/1200/1500/1800/2400 etc.
   const scaleTicks = useMemo(() => {

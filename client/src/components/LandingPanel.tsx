@@ -5,6 +5,8 @@ import { useConfirm } from "./ConfirmDialog";
 import { ForensicsBadge } from "./ForensicsBadge";
 import { SinkrateForensik, scoreBasisVs } from "./SinkrateForensik";
 import { GForceForensik } from "./GForceForensik";
+import { RunwayDiagramV2 } from "./RunwayDiagramV2";
+import { mapLandingRecordToV2Props } from "../dev/runwayDiagramV2Mapper";
 // v0.5.47 — Score-Modul ist jetzt zentral, identisch zu webapp/src/
 // components/landingScoring.ts. Dieselben Schwellen, Bands, Coach-Tipps
 // für Pilot-App und Live-Monitor.
@@ -2040,17 +2042,14 @@ function LandingDetail({
                 ⚠ {trustWarning}
               </div>
             )}
-            {geometryTrusted && (
-              <RunwayDiagram
-                rw={record.runway_match}
-                rolloutDistanceM={record.rollout_distance_m}
-                tdzLengthM={record.td_tdz_length_m}
-                tdInTdz={record.td_in_tdz}
-                aimPointM={record.aim_point_m}
-                aimClass={record.aim_class}
-                preDisplacedThreshold={record.pre_displaced_threshold}
-              />
-            )}
+            {geometryTrusted && (() => {
+              // v0.8.2: alte RunwayDiagram → RunwayDiagramV2. Mapping
+              // identisch zum DevPreview-Mapper, hier inline weil wir
+              // hier den vollen LandingRecord zur Hand haben.
+              const v2Props = mapLandingRecordToV2Props(record);
+              if (!v2Props) return null;
+              return <RunwayDiagramV2 {...v2Props} />;
+            })()}
             <dl className="landing-keyvals landing-keyvals--inline">
               {/* v0.7.6 P1 (Refinement-Round-2): Auch runway_id und
                   runway_length sind aus der Runway-DB und damit bei
