@@ -592,7 +592,7 @@ function runwayTrustReasonLabel(reason: string | null | undefined): string | nul
 
 // ---- Runway diagram ----------------------------------------------------
 
-function RunwayDiagram({
+export function RunwayDiagram({
   rw,
   rolloutDistanceM,
   tdzLengthM,

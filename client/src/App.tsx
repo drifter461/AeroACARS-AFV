@@ -10,6 +10,7 @@ import { ReleaseNotesModal } from "./components/ReleaseNotesModal";
 import { ActivityLogPanel } from "./components/ActivityLogPanel";
 import { AboutPanel } from "./components/AboutPanel";
 import { LandingPanel } from "./components/LandingPanel";
+import RunwayDiagramPreview from "./dev/RunwayDiagramPreview";
 import { UpdateButton } from "./components/UpdateButton";
 import { UpdateBanner } from "./components/UpdateBanner";
 import { LiveRecordingIndicator } from "./components/LiveRecordingIndicator";
@@ -22,7 +23,7 @@ type SessionStatus =
   | { kind: "loggedOut" }
   | { kind: "loggedIn"; session: LoginResult };
 
-type Tab = "cockpit" | "briefing" | "landing" | "log" | "settings" | "about";
+type Tab = "cockpit" | "briefing" | "landing" | "log" | "settings" | "about" | "devpreview";
 
 const DEBUG_STORAGE_KEY = "aeroacars.debug";
 const AUTO_FILE_STORAGE_KEY = "aeroacars.autoFile";
@@ -509,6 +510,18 @@ function App() {
           >
             {t("tabs.about")}
           </button>
+          {import.meta.env.DEV && (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={tab === "devpreview"}
+              className={`tab ${tab === "devpreview" ? "tab--active" : ""}`}
+              onClick={() => setTab("devpreview")}
+              title="Dev-only: RunwayDiagram-Preview mit Mock-Daten"
+            >
+              🧪 Preview
+            </button>
+          )}
         </nav>
       )}
 
@@ -606,6 +619,10 @@ function App() {
       {status.kind === "loggedIn" && tab === "about" && (
         <AboutPanel onShowReleaseNotes={(v) => setReleaseNotesVersion(v)} />
       )}
+
+      {import.meta.env.DEV &&
+        status.kind === "loggedIn" &&
+        tab === "devpreview" && <RunwayDiagramPreview />}
 
       {releaseNotesVersion && (
         <ReleaseNotesModal
