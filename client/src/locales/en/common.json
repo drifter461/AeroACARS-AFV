@@ -298,6 +298,7 @@
       "peak_pre_flare_label": "Peak sink-rate pre-flare:",
       "peak_pre_flare_reduction": "Flare reduced sink rate by {{reduction}} fpm",
       "legacy_notice_text": "Forensic data was not yet recorded for this older flight.",
+      "no_edge_buffer_text": "Sink-rate forensics could not capture a complete edge buffer for this touchdown — e.g. very unstable approach, FPS drop, or sample gap right at touchdown. Score and landing are unchanged.",
       "tip": {
         "flare_lost": "Flare ran out too early — hold the pitch attitude until the gear touches, throttle out AFTER touchdown.",
         "hard_g": "Hard touchdown detected — start the pull-up earlier (~30 ft AGL), not at 10 ft.",

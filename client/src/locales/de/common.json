@@ -298,6 +298,7 @@
       "peak_pre_flare_label": "Peak Sinkrate Pre-Flare:",
       "peak_pre_flare_reduction": "Flare hat Sinkrate um {{reduction}} fpm reduziert",
       "legacy_notice_text": "Für diesen älteren Flug wurden die Forensik-Daten noch nicht gespeichert.",
+      "no_edge_buffer_text": "Sinkrate-Forensik konnte für diesen Touchdown keinen vollständigen Edge-Buffer erfassen — z. B. bei sehr instabilem Anflug, FPS-Drop oder Sample-Lücke beim Aufsetzen. Score und Landung sind unverändert.",
       "tip": {
         "flare_lost": "Flare zu früh ausgelaufen — halte die Pitch-Attitude bis das Fahrwerk berührt, Throttle erst NACH Touchdown raus.",
         "hard_g": "Hartes Aufsetzen erkannt — Pull-up früher beginnen (30 ft AGL), nicht erst im 10-ft-Bereich.",
