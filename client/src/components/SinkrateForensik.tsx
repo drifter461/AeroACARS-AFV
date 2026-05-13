@@ -41,6 +41,18 @@ export function hasForensics(record: Pick<LandingRecord,
     || record.vs_at_edge_fpm != null;
 }
 
+/// v0.7.20 (QS-Befund GSG219): Pilot-Aufklaerung wenn der 50-Hz-Buffer-
+/// Dump fehlt. Unterscheidung zwischen
+///   - "alter Flug, Forensik gab's damals noch nicht" (forensics_version < 2)
+///   - "v2-Flug, aber Sampler-Edge-Buffer fehlt fuer diesen Touchdown"
+/// Vorher zeigten beide Faelle den irrefuehrenden Legacy-Text.
+export function pickForensicsLegacyKey(
+  record: Pick<LandingRecord, "forensics_version">,
+): "legacy_notice_text" | "no_edge_buffer_text" {
+  const isV2 = (record.forensics_version ?? 0) >= 2;
+  return isV2 ? "no_edge_buffer_text" : "legacy_notice_text";
+}
+
 export interface Bucket {
   /// Anzeige-Label fuer die Phase, z.B. "−1.5 s … −1.0 s"
   label: string;
@@ -208,11 +220,16 @@ export function SinkrateForensik({ record }: { record: LandingRecord }) {
   const { t } = useTranslation();
 
   if (!hasForensics(record)) {
+    // v0.7.20 (QS-Befund GSG219): zwei verschiedene Texte je nach
+    // forensics_version — vorher zeigte selbst ein v2-Flug die
+    // "alter Flug"-Notice, was Piloten in die Irre fuehrte. Spec §QS-R
+    // Notice-Text-Differenzierung.
+    const noticeKey = pickForensicsLegacyKey(record);
     return (
       <section className="landing-section">
         <h3>{t("landing.sinkrate_forensik.title")}</h3>
         <div className="sinkrate-forensik-legacy">
-          {t("landing.sinkrate_forensik.legacy_notice_text")}
+          {t(`landing.sinkrate_forensik.${noticeKey}`)}
         </div>
       </section>
     );

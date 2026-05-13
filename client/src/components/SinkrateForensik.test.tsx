@@ -14,6 +14,7 @@ import {
   computeBuckets,
   isMonotonAccelerating,
   pickCoachingTip,
+  pickForensicsLegacyKey,
   scoreBasisVs,
   selectTraceSamples,
   vsTone,
@@ -67,6 +68,37 @@ const EMPTY_LEGACY = {
   vs_smoothed_1500ms_fpm: null,
   vs_at_edge_fpm: null,
 };
+
+// ───────────────────────────────────────────────────────────────────────────
+// v0.7.20 GSG-219 QS-Befund: forensics_version-aware Notice-Text-Branch
+// ───────────────────────────────────────────────────────────────────────────
+describe("pickForensicsLegacyKey — Notice-Text-Differenzierung (v0.7.20)", () => {
+  it("returns no_edge_buffer_text fuer v2-Fluege ohne Sampler-Edge-Buffer", () => {
+    // GSG219-Fall: forensics_version=2 ist gesetzt (v2-Cascade lief),
+    // aber forensic_sample_count etc. fehlen → kein "alter Flug"-Text.
+    expect(pickForensicsLegacyKey({ forensics_version: 2 })).toBe(
+      "no_edge_buffer_text",
+    );
+  });
+  it("returns no_edge_buffer_text auch fuer forensics_version >= 3 (forward-compat)", () => {
+    expect(pickForensicsLegacyKey({ forensics_version: 3 })).toBe(
+      "no_edge_buffer_text",
+    );
+  });
+  it("returns legacy_notice_text fuer pre-v0.7.0 PIREPs (forensics_version = 1)", () => {
+    expect(pickForensicsLegacyKey({ forensics_version: 1 })).toBe(
+      "legacy_notice_text",
+    );
+  });
+  it("returns legacy_notice_text wenn forensics_version fehlt (alter Record)", () => {
+    expect(pickForensicsLegacyKey({})).toBe("legacy_notice_text");
+  });
+  it("returns legacy_notice_text wenn forensics_version = 0", () => {
+    expect(pickForensicsLegacyKey({ forensics_version: 0 })).toBe(
+      "legacy_notice_text",
+    );
+  });
+});
 
 // ───────────────────────────────────────────────────────────────────────────
 describe("hasForensics — Render-Gate", () => {

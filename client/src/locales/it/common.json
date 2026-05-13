@@ -298,6 +298,7 @@
       "peak_pre_flare_label": "Picco rateo pre-flare:",
       "peak_pre_flare_reduction": "Il flare ha ridotto il rateo di {{reduction}} fpm",
       "legacy_notice_text": "I dati forensi non sono ancora stati registrati per questo volo precedente.",
+      "no_edge_buffer_text": "La forense del rateo di discesa non è riuscita a catturare un buffer di edge completo per questo touchdown — ad es. avvicinamento molto instabile, calo di FPS o lacuna di campionamento al touchdown. Punteggio e atterraggio non cambiano.",
       "tip": {
         "flare_lost": "Flare terminato troppo presto — mantieni l'assetto di pitch finché il carrello tocca, gas via DOPO il touchdown.",
         "hard_g": "Touchdown duro rilevato — inizia il pull-up prima (~30 ft AGL), non a 10 ft.",
