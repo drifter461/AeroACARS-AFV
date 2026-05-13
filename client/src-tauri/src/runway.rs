@@ -538,11 +538,6 @@ pub fn lookup_runway(
 /// Quelle aus der die `RunwayMatch` stammt. Wird im LandingRecord
 /// persistiert und im Activity-Log surface'd damit der Pilot sieht ob
 /// gerade Navigraph-Daten oder der OurAirports-Fallback aktiv war.
-///
-/// Slice-A-Foundation: ungenutzt bis Slice B `lookup_runway_with_fallback`
-/// vom Streamer-Tick aufruft. `dead_code`-Allow entfernen sobald
-/// Slice B gelandet ist (Hinweis dass das Feature unwired bleibt).
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunwaySource {
@@ -570,10 +565,6 @@ pub enum RunwaySource {
 ///   * Returnt `None` wenn keine Bahn innerhalb von `3 km + length`
 ///     der Schwelle liegt (= Pilot ist nicht auf diesem Airport
 ///     gelandet — Caller soll auf OurAirports zurückfallen).
-///
-/// Slice-A-Foundation: ungenutzt bis Slice B den Streamer-Tick
-/// umstellt. `dead_code`-Allow entfernen sobald Slice B gelandet ist.
-#[allow(dead_code)]
 pub fn lookup_runway_in_nav(
     lat: f64,
     lon: f64,
@@ -673,10 +664,6 @@ pub fn lookup_runway_in_nav(
 /// `airport_nav` is the NavAirport from VPS (None when the pilot
 /// flight had a VPS-outage or an unknown ICAO). Pass `None` to skip
 /// the Navigraph path entirely.
-///
-/// Slice-A-Foundation: ungenutzt bis Slice B den Streamer-Tick
-/// umstellt. `dead_code`-Allow entfernen sobald Slice B gelandet ist.
-#[allow(dead_code)]
 pub fn lookup_runway_with_fallback(
     lat: f64,
     lon: f64,

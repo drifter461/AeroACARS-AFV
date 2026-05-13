@@ -22,12 +22,12 @@
 //! landing threshold along the centerline** — same sign convention as
 //! `runway::lookup_runway` (positive = past threshold).
 //!
-//! Slice A only stages the pure functions + tests. Slice B wires them
-//! into the streamer-tick + `record_landing_for_filed_flight`. Until
-//! then the items here have no production caller — `#[allow(dead_code)]`
-//! is intentional and **must be removed when Slice B lands** so any
-//! later regression (unwired feature) shows up as a warning again.
-#![allow(dead_code)]
+//! Slice B wired these into the streamer-tick + `record_landing_for_
+//! filed_flight` + the live MQTT TouchdownPayload — no module-level
+//! `dead_code`-Allow needed anymore. `classify_wind` stays unused for
+//! now because the F7 wind-vs-runway feature falls out for free from
+//! the existing body-frame-wind path; kept here so a future caller
+//! against a METAR-derived wind has a ready-made helper.
 
 /// FAA AIM aim-point switchover: at or above this length, the standard
 /// aim-point shifts from 300 m to 400 m past the threshold.
@@ -149,7 +149,12 @@ pub fn classify_aim(td_distance_m: f64, runway_length_m: f64) -> AimResult {
 }
 
 // ─── F5: TCH-Compliance ──────────────────────────────────────────────
+// Currently unwired in production: the actual TCH needs an AGL@threshold-
+// crossing scan from the 50-Hz sample buffer in the streamer-tick, which
+// is a future slice. Function + types stay here so the wiring can drop
+// them in without touching the spec'd wire-format.
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TchClass {
@@ -165,6 +170,7 @@ pub enum TchClass {
     BelowProfile,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TchResult {
     pub actual_ft: f64,
@@ -176,6 +182,7 @@ pub struct TchResult {
 /// Classify the actual TCH measured at threshold-crossing against the
 /// runway's published TCH. The actual_ft is provided by the caller —
 /// this function does no sample-buffer arithmetic, just classification.
+#[allow(dead_code)]
 pub fn classify_tch(actual_ft: f64, expected_ft: f64) -> TchResult {
     let delta_ft = actual_ft - expected_ft;
     let class = if delta_ft.abs() <= 5.0 {
@@ -231,6 +238,11 @@ pub fn classify_displaced(td_distance_m: f64, displaced_threshold_ft: f64) -> Di
 }
 
 // ─── F7: Wind-vs-Runway (exact) ──────────────────────────────────────
+// Production today gets headwind/crosswind from the body-frame
+// SimVars (`AIRCRAFT WIND X/Z`), which is more accurate than METAR-
+// derived math. This pure helper stays for any future caller that has
+// only a METAR (wind_dir/wind_speed) — e.g. server-side replay against
+// a METAR fixture without the body-frame vector.
 
 /// Wind decomposition relative to the runway centerline (using the
 /// runway's *true* course, not magnetic).
@@ -240,6 +252,7 @@ pub fn classify_displaced(td_distance_m: f64, displaced_threshold_ft: f64) -> Di
 ///     (= classic „good" headwind on approach).
 ///   * `crosswind_kt > 0` → wind from the right (= aircraft would
 ///     drift left without correction).
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct WindResult {
     pub headwind_kt: f64,
@@ -251,6 +264,7 @@ pub struct WindResult {
 /// convention: 270° = wind blowing from the west toward the east).
 /// `runway_true_course_deg` is the direction the aircraft is rolling
 /// in (= threshold-to-end bearing).
+#[allow(dead_code)]
 pub fn classify_wind(
     wind_speed_kt: f64,
     wind_dir_true_deg: f64,

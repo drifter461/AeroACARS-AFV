@@ -880,21 +880,11 @@ struct ActiveFlight {
     ///
     /// Aktiver Cycle steht zusätzlich in `navdata_cycle` — wird ins
     /// Activity-Log + TouchdownPayload weitergegeben.
-    ///
-    /// Slice-A-Foundation: Field existiert, wird aber noch nicht
-    /// gelesen (Slice B verdrahtet `fetch_navdata_for_flight` beim
-    /// flight_start + die Reads in `record_landing_for_filed_flight`).
-    #[allow(dead_code)]
     navdata: Mutex<NavdataCache>,
 }
 
 /// Pro-Flug-Cache der NavAirport-Daten. Default = leer = OurAirports-
 /// Fallback aktiv für alle ICAOs.
-///
-/// Slice-A-Foundation: ungenutzt bis Slice B den Cache befüllt UND
-/// auf Touchdown abfragt. `dead_code`-Allow entfernen sobald
-/// Slice B gelandet ist.
-#[allow(dead_code)]
 #[derive(Debug, Default)]
 struct NavdataCache {
     /// ICAO (uppercase) → NavAirport.
@@ -906,14 +896,9 @@ struct NavdataCache {
     cycle: Option<String>,
 }
 
-#[allow(dead_code)]
 impl NavdataCache {
     fn get(&self, icao: &str) -> Option<&aeroacars_mqtt::navdata::NavAirport> {
         self.airports.get(&icao.trim().to_uppercase())
-    }
-
-    fn is_empty(&self) -> bool {
-        self.airports.is_empty()
     }
 }
 
@@ -934,14 +919,10 @@ impl NavdataCache {
 ///
 /// `auth_token` ist der Pilot-Bearer-Token (typisch
 /// `ProvisionResponse.password` aus dem MQTT-Provisioning). `None` ist
-/// nur für Tests/Mocks vorgesehen.
-///
-/// Slice-A-Foundation: ungenutzt bis Slice B den flight_start-Hook
-/// einbaut. `dead_code`-Allow entfernen sobald Slice B gelandet ist —
-/// dann ist die Funktion live und ein Warnungs-Wiederauftreten würde
-/// ein versehentlich entferntes Wiring melden.
-#[allow(dead_code)]
+/// nur für Tests/Mocks vorgesehen — gegen den echten VPS liefert das
+/// 401 und der OurAirports-Fallback greift transparent.
 async fn fetch_navdata_for_flight(
+    app: AppHandle,
     flight: Arc<ActiveFlight>,
     icaos: Vec<String>,
     base_override: Option<String>,
@@ -1010,6 +991,52 @@ async fn fetch_navdata_for_flight(
             }
         }
     }
+
+    // Surface the final state in the Activity-Log so the pilot sees
+    // which source backs the runway assessment for this flight.
+    let (cycle, loaded): (Option<String>, Vec<String>) = {
+        let cache = flight.navdata.lock().expect("navdata lock");
+        (
+            cache.cycle.clone(),
+            cache.airports.keys().cloned().collect(),
+        )
+    };
+    let state = app.state::<AppState>();
+    if let Some(c) = cycle.as_deref() {
+        let mut sorted = loaded.clone();
+        sorted.sort();
+        log_activity(
+            &state,
+            ActivityLevel::Info,
+            format!("Navdata AIRAC {} geladen für {}", c, sorted.join("/")),
+            None,
+        );
+    } else {
+        log_activity(
+            &state,
+            ActivityLevel::Warn,
+            "Navdata: OurAirports-Fallback aktiv (VPS nicht erreichbar)".to_string(),
+            None,
+        );
+    }
+}
+
+/// Helper für die ActiveFlight-Init-Sites: spawnt den Navdata-Fetch in
+/// einer Background-Task ohne den flight_start zu blockieren. Token
+/// kommt aus dem MQTT-Provisioning (`MQTT_KEYRING_PASSWORD`) — dasselbe
+/// Token autoirisiert auch den MQTT-Login. Bei Token-Fehlen sendet der
+/// Fetcher kein Auth-Header und lädt damit bei keinem produktiven VPS
+/// (= 401), aber der OurAirports-Fallback greift transparent.
+fn spawn_navdata_fetch(app: &AppHandle, flight: &Arc<ActiveFlight>) {
+    let icaos = vec![flight.dpt_airport.clone(), flight.arr_airport.clone()];
+    let token = secrets::load_api_key(MQTT_KEYRING_PASSWORD)
+        .ok()
+        .flatten();
+    let app_clone = app.clone();
+    let flight_arc = Arc::clone(flight);
+    tokio::spawn(async move {
+        fetch_navdata_for_flight(app_clone, flight_arc, icaos, None, token).await;
+    });
 }
 
 /// Connection-State-Konstanten für ActiveFlight.connection_state.
@@ -2019,6 +2046,23 @@ struct FlightStats {
     /// computed; None also when no runway is within ~3 km of the
     /// touchdown coordinate.
     runway_match: Option<runway::RunwayMatch>,
+    /// v0.8.0: Quelle der `runway_match`-Daten. `Navigraph` wenn der
+    /// per VPS geladene NavAirport eine Match-fähige RWY lieferte;
+    /// `OurAirportsFallback` wenn auf die eingebaute CSV gefallen
+    /// wurde. None solange noch kein Touchdown registriert wurde.
+    runway_source: Option<runway::RunwaySource>,
+    /// v0.8.0: AIRAC-Cycle wenn `runway_source == Navigraph`. Wird
+    /// im LandingRecord + TouchdownPayload mit-publiziert damit Webapp
+    /// + phpVMS-PIREP-Notes zeigen können auf welchem Cycle die
+    /// Bewertung beruht. None bei OurAirports-Fallback.
+    runway_nav_cycle: Option<String>,
+    /// v0.8.0: kompletter NavRunway-Geometriesatz, falls aus Navigraph
+    /// kommend — wird im Folgenden für die TDZ/Aim/TCH/DDS-Assessment-
+    /// Berechnungen gebraucht und im LandingRecord/Payload mit
+    /// `displaced_threshold_ft / tch_expected_ft / glideslope_angle`
+    /// fließen. None bei OurAirports-Fallback (= die OurAirports-CSV
+    /// hat diese Felder nicht).
+    runway_nav_geometry: Option<aeroacars_mqtt::navdata::NavRunway>,
     /// Latitude at the touchdown edge — captured separately from
     /// `last_lat` so a resume mid-rollout doesn't overwrite it.
     landing_lat: Option<f64>,
@@ -6416,6 +6460,9 @@ async fn flight_adopt(
     });
 
     save_active_flight(&app, &flight);
+    // v0.8.0: parallel-fetch dep/arr-Navdata vom VPS. Non-blocking
+    // (Background-Task), Failure → OurAirports-Fallback (transparent).
+    spawn_navdata_fetch(&app, &flight);
     {
         let mut guard = state.active_flight.lock().expect("active_flight lock");
         *guard = Some(Arc::clone(&flight));
@@ -6984,6 +7031,9 @@ async fn flight_start(
     });
 
     save_active_flight(&app, &flight);
+    // v0.8.0: parallel-fetch dep/arr-Navdata vom VPS. Non-blocking
+    // (Background-Task), Failure → OurAirports-Fallback (transparent).
+    spawn_navdata_fetch(&app, &flight);
 
     {
         let mut guard = state.active_flight.lock().expect("active_flight lock");
@@ -7036,6 +7086,9 @@ async fn flight_start(
         // Persist immediately so a Tauri restart mid-flight doesn't
         // lose the plan.
         save_active_flight(&app, &flight);
+    // v0.8.0: parallel-fetch dep/arr-Navdata vom VPS. Non-blocking
+    // (Background-Task), Failure → OurAirports-Fallback (transparent).
+    spawn_navdata_fetch(&app, &flight);
 
         // Push the planned waypoints to phpVMS so the live map / PIREP
         // detail can draw the planned track alongside the flown one.
@@ -7590,6 +7643,9 @@ async fn flight_start_manual(
     });
 
     save_active_flight(&app, &flight);
+    // v0.8.0: parallel-fetch dep/arr-Navdata vom VPS. Non-blocking
+    // (Background-Task), Failure → OurAirports-Fallback (transparent).
+    spawn_navdata_fetch(&app, &flight);
     {
         let mut guard = state.active_flight.lock().expect("active_flight lock");
         *guard = Some(Arc::clone(&flight));
@@ -7617,6 +7673,9 @@ async fn flight_start_manual(
         stats.flight_plan_source = Some("manual");
         drop(stats);
         save_active_flight(&app, &flight);
+    // v0.8.0: parallel-fetch dep/arr-Navdata vom VPS. Non-blocking
+    // (Background-Task), Failure → OurAirports-Fallback (transparent).
+    spawn_navdata_fetch(&app, &flight);
     }
 
     // v0.6.0/v0.6.1 — phpVMS-Worker zuerst spawnen (Hint, keine
@@ -8395,6 +8454,64 @@ impl TouchdownAirportSource {
     }
 }
 
+/// v0.8.0: Resultat aller Pure-Function-Assessments für einen Touchdown.
+/// Wird sowohl von `record_landing_for_filed_flight` (= LandingRecord)
+/// als auch vom Streamer-Tick (= TouchdownPayload) gebraucht — einmal
+/// rechnen, an beide Orte feeden.
+///
+/// TDZ + Aim werden für JEDE runway-match Quelle berechnet (length +
+/// td_distance reichen, beides ist auch in OurAirports). DDS braucht
+/// `displaced_threshold_ft` und ist deshalb nur bei Navigraph-Source
+/// verfügbar. TCH ist Stage-2 (braucht AGL@threshold-crossing scan
+/// aus dem 50-Hz-Sample-Buffer) und bleibt in Slice B als TODO —
+/// `tch_actual_ft` kann eine folgende Mini-Slice am Streamer-Tick
+/// im Approach befüllen.
+#[derive(Debug, Clone, Default)]
+struct AssessedTouchdown {
+    td_distance_from_threshold_m: Option<f64>,
+    tdz: Option<runway_assessment::TdzResult>,
+    aim: Option<runway_assessment::AimResult>,
+    dds: Option<runway_assessment::DisplacedResult>,
+}
+
+fn assess_touchdown(stats: &FlightStats) -> AssessedTouchdown {
+    let Some(rm) = stats.runway_match.as_ref() else {
+        return AssessedTouchdown::default();
+    };
+    const FT_PER_M: f64 = 3.280_839_895;
+    let td_m = rm.touchdown_distance_from_threshold_ft / FT_PER_M;
+    let length_m = (rm.length_ft as f64) / FT_PER_M;
+    let tdz = runway_assessment::classify_tdz(td_m, length_m);
+    let aim = Some(runway_assessment::classify_aim(td_m, length_m));
+    let dds = stats.runway_nav_geometry.as_ref().map(|g| {
+        runway_assessment::classify_displaced(td_m, g.displaced_threshold_ft as f64)
+    });
+    AssessedTouchdown {
+        td_distance_from_threshold_m: Some(td_m),
+        tdz,
+        aim,
+        dds,
+    }
+}
+
+fn aim_class_wire(class: runway_assessment::AimClass) -> &'static str {
+    use runway_assessment::AimClass::*;
+    match class {
+        Perfect => "perfect",
+        ShortOfAim => "short_of_aim",
+        PastAim => "past_aim",
+        LongLanding => "long_landing",
+        Severe => "severe",
+    }
+}
+
+fn runway_source_wire(s: runway::RunwaySource) -> &'static str {
+    match s {
+        runway::RunwaySource::Navigraph => "navigraph",
+        runway::RunwaySource::OurAirportsFallback => "ourairports_fallback",
+    }
+}
+
 /// v0.7.18 (B-012) — Touchdown-Airport-Resolution.
 ///
 /// Cascade:
@@ -8718,24 +8835,30 @@ where
         _ => (None, None),
     };
 
-    let runway_match = stats.runway_match.as_ref().map(|m| LandingRunwayMatch {
-        airport_ident: m.airport_ident.clone(),
-        runway_ident: m.runway_ident.clone(),
-        surface: m.surface.clone(),
-        length_ft: m.length_ft as f64,
-        centerline_distance_m: m.centerline_distance_m,
-        centerline_distance_abs_ft: m.centerline_distance_abs_ft,
-        side: m.side.clone(),
-        touchdown_distance_from_threshold_ft: m.touchdown_distance_from_threshold_ft,
-        // v0.8.0 — wired by the streamer-tick once Navigraph navdata is
-        // available on the ActiveFlight. Slice A only stages the shape;
-        // Slice B populates these from `runway::lookup_runway_with_fallback`.
-        source: None,
-        nav_cycle: None,
-        true_course_deg: None,
-        displaced_threshold_ft: None,
-        tch_expected_ft: None,
-        glideslope_angle_deg: None,
+    let runway_match = stats.runway_match.as_ref().map(|m| {
+        // v0.8.0 — Source + NavRunway-Geometrie aus stats holen.
+        // Bei OurAirports-Fallback bleiben die nav_*-Felder None.
+        let source_wire = stats
+            .runway_source
+            .map(runway_source_wire)
+            .map(|s| s.to_string());
+        let nav_g = stats.runway_nav_geometry.as_ref();
+        LandingRunwayMatch {
+            airport_ident: m.airport_ident.clone(),
+            runway_ident: m.runway_ident.clone(),
+            surface: m.surface.clone(),
+            length_ft: m.length_ft as f64,
+            centerline_distance_m: m.centerline_distance_m,
+            centerline_distance_abs_ft: m.centerline_distance_abs_ft,
+            side: m.side.clone(),
+            touchdown_distance_from_threshold_ft: m.touchdown_distance_from_threshold_ft,
+            source: source_wire,
+            nav_cycle: stats.runway_nav_cycle.clone(),
+            true_course_deg: nav_g.map(|g| g.true_course),
+            displaced_threshold_ft: nav_g.map(|g| g.displaced_threshold_ft),
+            tch_expected_ft: nav_g.map(|g| g.tch_ft),
+            glideslope_angle_deg: nav_g.map(|g| g.glideslope_angle),
+        }
     });
 
     let touchdown_profile = stats
@@ -8808,6 +8931,10 @@ where
         &flight.arr_airport,
         &airport_lookup,
     );
+
+    // v0.8.0: Pure-Function-Assessment einmal rechnen, in den Record
+    // einsetzen.
+    let assessed = assess_touchdown(stats);
 
     Some(LandingRecord {
         pirep_id: flight.pirep_id.clone(),
@@ -8960,20 +9087,28 @@ where
         accident_reasons: stats.accident_reasons.clone(),
         accident_at: stats.accident_at,
 
-        // v0.8.0 VPS-Navdata + Runway-Awareness. Slice A nur Shape;
-        // Slice B populiert die Felder aus ActiveFlight.navdata +
-        // runway_assessment::classify_*().
-        td_distance_from_threshold_m: None,
-        td_in_tdz: None,
-        td_third: None,
-        td_tdz_length_m: None,
-        aim_delta_m: None,
-        aim_class: None,
-        aim_point_m: None,
+        // v0.8.0 VPS-Navdata + Runway-Awareness — Pure-Function-
+        // Assessment-Werte. Wenn der runway_match aus Navigraph kam
+        // sind ALLE Felder gefüllt; bei OurAirports-Fallback ist
+        // TDZ/Aim/td_distance trotzdem gesetzt (length + td_distance
+        // sind quell-agnostisch), nur DDS bleibt None weil
+        // displaced_threshold_ft nicht in OurAirports vorkommt.
+        // TCH bleibt für jetzt None — braucht AGL@threshold-crossing
+        // Scan, kommt in Folge-Slice.
+        td_distance_from_threshold_m: assessed.td_distance_from_threshold_m,
+        td_in_tdz: assessed.tdz.map(|t| t.in_tdz),
+        td_third: assessed.tdz.map(|t| t.third),
+        td_tdz_length_m: assessed.tdz.map(|t| t.tdz_length_m),
+        aim_delta_m: assessed.aim.as_ref().map(|a| a.delta_m),
+        aim_class: assessed
+            .aim
+            .as_ref()
+            .map(|a| aim_class_wire(a.class).to_string()),
+        aim_point_m: assessed.aim.as_ref().map(|a| a.aim_point_m),
         tch_actual_ft: None,
         tch_delta_ft: None,
         tch_class: None,
-        pre_displaced_threshold: None,
+        pre_displaced_threshold: assessed.dds.map(|d| d.in_pre_threshold_zone),
     })
 }
 
@@ -12996,6 +13131,9 @@ fn spawn_touchdown_sampler(app: AppHandle, flight: Arc<ActiveFlight>) {
                 // 18:48:25 und 18:51:16 nach Resume). Ein expliziter
                 // Save direkt nach dem Setzen verhindert das.
                 save_active_flight(&app, &flight);
+    // v0.8.0: parallel-fetch dep/arr-Navdata vom VPS. Non-blocking
+    // (Background-Task), Failure → OurAirports-Fallback (transparent).
+    spawn_navdata_fetch(&app, &flight);
                 let count = samples.len();
                 // v0.7.0 — clone fuer touchdown_v2 weiter unten
                 // (samples wird gleich in record_event gemoved)
@@ -13326,6 +13464,9 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                             Some(detail),
                         );
                         save_active_flight(&app, &flight);
+    // v0.8.0: parallel-fetch dep/arr-Navdata vom VPS. Non-blocking
+    // (Background-Task), Failure → OurAirports-Fallback (transparent).
+    spawn_navdata_fetch(&app, &flight);
                         tracing::info!(
                             pirep_id = %flight.pirep_id,
                             "sim-pause detected via snapshot.paused flag"
@@ -13509,6 +13650,9 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                         Some(detail),
                     );
                     save_active_flight(&app, &flight);
+    // v0.8.0: parallel-fetch dep/arr-Navdata vom VPS. Non-blocking
+    // (Background-Task), Failure → OurAirports-Fallback (transparent).
+    spawn_navdata_fetch(&app, &flight);
                     tracing::warn!(
                         pirep_id = %flight.pirep_id,
                         "sim disconnect detected, flight paused"
@@ -13698,6 +13842,9 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                                     .copied()
                             },
                         );
+                        // v0.8.0: identische Assessment-Werte wie
+                        // im LandingRecord (single source: assess_touchdown).
+                        let payload_assessed = assess_touchdown(&stats);
                         aeroacars_mqtt::TouchdownPayload {
                             ts: landing_at.timestamp_millis(),
                             // v0.7.19 (QS-R2 Finding 1): Recorder/Webapp
@@ -13956,26 +14103,54 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                             accident_at: stats
                                 .accident_at
                                 .map(|t| t.timestamp_millis()),
-                            // v0.8.0 VPS-Navdata + Runway-Awareness.
-                            // Slice A nur Shape — Slice B populiert die
-                            // Felder beim Touchdown aus ActiveFlight.navdata.
-                            navdata_source: None,
-                            navdata_cycle: None,
-                            runway_true_course_deg: None,
-                            runway_displaced_threshold_ft: None,
-                            runway_tch_expected_ft: None,
-                            runway_glideslope_angle_deg: None,
-                            td_distance_from_threshold_m: None,
-                            td_in_tdz: None,
-                            td_third: None,
-                            td_tdz_length_m: None,
-                            aim_delta_m: None,
-                            aim_class: None,
-                            aim_point_m: None,
+                            // v0.8.0: Pure-Function-Assessment in den
+                            // Live-MQTT-Payload. Identische Werte wie
+                            // im LandingRecord (record_landing_for_filed_
+                            // flight) — Spec verlangt Field-Symmetrie.
+                            navdata_source: stats
+                                .runway_source
+                                .map(|s| runway_source_wire(s).to_string()),
+                            navdata_cycle: stats.runway_nav_cycle.clone(),
+                            runway_true_course_deg: stats
+                                .runway_nav_geometry
+                                .as_ref()
+                                .map(|g| g.true_course),
+                            runway_displaced_threshold_ft: stats
+                                .runway_nav_geometry
+                                .as_ref()
+                                .map(|g| g.displaced_threshold_ft),
+                            runway_tch_expected_ft: stats
+                                .runway_nav_geometry
+                                .as_ref()
+                                .map(|g| g.tch_ft),
+                            runway_glideslope_angle_deg: stats
+                                .runway_nav_geometry
+                                .as_ref()
+                                .map(|g| g.glideslope_angle),
+                            td_distance_from_threshold_m: payload_assessed
+                                .td_distance_from_threshold_m,
+                            td_in_tdz: payload_assessed.tdz.map(|t| t.in_tdz),
+                            td_third: payload_assessed.tdz.map(|t| t.third),
+                            td_tdz_length_m: payload_assessed
+                                .tdz
+                                .map(|t| t.tdz_length_m),
+                            aim_delta_m: payload_assessed
+                                .aim
+                                .as_ref()
+                                .map(|a| a.delta_m),
+                            aim_class: payload_assessed.aim.as_ref().map(|a| {
+                                aim_class_wire(a.class).to_string()
+                            }),
+                            aim_point_m: payload_assessed
+                                .aim
+                                .as_ref()
+                                .map(|a| a.aim_point_m),
                             tch_actual_ft: None,
                             tch_delta_ft: None,
                             tch_class: None,
-                            pre_displaced_threshold: None,
+                            pre_displaced_threshold: payload_assessed
+                                .dds
+                                .map(|d| d.in_pre_threshold_zone),
                         }
                     })
                 };
@@ -14233,6 +14408,9 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
             // launch for a flight the user already filed.
             if should_persist && !flight.stop.load(Ordering::Relaxed) {
                 save_active_flight(&app, &flight);
+    // v0.8.0: parallel-fetch dep/arr-Navdata vom VPS. Non-blocking
+    // (Background-Task), Failure → OurAirports-Fallback (transparent).
+    spawn_navdata_fetch(&app, &flight);
             }
 
             // On phase change, push the new status to phpVMS so the
@@ -15874,17 +16052,70 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
                     .as_ref()
                     .map(|s| (s.lat, s.lon, s.heading_true_deg))
                     .unwrap_or((snap.lat, snap.lon, snap.heading_deg_true));
-                stats.runway_match =
-                    runway::lookup_runway(rw_lat, rw_lon, rw_hdg_true);
-                if let Some(rw) = &stats.runway_match {
+
+                // v0.8.0: Navdata-Cache befragen — wenn der pro-Flug-
+                // Cache den arr_airport hat, nimm dessen NavAirport für
+                // die Match-Quelle. `lookup_runway_with_fallback`
+                // fällt transparent auf OurAirports zurück, wenn
+                // entweder kein NavAirport vorhanden ist oder die
+                // NavRunways zu weit weg vom Touchdown sind (= Pilot
+                // ist auf einer anderen Bahn gelandet als geplant).
+                let (nav_opt, nav_cycle, nav_geom_clone) = {
+                    let cache = flight.navdata.lock().expect("navdata lock");
+                    let apt = cache.get(&flight.arr_airport).cloned();
+                    let cycle = cache.cycle.clone();
+                    (apt, cycle, None::<aeroacars_mqtt::navdata::NavRunway>)
+                };
+                let _ = nav_geom_clone; // placeholder; populated below.
+
+                let lookup_result = runway::lookup_runway_with_fallback(
+                    rw_lat,
+                    rw_lon,
+                    rw_hdg_true,
+                    nav_opt.as_ref(),
+                );
+                if let Some((rw, source)) = lookup_result {
+                    // Wenn der Match aus Navigraph kam, finde die
+                    // konkrete NavRunway-Geometrie (designator-Match)
+                    // damit die Assessment-Funktionen (TDZ/TCH/DDS)
+                    // den displaced_threshold_ft, tch_ft und
+                    // glideslope_angle ohne zweite Lookup-Runde
+                    // bekommen. Bei OurAirports-Fallback bleibt
+                    // runway_nav_geometry = None und die Assessment-
+                    // Funktionen werden skipped.
+                    let nav_geometry = if matches!(source, runway::RunwaySource::Navigraph) {
+                        nav_opt.as_ref().and_then(|apt| {
+                            apt.runways
+                                .iter()
+                                .find(|nr| nr.designator == rw.runway_ident)
+                                .cloned()
+                        })
+                    } else {
+                        None
+                    };
                     tracing::info!(
                         airport = %rw.airport_ident,
                         runway = %rw.runway_ident,
                         centerline_m = rw.centerline_distance_m,
                         from_threshold_ft = rw.touchdown_distance_from_threshold_ft,
                         side = %rw.side,
+                        source = ?source,
+                        cycle = ?nav_cycle,
                         "touchdown correlated to runway"
                     );
+                    stats.runway_match = Some(rw);
+                    stats.runway_source = Some(source);
+                    stats.runway_nav_cycle = if matches!(source, runway::RunwaySource::Navigraph) {
+                        nav_cycle
+                    } else {
+                        None
+                    };
+                    stats.runway_nav_geometry = nav_geometry;
+                } else {
+                    stats.runway_match = None;
+                    stats.runway_source = None;
+                    stats.runway_nav_cycle = None;
+                    stats.runway_nav_geometry = None;
                 }
 
                 // Reset bounce state for the new analyzer window.
@@ -17799,6 +18030,50 @@ fn announce_landing_score(app: &AppHandle, flight: &ActiveFlight) -> Option<Stri
     // ist klar dass "Touchdown: smooth" nicht das gleiche ist wie
     // "Master 77/100" — Pilot sieht beide Begriffe ohne Verwechslung.
     let aggregate_master = compute_aggregate_master_score(&stats, Some(&flight.aircraft_icao));
+    // v0.8.0: Per-Touchdown Navdata-Source + DDS-Warnung sammeln,
+    // bevor wir `stats` droppen.
+    let nav_source_msg: Option<(ActivityLevel, String)> = stats
+        .runway_match
+        .as_ref()
+        .and_then(|rm| {
+            let src = stats.runway_source?;
+            let label = match src {
+                runway::RunwaySource::Navigraph => format!(
+                    "Runway {} {} matched via Navigraph (AIRAC {})",
+                    rm.runway_ident,
+                    rm.airport_ident,
+                    stats.runway_nav_cycle.as_deref().unwrap_or("?")
+                ),
+                runway::RunwaySource::OurAirportsFallback => format!(
+                    "Runway {} {} matched via OurAirports-Fallback",
+                    rm.runway_ident, rm.airport_ident
+                ),
+            };
+            let level = match src {
+                runway::RunwaySource::Navigraph => ActivityLevel::Info,
+                runway::RunwaySource::OurAirportsFallback => ActivityLevel::Warn,
+            };
+            Some((level, label))
+        });
+    let dds_warning_msg: Option<String> = stats
+        .runway_nav_geometry
+        .as_ref()
+        .and_then(|g| {
+            if g.displaced_threshold_ft == 0 {
+                return None;
+            }
+            let rm = stats.runway_match.as_ref()?;
+            let td_m = rm.touchdown_distance_from_threshold_ft / 3.280_839_895;
+            let displaced_m = (g.displaced_threshold_ft as f64) / 3.280_839_895;
+            if td_m < 0.0 && td_m > -displaced_m {
+                Some(format!(
+                    "⚠ Touchdown im Pre-Threshold-Bereich (DDS {:.0} m vor Landing-Threshold)",
+                    displaced_m
+                ))
+            } else {
+                None
+            }
+        });
     drop(stats);
     let touchdown_grade = letter_grade(score.numeric());
     let master_text = match aggregate_master {
@@ -17817,6 +18092,15 @@ fn announce_landing_score(app: &AppHandle, flight: &ActiveFlight) -> Option<Stri
             master_text,
         )),
     );
+    // v0.8.0: zusätzlich die Runway-Match-Source mitloggen damit der
+    // Pilot weiß ob die Bewertung auf Jeppesen-Daten oder dem
+    // OurAirports-Fallback beruht.
+    if let Some((src_level, src_msg)) = nav_source_msg {
+        log_activity_handle(app, src_level, src_msg, None);
+    }
+    if let Some(msg) = dds_warning_msg {
+        log_activity_handle(app, ActivityLevel::Error, msg, None);
+    }
     record_event(
         app,
         &flight.pirep_id,
@@ -19625,6 +19909,9 @@ async fn try_resume_flight(
         navdata: Mutex::new(NavdataCache::default()),
     });
 
+    // v0.8.0: vor dem move den Navdata-Fetch spawnen.
+    // Resume-Pfad analog zum frischen flight_start.
+    spawn_navdata_fetch(app, &flight);
     {
         let mut guard = state.active_flight.lock().expect("active_flight lock");
         *guard = Some(flight);
