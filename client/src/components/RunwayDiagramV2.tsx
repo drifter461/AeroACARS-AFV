@@ -415,44 +415,34 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
             strokeDasharray={TOKENS.centerlineDashArray}
           />
 
-          {/* Aim-Marker (zwei Quadrate ober/unter CL + Pfeil). */}
+          {/* Aim-Point — ICAO Annex 14 §5.2.6: GENAU ZWEI breite
+              Streifen, symmetrisch zur Centerline. Ein Streifen liegt
+              direkt OBERHALB der CL, einer direkt UNTERHALB. (Frühere
+              v2-Version hatte 4 kleine Quadrate in 2×2 = falsche
+              "Stufen"-Optik — User-Befund 2026-05-13.) Streifen-Breite
+              hier 24 px (entspricht ~50 m Real-Länge, ICAO gibt 30–60 m
+              je nach Bahn). */}
           {aimX != null && (
             <g>
               <rect
-                x={aimX - 14}
-                y={rwyCl - 30}
-                width={10}
-                height={20}
+                x={aimX - 12}
+                y={rwyCl - 22}
+                width={24}
+                height={18}
                 fill={TOKENS.aimMarker}
                 opacity="0.95"
               />
               <rect
-                x={aimX + 4}
-                y={rwyCl - 30}
-                width={10}
-                height={20}
-                fill={TOKENS.aimMarker}
-                opacity="0.95"
-              />
-              <rect
-                x={aimX - 14}
-                y={rwyCl + 10}
-                width={10}
-                height={20}
-                fill={TOKENS.aimMarker}
-                opacity="0.95"
-              />
-              <rect
-                x={aimX + 4}
-                y={rwyCl + 10}
-                width={10}
-                height={20}
+                x={aimX - 12}
+                y={rwyCl + 4}
+                width={24}
+                height={18}
                 fill={TOKENS.aimMarker}
                 opacity="0.95"
               />
               {/* Pfeilspitze + Label oberhalb der Bahn — zeigt explizit
-                  dass die 4 gelben Quadrate die Aim-Point-Markierungen
-                  sind (wie auf echten Runways gemalt). */}
+                  dass die zwei großen gelben Streifen die Aim-Point-
+                  Markierungen sind (wie auf echten Runways gemalt). */}
               <polygon
                 points={`${aimX - 7},${rwyTop - 14} ${aimX + 7},${rwyTop - 14} ${aimX},${rwyTop - 4}`}
                 fill={TOKENS.aimMarker}
@@ -653,25 +643,43 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
             </title>
           </g>
 
-          {/* Exit-Punkt (orange). */}
+          {/* Bremspunkt — Punkt an dem die Groundspeed unter 40 kt fiel.
+              Heißt NICHT "hier verlässt der Pilot die Bahn" (das passiert
+              an einem der nächsten Taxiway-Abzweige). Heißt "ab hier
+              kannst du normal abbiegen". Früher als "EXIT" gelabelt,
+              das war missverständlich (User-Befund 2026-05-13). */}
           {exitX != null && (
             <g>
               <circle cx={exitX} cy={tdY} r="11" fill={TOKENS.exitDot} opacity="0.25" />
               <circle cx={exitX} cy={tdY} r="6" fill={TOKENS.exitDot} stroke="#0c1628" strokeWidth="1.5" />
               <text
                 x={exitX}
-                y={tdY - 18}
+                y={tdY - 20}
                 textAnchor="middle"
                 fontSize="11"
                 fill={TOKENS.exitDot}
                 fontWeight="700"
                 fontFamily="monospace"
               >
-                EXIT
+                40 kt
+              </text>
+              <text
+                x={exitX}
+                y={tdY - 8}
+                textAnchor="middle"
+                fontSize="9"
+                fill={TOKENS.exitDot}
+                fontFamily="monospace"
+                opacity="0.85"
+              >
+                Bremspunkt
               </text>
               <title>
-                Exit-Punkt — Ende der Ausrollstrecke (Rollout). Geschwindigkeit
-                {" "}~40 kt, Pilot kann abbiegen.
+                Bremspunkt — Ab hier hast du auf ~40 kt abgebremst. Das ist
+                die typische High-Speed-Exit-Geschwindigkeit; am nächsten
+                Rollwege-Abzweig kannst du die Bahn jetzt normal verlassen.
+                NICHT die Stelle wo du tatsächlich abbiegst — das passiert
+                später, an einem konkreten Taxiway.
               </title>
             </g>
           )}
@@ -774,7 +782,7 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
         {tdzEndX && <LegendItem swatch={TOKENS.tdzStroke} label="Aufsetzzone (TDZ)" />}
         {aimX && <LegendItem swatch={TOKENS.aimMarker} label="Ziel-Markierung (AIM)" />}
         <LegendDot color={dotColor} label="Aufsetzpunkt (TD)" />
-        {exitX && <LegendDot color={TOKENS.exitDot} label="Exit" />}
+        {exitX && <LegendDot color={TOKENS.exitDot} label="Bremspunkt (40 kt)" />}
         {ddsActive && <LegendItem swatch={TOKENS.ddsBorder} label="Pre-Threshold — Landung verboten" />}
       </div>
 

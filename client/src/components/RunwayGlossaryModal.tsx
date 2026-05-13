@@ -43,7 +43,7 @@ const ENTRIES: GlossaryEntry[] = [
     abbr: "AIM — Aim Point",
     full: "Ziel-Markierung",
     explanation:
-      "Zwei große weiße Quadrate auf der Bahn — das sind die Aiming-Point-Marken. Im stabilisierten Anflug zielt dein Blick GENAU dort hin, weil der 3°-Glideslope dich exakt zu diesem Punkt führen würde, wenn du nicht abfangen (flaren) würdest. Beim Flare hebst du die Nase, drosselst — und setzt typisch 50–150 m HINTER dem Aim-Point auf (= Anfang der TDZ). Position laut ICAO Annex 14: 400 m hinter der Schwelle bei Bahnen ≥ 2400 m, 300 m bei 1500–2399 m, 250 m bei 1200–1499 m.",
+      "ZWEI breite weiße Streifen auf der Bahn — einer direkt OBERHALB, einer direkt UNTERHALB der Mittellinie, symmetrisch (ICAO Annex 14 §5.2.6). Im stabilisierten Anflug zielt dein Blick GENAU dort hin, weil der 3°-Glideslope dich exakt zu diesem Punkt führen würde, wenn du nicht abfangen (flaren) würdest. Beim Flare hebst du die Nase, drosselst — und setzt typisch 50–150 m HINTER dem Aim-Point auf (= Anfang der TDZ). Position: 400 m hinter der Schwelle bei Bahnen ≥ 2400 m, 300 m bei 1500–2399 m, 250 m bei 1200–1499 m. Streifen-Länge auf der Bahn: 30–60 m je nach Bahn-Länge.",
   },
   {
     abbr: "TCH — Threshold Crossing Height",
@@ -61,6 +61,12 @@ const ENTRIES: GlossaryEntry[] = [
     abbr: "Glide Slope",
     full: "Anflug-Winkel",
     explanation: "ILS-Standard 3°. Du sinkst 1 m für je 19 m vorwärts.",
+  },
+  {
+    abbr: "Bremspunkt (im Diagramm orange)",
+    full: "40-kt-Punkt",
+    explanation:
+      "Der orange Kreis im Diagramm markiert die Stelle, an der die Groundspeed während des Ausrollens unter ~40 kt gefallen ist (= ROLLOUT_STOP_GS_KT). Das ist KEINE konkrete Stelle wo der Pilot abbiegt — die echte Abzweigung passiert später an einem konkreten Taxiway. Sondern: ab diesem Punkt bist du langsam genug für einen normalen High-Speed-Exit, und ab hier wird auch das Diagramm das nicht mehr genutzte Bahn-Stück als 'verbleibend' markieren.",
   },
   {
     abbr: "Rollout",
