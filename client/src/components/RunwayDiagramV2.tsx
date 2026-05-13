@@ -613,54 +613,95 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
             </title>
           </g>
 
-          {/* Bremspunkt — Punkt an dem die Groundspeed unter 40 kt fiel.
-              Heißt NICHT "hier verlässt der Pilot die Bahn" (das passiert
-              an einem der nächsten Taxiway-Abzweige). Heißt "ab hier
-              kannst du normal abbiegen". Früher als "EXIT" gelabelt,
-              das war missverständlich (User-Befund 2026-05-13). */}
-          {exitX != null && (
-            <g>
-              <circle cx={exitX} cy={tdY} r="11" fill={TOKENS.exitDot} opacity="0.25" />
-              <circle cx={exitX} cy={tdY} r="6" fill={TOKENS.exitDot} stroke="#0c1628" strokeWidth="1.5" />
-              {/* Label-Pair mit dunklem Outline-Stroke für Lesbarkeit
-                  über dem Cyan-Rollout-Strich + Tarmac-Hintergrund. */}
-              <text
-                x={exitX}
-                y={tdY - 26}
-                textAnchor="middle"
-                fontSize="14"
-                fill={TOKENS.exitDot}
-                fontWeight="800"
-                fontFamily="monospace"
-                stroke="#0c1628"
-                strokeWidth="3"
-                paintOrder="stroke"
-              >
-                Bremspunkt
-              </text>
-              <text
-                x={exitX}
-                y={tdY - 12}
-                textAnchor="middle"
-                fontSize="13"
-                fill={TOKENS.exitDot}
-                fontWeight="800"
-                fontFamily="monospace"
-                stroke="#0c1628"
-                strokeWidth="3"
-                paintOrder="stroke"
-              >
-                40 kt
-              </text>
-              <title>
-                Bremspunkt — Ab hier hast du auf ~40 kt abgebremst. Das ist
-                die typische High-Speed-Exit-Geschwindigkeit; am nächsten
-                Rollwege-Abzweig kannst du die Bahn jetzt normal verlassen.
-                NICHT die Stelle wo du tatsächlich abbiegst — das passiert
-                später, an einem konkreten Taxiway.
-              </title>
-            </g>
-          )}
+          {/* Bremspunkt (40 kt) — adaptive Label-Platzierung:
+              - normaler Fall (Rollout ≥ ~80 px) → Labels ÜBER dem Dot,
+                gestapelt, mit ausreichend Abstand zum Kreis (kein
+                Overlap mit der Circle r=11)
+              - kurzer Rollout (Labels würden mit dem TD-Dot Bereich
+                kollidieren) → Labels RECHTS vom Bremspunkt-Dot
+              Reines Overlap-Hygiene-Detail, kein User-sichtbares
+              Verhalten ändert sich beim normalen Fall. */}
+          {exitX != null && (() => {
+            const exitGap = exitX - tdX;
+            const labelsRight = exitGap < 80;
+            return (
+              <g>
+                <circle cx={exitX} cy={tdY} r="11" fill={TOKENS.exitDot} opacity="0.25" />
+                <circle cx={exitX} cy={tdY} r="6" fill={TOKENS.exitDot} stroke="#0c1628" strokeWidth="1.5" />
+                {labelsRight ? (
+                  <>
+                    <text
+                      x={exitX + 18}
+                      y={tdY - 4}
+                      textAnchor="start"
+                      fontSize="14"
+                      fill={TOKENS.exitDot}
+                      fontWeight="800"
+                      fontFamily="monospace"
+                      stroke="#0c1628"
+                      strokeWidth="3"
+                      paintOrder="stroke"
+                    >
+                      Bremspunkt
+                    </text>
+                    <text
+                      x={exitX + 18}
+                      y={tdY + 12}
+                      textAnchor="start"
+                      fontSize="13"
+                      fill={TOKENS.exitDot}
+                      fontWeight="800"
+                      fontFamily="monospace"
+                      stroke="#0c1628"
+                      strokeWidth="3"
+                      paintOrder="stroke"
+                    >
+                      40 kt
+                    </text>
+                  </>
+                ) : (
+                  <>
+                    <text
+                      x={exitX}
+                      y={tdY - 36}
+                      textAnchor="middle"
+                      fontSize="14"
+                      fill={TOKENS.exitDot}
+                      fontWeight="800"
+                      fontFamily="monospace"
+                      stroke="#0c1628"
+                      strokeWidth="3"
+                      paintOrder="stroke"
+                    >
+                      Bremspunkt
+                    </text>
+                    <text
+                      x={exitX}
+                      y={tdY - 20}
+                      textAnchor="middle"
+                      fontSize="13"
+                      fill={TOKENS.exitDot}
+                      fontWeight="800"
+                      fontFamily="monospace"
+                      stroke="#0c1628"
+                      strokeWidth="3"
+                      paintOrder="stroke"
+                    >
+                      40 kt
+                    </text>
+                  </>
+                )}
+                <title>
+                  Bremspunkt — Ab hier hast du auf ~40 kt abgebremst. Das
+                  ist die typische High-Speed-Exit-Geschwindigkeit; am
+                  nächsten Rollwege-Abzweig kannst du die Bahn jetzt
+                  normal verlassen. NICHT die Stelle wo du tatsächlich
+                  abbiegst — das passiert später, an einem konkreten
+                  Taxiway.
+                </title>
+              </g>
+            );
+          })()}
 
           {/* RWY-Designator (groß links) — die Landerichtung. */}
           <text
