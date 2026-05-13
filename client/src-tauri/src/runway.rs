@@ -679,6 +679,48 @@ pub fn lookup_runway_with_fallback(
         .map(|m| (m, RunwaySource::OurAirportsFallback))
 }
 
+/// v0.8.0 — signed along-track Distanz vom Threshold-Punkt zum
+/// Sample-Punkt entlang der Runway-Centerline, in Metern. Positiv =
+/// Sample ist past-threshold (auf Runway-Seite), negativ = Sample
+/// ist auf der Anflug-Seite (Pilot mid-final). Diese Funktion ist
+/// die geometrische Kernoperation für TCH-actual-Measurement: man
+/// scannt den snapshot_buffer und nimmt den ersten Sample wo das
+/// Vorzeichen flippt (= echtes Threshold-Crossing).
+///
+/// Mathematik ist identisch zur Inline-Implementierung in
+/// `lookup_runway` / `lookup_runway_in_nav` — extrahiert, damit
+/// step_flight pro Sample iterieren kann ohne den ganzen Match-Pfad
+/// durchzulaufen.
+pub fn along_track_m_signed(
+    threshold_lat: f64,
+    threshold_lon: f64,
+    end_lat: f64,
+    end_lon: f64,
+    sample_lat: f64,
+    sample_lon: f64,
+) -> f64 {
+    let d_threshold = haversine_m(threshold_lat, threshold_lon, sample_lat, sample_lon);
+    let theta_ab = initial_bearing_rad(threshold_lat, threshold_lon, end_lat, end_lon);
+    let theta_ac = initial_bearing_rad(threshold_lat, threshold_lon, sample_lat, sample_lon);
+    let xtd = (d_threshold / EARTH_RADIUS_M).sin() * (theta_ac - theta_ab).sin();
+    let xtd = xtd.asin() * EARTH_RADIUS_M;
+    let cos_arg = ((d_threshold / EARTH_RADIUS_M).cos() / (xtd / EARTH_RADIUS_M).cos())
+        .clamp(-1.0, 1.0);
+    let along_m = cos_arg.acos() * EARTH_RADIUS_M;
+    let mut bearing_diff = theta_ac - theta_ab;
+    while bearing_diff > std::f64::consts::PI {
+        bearing_diff -= 2.0 * std::f64::consts::PI;
+    }
+    while bearing_diff <= -std::f64::consts::PI {
+        bearing_diff += 2.0 * std::f64::consts::PI;
+    }
+    if bearing_diff.abs() > std::f64::consts::FRAC_PI_2 {
+        -along_m
+    } else {
+        along_m
+    }
+}
+
 /// Great-circle distance in meters.
 fn haversine_m(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
     let phi1 = lat1.to_radians();

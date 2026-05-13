@@ -95,6 +95,14 @@
       "long_landing": "long landing",
       "severe": "severe"
     },
+    "tch_label": "Threshold crossing height",
+    "tch_class": {
+      "on_profile": "on profile",
+      "slightly_low": "slightly low",
+      "slightly_high": "slightly high",
+      "high": "high",
+      "below_profile": "below profile"
+    },
     "dds_label": "Displaced threshold",
     "dds_violation": "⚠ Touchdown in pre-threshold zone (illegal IRL)",
     "tdz_box_tooltip": "TDZ marker (ICAO Annex 14) — target touchdown zone (first 900 m or 1/3 of runway)",

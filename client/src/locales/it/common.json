@@ -95,6 +95,14 @@
       "long_landing": "atterraggio lungo",
       "severe": "grave"
     },
+    "tch_label": "Altezza di attraversamento soglia",
+    "tch_class": {
+      "on_profile": "sul profilo",
+      "slightly_low": "leggermente basso",
+      "slightly_high": "leggermente alto",
+      "high": "alto",
+      "below_profile": "sotto profilo"
+    },
     "dds_label": "Soglia spostata",
     "dds_violation": "⚠ Atterraggio nella zona pre-soglia (illegale IRL)",
     "tdz_box_tooltip": "Marcatore TDZ (ICAO Allegato 14) — zona target di contatto (primi 900 m o 1/3 della pista)",

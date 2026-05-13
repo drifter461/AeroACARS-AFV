@@ -2177,6 +2177,29 @@ function LandingDetail({
                     </dd>
                   </div>
                 )}
+              {/* v0.8.0 TCH (F5) — actual vs expected an der Threshold-
+                  Linie. Nur surfaced wenn aus Navigraph-Geometrie +
+                  AGL-Scan beide vorhanden sind. */}
+              {geometryTrusted &&
+                record.tch_actual_ft != null &&
+                record.tch_delta_ft != null && (
+                  <div>
+                    <dt>{t("landing.tch_label")}</dt>
+                    <dd>
+                      {record.tch_actual_ft.toFixed(0)} ft
+                      {record.runway_match.tch_expected_ft != null
+                        ? ` (Soll ${record.runway_match.tch_expected_ft})`
+                        : ""}
+                      {", "}
+                      {record.tch_delta_ft >= 0 ? "+" : ""}
+                      {record.tch_delta_ft.toFixed(0)} ft
+                      {record.tch_class &&
+                        ` · ${t(`landing.tch_class.${record.tch_class}`, {
+                          defaultValue: record.tch_class,
+                        })}`}
+                    </dd>
+                  </div>
+                )}
               {/* v0.8.0 DDS — nur surface bei Verstoss damit der pilot
                   nicht bei jedem normal-Touchdown eine "DDS ok"-Zeile
                   sieht. */}

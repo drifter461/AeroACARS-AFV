@@ -1027,7 +1027,26 @@ async fn fetch_navdata_for_flight(
 /// Token autoirisiert auch den MQTT-Login. Bei Token-Fehlen sendet der
 /// Fetcher kein Auth-Header und lädt damit bei keinem produktiven VPS
 /// (= 401), aber der OurAirports-Fallback greift transparent.
+///
+/// **Idempotency-Guard** (v0.8.0 QS): wenn `flight.navdata` bereits
+/// populiert ist — egal ob durch einen früheren Spawn im selben Flug,
+/// durch einen Test-Setup oder durch einen Race auf zwei legitime
+/// Init-Pfade — wird der Fetch NICHT erneut gestartet. So bleibt der
+/// Helper safe to call from any flight-start path; ein versehentliches
+/// Einhängen im Streamer-Loop kann sich höchstens als no-op zeigen,
+/// nicht als wiederkehrender VPS-Roundtrip.
 fn spawn_navdata_fetch(app: &AppHandle, flight: &Arc<ActiveFlight>) {
+    {
+        let cache = flight.navdata.lock().expect("navdata lock");
+        if !cache.airports.is_empty() {
+            tracing::debug!(
+                pirep_id = %flight.pirep_id,
+                airports = cache.airports.len(),
+                "navdata: cache already populated, skipping fetch"
+            );
+            return;
+        }
+    }
     let icaos = vec![flight.dpt_airport.clone(), flight.arr_airport.clone()];
     let token = secrets::load_api_key(MQTT_KEYRING_PASSWORD)
         .ok()
@@ -2063,6 +2082,15 @@ struct FlightStats {
     /// fließen. None bei OurAirports-Fallback (= die OurAirports-CSV
     /// hat diese Felder nicht).
     runway_nav_geometry: Option<aeroacars_mqtt::navdata::NavRunway>,
+    /// v0.8.0 F5: AGL (ft) am Threshold-Crossing — beim Touchdown-Edge
+    /// im Streamer-Tick aus dem snapshot_buffer extrahiert (= erster
+    /// Sample mit `along_track_m_signed >= 0`). None wenn:
+    ///   * keine Navigraph-Geometrie verfügbar (= keine genaue
+    ///     Threshold-Position),
+    ///   * der snapshot_buffer keinen Pre-Threshold-Sample enthält
+    ///     (= Buffer-Cadence-Mismatch oder spätes-Engagement),
+    ///   * Touchdown im Approach-Pfad gar nicht erreicht wurde.
+    runway_tch_actual_ft: Option<f32>,
     /// Latitude at the touchdown edge — captured separately from
     /// `last_lat` so a resume mid-rollout doesn't overwrite it.
     landing_lat: Option<f64>,
@@ -7086,9 +7114,6 @@ async fn flight_start(
         // Persist immediately so a Tauri restart mid-flight doesn't
         // lose the plan.
         save_active_flight(&app, &flight);
-    // v0.8.0: parallel-fetch dep/arr-Navdata vom VPS. Non-blocking
-    // (Background-Task), Failure → OurAirports-Fallback (transparent).
-    spawn_navdata_fetch(&app, &flight);
 
         // Push the planned waypoints to phpVMS so the live map / PIREP
         // detail can draw the planned track alongside the flown one.
@@ -7673,9 +7698,6 @@ async fn flight_start_manual(
         stats.flight_plan_source = Some("manual");
         drop(stats);
         save_active_flight(&app, &flight);
-    // v0.8.0: parallel-fetch dep/arr-Navdata vom VPS. Non-blocking
-    // (Background-Task), Failure → OurAirports-Fallback (transparent).
-    spawn_navdata_fetch(&app, &flight);
     }
 
     // v0.6.0/v0.6.1 — phpVMS-Worker zuerst spawnen (Hint, keine
@@ -8460,17 +8482,18 @@ impl TouchdownAirportSource {
 /// rechnen, an beide Orte feeden.
 ///
 /// TDZ + Aim werden für JEDE runway-match Quelle berechnet (length +
-/// td_distance reichen, beides ist auch in OurAirports). DDS braucht
-/// `displaced_threshold_ft` und ist deshalb nur bei Navigraph-Source
-/// verfügbar. TCH ist Stage-2 (braucht AGL@threshold-crossing scan
-/// aus dem 50-Hz-Sample-Buffer) und bleibt in Slice B als TODO —
-/// `tch_actual_ft` kann eine folgende Mini-Slice am Streamer-Tick
-/// im Approach befüllen.
+/// td_distance reichen, beides ist auch in OurAirports). DDS + TCH
+/// brauchen `displaced_threshold_ft` / `tch_ft` aus der Navigraph-
+/// Geometrie und sind deshalb nur bei Navigraph-Source verfügbar.
+/// TCH-actual wird im Streamer-Tick beim Touchdown-Edge aus dem 50-Hz-
+/// Buffer extrahiert (siehe `stats.runway_tch_actual_ft`); diese
+/// Funktion klassifiziert nur den vorberechneten Wert.
 #[derive(Debug, Clone, Default)]
 struct AssessedTouchdown {
     td_distance_from_threshold_m: Option<f64>,
     tdz: Option<runway_assessment::TdzResult>,
     aim: Option<runway_assessment::AimResult>,
+    tch: Option<runway_assessment::TchResult>,
     dds: Option<runway_assessment::DisplacedResult>,
 }
 
@@ -8486,11 +8509,32 @@ fn assess_touchdown(stats: &FlightStats) -> AssessedTouchdown {
     let dds = stats.runway_nav_geometry.as_ref().map(|g| {
         runway_assessment::classify_displaced(td_m, g.displaced_threshold_ft as f64)
     });
+    // F5 TCH: nur klassifizieren wenn BOTH der nav-geometric tch_ft
+    // AND der actual-measured tch_ft im Streamer-Tick vorhanden sind.
+    let tch = match (stats.runway_nav_geometry.as_ref(), stats.runway_tch_actual_ft) {
+        (Some(g), Some(actual)) => Some(runway_assessment::classify_tch(
+            actual as f64,
+            g.tch_ft as f64,
+        )),
+        _ => None,
+    };
     AssessedTouchdown {
         td_distance_from_threshold_m: Some(td_m),
         tdz,
         aim,
+        tch,
         dds,
+    }
+}
+
+fn tch_class_wire(class: runway_assessment::TchClass) -> &'static str {
+    use runway_assessment::TchClass::*;
+    match class {
+        OnProfile => "on_profile",
+        SlightlyLow => "slightly_low",
+        SlightlyHigh => "slightly_high",
+        High => "high",
+        BelowProfile => "below_profile",
     }
 }
 
@@ -9105,9 +9149,12 @@ where
             .as_ref()
             .map(|a| aim_class_wire(a.class).to_string()),
         aim_point_m: assessed.aim.as_ref().map(|a| a.aim_point_m),
-        tch_actual_ft: None,
-        tch_delta_ft: None,
-        tch_class: None,
+        tch_actual_ft: assessed.tch.as_ref().map(|t| t.actual_ft),
+        tch_delta_ft: assessed.tch.as_ref().map(|t| t.delta_ft),
+        tch_class: assessed
+            .tch
+            .as_ref()
+            .map(|t| tch_class_wire(t.class).to_string()),
         pre_displaced_threshold: assessed.dds.map(|d| d.in_pre_threshold_zone),
     })
 }
@@ -13131,9 +13178,6 @@ fn spawn_touchdown_sampler(app: AppHandle, flight: Arc<ActiveFlight>) {
                 // 18:48:25 und 18:51:16 nach Resume). Ein expliziter
                 // Save direkt nach dem Setzen verhindert das.
                 save_active_flight(&app, &flight);
-    // v0.8.0: parallel-fetch dep/arr-Navdata vom VPS. Non-blocking
-    // (Background-Task), Failure → OurAirports-Fallback (transparent).
-    spawn_navdata_fetch(&app, &flight);
                 let count = samples.len();
                 // v0.7.0 — clone fuer touchdown_v2 weiter unten
                 // (samples wird gleich in record_event gemoved)
@@ -13464,9 +13508,6 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                             Some(detail),
                         );
                         save_active_flight(&app, &flight);
-    // v0.8.0: parallel-fetch dep/arr-Navdata vom VPS. Non-blocking
-    // (Background-Task), Failure → OurAirports-Fallback (transparent).
-    spawn_navdata_fetch(&app, &flight);
                         tracing::info!(
                             pirep_id = %flight.pirep_id,
                             "sim-pause detected via snapshot.paused flag"
@@ -13650,9 +13691,6 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                         Some(detail),
                     );
                     save_active_flight(&app, &flight);
-    // v0.8.0: parallel-fetch dep/arr-Navdata vom VPS. Non-blocking
-    // (Background-Task), Failure → OurAirports-Fallback (transparent).
-    spawn_navdata_fetch(&app, &flight);
                     tracing::warn!(
                         pirep_id = %flight.pirep_id,
                         "sim disconnect detected, flight paused"
@@ -14145,9 +14183,17 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                                 .aim
                                 .as_ref()
                                 .map(|a| a.aim_point_m),
-                            tch_actual_ft: None,
-                            tch_delta_ft: None,
-                            tch_class: None,
+                            tch_actual_ft: payload_assessed
+                                .tch
+                                .as_ref()
+                                .map(|t| t.actual_ft),
+                            tch_delta_ft: payload_assessed
+                                .tch
+                                .as_ref()
+                                .map(|t| t.delta_ft),
+                            tch_class: payload_assessed.tch.as_ref().map(|t| {
+                                tch_class_wire(t.class).to_string()
+                            }),
                             pre_displaced_threshold: payload_assessed
                                 .dds
                                 .map(|d| d.in_pre_threshold_zone),
@@ -14408,9 +14454,6 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
             // launch for a flight the user already filed.
             if should_persist && !flight.stop.load(Ordering::Relaxed) {
                 save_active_flight(&app, &flight);
-    // v0.8.0: parallel-fetch dep/arr-Navdata vom VPS. Non-blocking
-    // (Background-Task), Failure → OurAirports-Fallback (transparent).
-    spawn_navdata_fetch(&app, &flight);
             }
 
             // On phase change, push the new status to phpVMS so the
@@ -16116,6 +16159,35 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
                     stats.runway_source = None;
                     stats.runway_nav_cycle = None;
                     stats.runway_nav_geometry = None;
+                }
+
+                // v0.8.0 F5 — TCH (Threshold-Crossing-Height) Actual:
+                // Scanne den snapshot_buffer chronologisch und nimm den
+                // ersten Sample dessen along-track-Distanz vom Landing-
+                // Threshold ≥ 0 ist (= Aircraft hat die Threshold-Linie
+                // gerade überflogen). agl_ft an diesem Sample = actual
+                // TCH. Nur möglich wenn wir die Navigraph-Geometrie
+                // haben (= echte Threshold-Position) — OurAirports-
+                // Threshold ist um bis zu 11 m off (MS713-Anchor),
+                // damit wäre der TCH-Wert unzuverlässig.
+                stats.runway_tch_actual_ft = None;
+                if let Some(geom) = stats.runway_nav_geometry.as_ref() {
+                    let thr_lat = geom.threshold.lat;
+                    let thr_lon = geom.threshold.lon;
+                    let end_lat = geom.far_end.lat;
+                    let end_lon = geom.far_end.lon;
+                    for s in stats.snapshot_buffer.iter() {
+                        let along = runway::along_track_m_signed(
+                            thr_lat, thr_lon, end_lat, end_lon, s.lat, s.lon,
+                        );
+                        if along >= 0.0 {
+                            // Erstes Sample past-threshold gefunden.
+                            // Realistisch landet der TCH-Sample im
+                            // Bereich 40-60 ft AGL für ILS-Anflüge.
+                            stats.runway_tch_actual_ft = Some(s.agl_ft);
+                            break;
+                        }
+                    }
                 }
 
                 // Reset bounce state for the new analyzer window.

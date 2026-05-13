@@ -149,12 +149,12 @@ pub fn classify_aim(td_distance_m: f64, runway_length_m: f64) -> AimResult {
 }
 
 // ─── F5: TCH-Compliance ──────────────────────────────────────────────
-// Currently unwired in production: the actual TCH needs an AGL@threshold-
-// crossing scan from the 50-Hz sample buffer in the streamer-tick, which
-// is a future slice. Function + types stay here so the wiring can drop
-// them in without touching the spec'd wire-format.
+// Wired in step_flight at the touchdown-edge: the streamer-tick scans
+// `stats.snapshot_buffer` for the earliest sample with positive along-
+// track distance from the landing threshold and stores its AGL in
+// `stats.runway_tch_actual_ft`. `classify_tch` then turns the
+// (actual, expected)-pair into a bucket.
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TchClass {
@@ -170,7 +170,6 @@ pub enum TchClass {
     BelowProfile,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TchResult {
     pub actual_ft: f64,
@@ -182,7 +181,6 @@ pub struct TchResult {
 /// Classify the actual TCH measured at threshold-crossing against the
 /// runway's published TCH. The actual_ft is provided by the caller —
 /// this function does no sample-buffer arithmetic, just classification.
-#[allow(dead_code)]
 pub fn classify_tch(actual_ft: f64, expected_ft: f64) -> TchResult {
     let delta_ft = actual_ft - expected_ft;
     let class = if delta_ft.abs() <= 5.0 {
