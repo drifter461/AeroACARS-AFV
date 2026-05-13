@@ -1041,8 +1041,11 @@ function FlugzeugBar({ props }: { props: RunwayDiagramV2Props }) {
         display: "flex",
         flexDirection: "column",
         gap: 2,
-        flex: "1 1 100%",
-        minWidth: 280,
+        // flex 999 0 auto: greedy growth (frisst restliche Zeile),
+        // kein flex-shrink. minWidth genug damit alle Stats inline
+        // passen ohne dass die Bar in zwei Zeilen umbricht.
+        flex: "999 0 auto",
+        minWidth: 320,
       }}
     >
       <div
@@ -1060,8 +1063,8 @@ function FlugzeugBar({ props }: { props: RunwayDiagramV2Props }) {
         style={{
           display: "flex",
           flexWrap: "wrap",
-          gap: "2px 18px",
-          fontSize: "0.95rem",
+          gap: "2px 12px",
+          fontSize: "0.88rem",
           fontWeight: 700,
           alignItems: "baseline",
         }}
