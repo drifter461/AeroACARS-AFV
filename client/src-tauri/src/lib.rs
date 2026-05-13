@@ -10292,6 +10292,30 @@ async fn flight_end(
 /// Fallback haette der Background-Worker 8x denselben kaputten Pfad
 /// retried. Empty-String-`flight_id` (pre-v0.7.7-Bid) wird zu None
 /// gemapped.
+/// v0.7.19 (QS-R3 Finding 1): Pure-function-Helper fuer
+/// `consume_bid_best_effort` — entscheidet welche der zwei IDs an
+/// `delete_bid` weitergegeben werden. Extrahiert damit der Path-
+/// Selection-Logik unit-testbar bleibt ohne dass ein `Client` (HTTP-
+/// I/O) im Test-Path noetig ist.
+///
+/// Returns:
+/// - `None` wenn beide IDs fehlen (Caller skipt komplett).
+/// - `Some((bid_id_opt, flight_id_opt))` sonst — leerer flight_id-
+///   String wird als None behandelt (pre-v0.7.7-Resume-Files).
+pub(crate) fn resolve_bid_cleanup_args(
+    bid_id: i64,
+    flight_id: Option<&str>,
+) -> Option<(Option<i64>, Option<String>)> {
+    let flight_id_opt = flight_id
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    if bid_id <= 0 && flight_id_opt.is_none() {
+        return None;
+    }
+    let bid_id_opt = if bid_id > 0 { Some(bid_id) } else { None };
+    Some((bid_id_opt, flight_id_opt))
+}
+
 async fn consume_bid_best_effort(
     app: &AppHandle,
     client: &Client,
@@ -10300,15 +10324,27 @@ async fn consume_bid_best_effort(
     flight_id: Option<&str>,
     reason: &str,
 ) {
-    if bid_id <= 0 {
+    // v0.7.19 (QS-R3 Finding 1): nur skippen wenn BEIDE IDs fehlen.
+    // Frueher: `if bid_id <= 0 { return; }` — hat den flight_id-only-
+    // Pfad still verschluckt. Im Orphan-Cleanup-/Accident-Filing-Pfad
+    // kann es legitim vorkommen dass nur die phpVMS-flight_id bekannt
+    // ist (z. B. bei VAs ohne separates bid_id-Feld).
+    let Some((bid_id_opt, flight_id_owned)) =
+        resolve_bid_cleanup_args(bid_id, flight_id)
+    else {
         return;
-    }
-    let flight_id_opt = flight_id.filter(|s| !s.is_empty());
-    match client.delete_bid(Some(bid_id), flight_id_opt).await {
-        Ok(()) => tracing::info!(bid_id, "bid removed after PIREP filing"),
+    };
+    let flight_id_opt = flight_id_owned.as_deref();
+    match client.delete_bid(bid_id_opt, flight_id_opt).await {
+        Ok(()) => tracing::info!(
+            ?bid_id_opt,
+            ?flight_id_opt,
+            "bid removed after PIREP filing"
+        ),
         Err(e) => {
             tracing::warn!(
-                bid_id,
+                ?bid_id_opt,
+                ?flight_id_opt,
                 pirep_id,
                 error = %e,
                 "delete_bid failed — enqueueing for pending_bid_cleanup retry"
@@ -10316,8 +10352,8 @@ async fn consume_bid_best_effort(
             enqueue_pending_bid_cleanup(
                 app,
                 pirep_id,
-                Some(bid_id),
-                flight_id_opt.map(|s| s.to_string()),
+                bid_id_opt,
+                flight_id_owned.clone(),
                 reason,
             );
         }
@@ -20402,6 +20438,68 @@ pub fn run() {
 // Name, snake_case, Variant-Renames) bricht das stillschweigend die
 // Cancel-Flow-UX. Dieser Test hält die drei Wire-Shapes fest.
 // ----------------------------------------------------------------------
+// ----------------------------------------------------------------------
+// v0.7.19 GAF-707 (QS-R3 Finding 1+3): Bid-Cleanup-Path-Selection Tests.
+//
+// `consume_bid_best_effort` selbst macht HTTP-IO und braucht einen
+// echten phpVMS-`Client`. Die ID-Selection-Logik ist aber pure und
+// wurde nach `resolve_bid_cleanup_args` extrahiert — diese Tests
+// halten den Edge-Case "bid_id<=0 + flight_id Some" fest, damit der
+// Pfad nicht wieder still verschluckt wird wie in QS-R2.
+// ----------------------------------------------------------------------
+#[cfg(test)]
+mod resolve_bid_cleanup_args_tests {
+    use super::*;
+
+    #[test]
+    fn both_empty_returns_none() {
+        // Caller hat weder bid noch flight_id → consume_bid_best_effort
+        // skipt komplett (kein delete_bid, kein Queue-Eintrag).
+        assert_eq!(resolve_bid_cleanup_args(0, None), None);
+        assert_eq!(resolve_bid_cleanup_args(-5, Some("")), None);
+        assert_eq!(resolve_bid_cleanup_args(0, Some("")), None);
+    }
+
+    #[test]
+    fn only_bid_id_passes_bid_id() {
+        let r = resolve_bid_cleanup_args(42, None);
+        assert_eq!(r, Some((Some(42), None)));
+    }
+
+    #[test]
+    fn only_flight_id_passes_flight_id() {
+        // QS-R3 Finding 1 anchor: bid_id<=0 darf NICHT mehr early-out
+        // sein wenn flight_id present ist.
+        let r = resolve_bid_cleanup_args(0, Some("flightid_42"));
+        assert_eq!(r, Some((None, Some("flightid_42".to_string()))));
+    }
+
+    #[test]
+    fn negative_bid_id_with_flight_id_passes_flight_only() {
+        let r = resolve_bid_cleanup_args(-1, Some("flightid_42"));
+        assert_eq!(r, Some((None, Some("flightid_42".to_string()))));
+    }
+
+    #[test]
+    fn both_ids_pass_both() {
+        // delete_bid baut intern die Cascade (bid_id zuerst, bei 400/
+        // 404/422 → flight_id-Fallback). Hier nur die Path-Selection
+        // pruefen.
+        let r = resolve_bid_cleanup_args(7, Some("flightid_7"));
+        assert_eq!(r, Some((Some(7), Some("flightid_7".to_string()))));
+    }
+
+    #[test]
+    fn empty_string_flight_id_treated_as_none() {
+        // Pre-v0.7.7-Resume-Files persistieren `flight_id: String`
+        // ohne Inhalt. Der wird als None behandelt.
+        let r = resolve_bid_cleanup_args(0, Some(""));
+        assert_eq!(r, None);
+        let r2 = resolve_bid_cleanup_args(42, Some(""));
+        assert_eq!(r2, Some((Some(42), None)));
+    }
+}
+
 #[cfg(test)]
 mod flight_cancel_outcome_wire_format_tests {
     use super::*;
