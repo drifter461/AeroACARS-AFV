@@ -34,6 +34,7 @@ use url::Url;
 
 pub mod provision;
 pub mod log_upload;
+pub mod navdata;
 
 const STATUS_ONLINE: &str = "online";
 const STATUS_OFFLINE: &str = "offline";
@@ -592,6 +593,68 @@ pub struct TouchdownPayload {
     /// Pfad: gleich `ts`. None wenn kein Accident.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accident_at: Option<i64>,
+
+    // ─── v0.8.0 VPS-Navdata + Runway-Awareness ────────────────────────
+    //
+    // Identische Felder wie in `storage::LandingRecord`. Alle
+    // skip_if_none damit Recorder + Webapp die Felder nur sehen wenn
+    // tatsächlich gegen VPS-Navdata bewertet wurde — pre-v0.8.0
+    // Touchdowns kommen ohne diese Felder durch und der MQTT-Consumer
+    // muss nichts ändern.
+    /// "navigraph" | "ourairports_fallback". Welche Quelle die
+    /// Runway-Match-Daten geliefert hat.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub navdata_source: Option<String>,
+    /// AIRAC-Cycle der genutzten Navigraph-Daten (e.g. "2604"). None
+    /// wenn navdata_source = "ourairports_fallback".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub navdata_cycle: Option<String>,
+    /// True-course der Landerichtung in deg. Webapp braucht das fuer
+    /// die RunwayDiagram-Achse.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runway_true_course_deg: Option<f64>,
+    /// Displaced-Threshold in ft (0 = keine).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runway_displaced_threshold_ft: Option<i32>,
+    /// Erwartete Threshold-Crossing-Height in ft (typisch 49-55).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runway_tch_expected_ft: Option<i32>,
+    /// Veröffentlichter Glideslope-Winkel in Grad (typisch 3.0).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runway_glideslope_angle_deg: Option<f64>,
+    /// Signed along-track-Distanz vom Landing-Threshold zum Touchdown,
+    /// in Metern. Positiv = past, negativ = undershoot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub td_distance_from_threshold_m: Option<f64>,
+    /// F3 TDZ-Result: true wenn Touchdown im TDZ-Marker. None bei
+    /// runways < 1200 m.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub td_in_tdz: Option<bool>,
+    /// F3 TDZ-Marker-Laenge in Metern (≤ 900, ≤ length/3).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub td_tdz_length_m: Option<f64>,
+    /// F4 Aim-Point delta in Metern (positiv = past, negativ = short).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aim_delta_m: Option<f64>,
+    /// F4 Aim-Point classification: "perfect" | "short_of_aim" |
+    /// "past_aim" | "long_landing" | "severe".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aim_class: Option<String>,
+    /// F4 Aim-Point distance from threshold in Metern (300 oder 400).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aim_point_m: Option<f64>,
+    /// F5 actual TCH (AGL ft beim Threshold-Crossing).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tch_actual_ft: Option<f64>,
+    /// F5 TCH delta = actual - expected (ft). Positiv = ueber Profil.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tch_delta_ft: Option<f64>,
+    /// F5 TCH classification.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tch_class: Option<String>,
+    /// F6 Displaced-Threshold-Warning: Touchdown im Pre-Threshold-Paint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pre_displaced_threshold: Option<bool>,
 }
 
 fn is_false(b: &bool) -> bool { !*b }

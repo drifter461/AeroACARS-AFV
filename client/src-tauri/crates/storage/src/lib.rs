@@ -200,6 +200,33 @@ pub struct LandingRunwayMatch {
     pub centerline_distance_abs_ft: f64,
     pub side: String,
     pub touchdown_distance_from_threshold_ft: f64,
+
+    // ─── v0.8.0 navdata extension ────────────────────────────────────
+    // All fields Option + #[serde(default)] for backward-compat:
+    // pre-v0.8.0 landing_history.json entries deserialize cleanly with
+    // these as None. Populated only when the match came from a
+    // VPS-loaded NavAirport (source = "navigraph").
+    /// "navigraph" | "ourairports_fallback". `None` for pre-v0.8.0 records.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// AIRAC-Cycle the navigraph match was resolved against (e.g. "2604").
+    /// `None` for `ourairports_fallback` or pre-v0.8.0 records.
+    #[serde(default)]
+    pub nav_cycle: Option<String>,
+    /// Geographic true-course of the landing direction. Needed by the
+    /// RunwayDiagram for the visual axis + by wind-vs-runway recompute.
+    #[serde(default)]
+    pub true_course_deg: Option<f64>,
+    /// Displaced-threshold distance in feet (0 when the painted
+    /// threshold = landing threshold).
+    #[serde(default)]
+    pub displaced_threshold_ft: Option<i32>,
+    /// Threshold Crossing Height the pilot was supposed to be at.
+    #[serde(default)]
+    pub tch_expected_ft: Option<i32>,
+    /// Published glideslope angle in degrees (typical 3.0).
+    #[serde(default)]
+    pub glideslope_angle_deg: Option<f64>,
 }
 
 /// One landing record — written once when the PIREP is filed.
@@ -433,6 +460,55 @@ pub struct LandingRecord {
     /// / "negative_float_distance"
     #[serde(default)]
     pub runway_geometry_reason: Option<String>,
+
+    // ─── v0.8.0 VPS-Navdata + Runway-Awareness ───────────────────────
+    //
+    // Spec docs/spec/v0.8.0-vps-navdata-runway-awareness.md. Alle Felder
+    // optional + serde(default) damit pre-v0.8.0-Records weiter laden.
+    // Werden vom Streamer-Tick populiert wenn ActiveFlight.navdata Some
+    // ist (= VPS-Daten geladen). Bei OurAirports-Fallback bleiben TDZ /
+    // Aim / TCH / DDS None (= Pills zeigen "n/a", LandingPanel skippt
+    // sie).
+
+    /// Signed along-track distance from the landing threshold to the
+    /// touchdown point, in meters. Positive = past threshold, negative
+    /// = undershoot. Source-agnostic — present for both navigraph and
+    /// fallback matches when a runway was correlated.
+    #[serde(default)]
+    pub td_distance_from_threshold_m: Option<f64>,
+    /// F3 TDZ-Result: true when the touchdown sits inside the painted
+    /// TDZ marker (0..900 m or 0..length/3, whichever is shorter).
+    /// `None` when the runway is too short for TDZ markings (< 1200 m).
+    #[serde(default)]
+    pub td_in_tdz: Option<bool>,
+    /// 1-indexed third of the runway the touchdown lies in (1/2/3).
+    #[serde(default)]
+    pub td_third: Option<u8>,
+    /// F4 Aim-Point delta in meters (positive = past aim, negative = short).
+    #[serde(default)]
+    pub aim_delta_m: Option<f64>,
+    /// F4 Aim-Point classification: "perfect" | "short_of_aim" |
+    /// "past_aim" | "long_landing" | "severe".
+    #[serde(default)]
+    pub aim_class: Option<String>,
+    /// F5 actual TCH measured at threshold-crossing (AGL ft). Captured
+    /// by the streamer-tick from the 50 Hz buffer when available.
+    #[serde(default)]
+    pub tch_actual_ft: Option<f64>,
+    /// F5 TCH delta = actual - expected (ft). Sign-convention: positive
+    /// = above profile, negative = below.
+    #[serde(default)]
+    pub tch_delta_ft: Option<f64>,
+    /// F5 TCH classification: "on_profile" | "slightly_low" |
+    /// "slightly_high" | "high" | "below_profile".
+    #[serde(default)]
+    pub tch_class: Option<String>,
+    /// F6 Displaced-Threshold-Warning: pilot touched down in the
+    /// pre-threshold paint zone (illegal). Only true when the runway
+    /// has a non-zero displaced_threshold_ft AND the touchdown sits
+    /// between the painted start and the landing threshold.
+    #[serde(default)]
+    pub pre_displaced_threshold: Option<bool>,
 
     // ─── v0.7.19 GAF-707 Accident-Detection ───────────────────────────
     //

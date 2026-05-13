@@ -535,6 +535,140 @@ pub fn lookup_runway(
     })
 }
 
+/// Quelle aus der die `RunwayMatch` stammt. Wird im LandingRecord
+/// persistiert und im Activity-Log surface'd damit der Pilot sieht ob
+/// gerade Navigraph-Daten oder der OurAirports-Fallback aktiv war.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunwaySource {
+    /// Match aus VPS-Navdata (Aerosoft DFD AIRAC 2604+).
+    Navigraph,
+    /// Match aus eingebauter OurAirports-CSV (Fallback bei VPS-Outage
+    /// oder unbekanntem ICAO).
+    OurAirportsFallback,
+}
+
+/// Wie `lookup_runway`, aber gegen die NavRunway-Liste eines per VPS
+/// geladenen Airports. Mathematik ist identisch — die Quelle ist nur
+/// genauer (Jeppesen-Threshold-Koordinaten statt Community-CSV).
+///
+/// Verhalten:
+///   * Iteriert über `airport.runways`, wählt die NavRunway deren
+///     `true_course` am besten zu `aircraft_heading_true_deg` passt
+///     (analog zur le_ident vs he_ident-Disambiguation der CSV-Variante).
+///   * Berechnet Cross-Track + Along-Track gegen `threshold` → `end`.
+///   * Returnt `None` wenn das Touchdown > 3 km + runway_length von der
+///     gewählten Schwelle entfernt ist (= Pilot ist nicht auf diesem
+///     Airport gelandet — Caller soll auf OurAirports zurückfallen).
+pub fn lookup_runway_in_nav(
+    lat: f64,
+    lon: f64,
+    aircraft_heading_true_deg: f32,
+    airport: &aeroacars_mqtt::navdata::NavAirport,
+) -> Option<RunwayMatch> {
+    if airport.runways.is_empty() {
+        return None;
+    }
+
+    // Pick the runway end whose true_course is closest to the aircraft
+    // heading at touchdown — that's the runway the pilot landed on.
+    let chosen = airport
+        .runways
+        .iter()
+        .min_by(|a, b| {
+            heading_diff(aircraft_heading_true_deg, a.true_course as f32)
+                .partial_cmp(&heading_diff(aircraft_heading_true_deg, b.true_course as f32))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .expect("runways non-empty checked above");
+
+    let threshold_lat = chosen.threshold.lat;
+    let threshold_lon = chosen.threshold.lon;
+    let end_lat = chosen.far_end.lat;
+    let end_lon = chosen.far_end.lon;
+    let runway_ident = chosen.designator.clone();
+    let runway_heading = chosen.true_course as f32;
+    let length_ft = chosen.length_ft as f32;
+    let width_ft = chosen.width_ft.unwrap_or(0) as f32;
+    let surface = chosen.surface.clone().unwrap_or_default();
+
+    let d_threshold = haversine_m(threshold_lat, threshold_lon, lat, lon);
+    if d_threshold > DEFAULT_MAX_DISTANCE_M + (length_ft as f64 * 0.3048) {
+        return None;
+    }
+
+    // Same cross-track / along-track math as the CSV path. Kept
+    // verbatim so MS713-equivalent calls reproduce identical signs.
+    let theta_ab = initial_bearing_rad(threshold_lat, threshold_lon, end_lat, end_lon);
+    let theta_ac = initial_bearing_rad(threshold_lat, threshold_lon, lat, lon);
+    let d_ab = d_threshold;
+    let xtd_m = (d_ab / EARTH_RADIUS_M).sin() * (theta_ac - theta_ab).sin();
+    let xtd_m = xtd_m.asin() * EARTH_RADIUS_M;
+    let cos_arg = (d_ab / EARTH_RADIUS_M).cos() / (xtd_m / EARTH_RADIUS_M).cos();
+    let cos_arg = cos_arg.clamp(-1.0, 1.0);
+    let along_m = cos_arg.acos() * EARTH_RADIUS_M;
+    let mut bearing_diff = theta_ac - theta_ab;
+    while bearing_diff > std::f64::consts::PI {
+        bearing_diff -= 2.0 * std::f64::consts::PI;
+    }
+    while bearing_diff <= -std::f64::consts::PI {
+        bearing_diff += 2.0 * std::f64::consts::PI;
+    }
+    let along_signed_m = if bearing_diff.abs() > std::f64::consts::FRAC_PI_2 {
+        -along_m
+    } else {
+        along_m
+    };
+    let along_ft = along_signed_m * 3.280_839_895;
+    let centerline_distance_abs_ft = xtd_m.abs() * 3.280_839_895;
+    let side = if xtd_m.abs() < CENTERLINE_TOLERANCE_M {
+        "CENTER"
+    } else if xtd_m > 0.0 {
+        "RIGHT"
+    } else {
+        "LEFT"
+    };
+
+    Some(RunwayMatch {
+        airport_ident: airport.icao.clone(),
+        runway_ident,
+        heading_true_deg: runway_heading,
+        length_ft,
+        width_ft,
+        surface,
+        threshold_lat,
+        threshold_lon,
+        end_lat,
+        end_lon,
+        centerline_distance_m: xtd_m,
+        centerline_distance_abs_ft,
+        touchdown_distance_from_threshold_ft: along_ft,
+        side: side.to_string(),
+    })
+}
+
+/// Try Navigraph first, fall back to OurAirports. Returns the match
+/// plus the source that produced it — Callers feed both into the
+/// LandingRecord so the audit-log shows where the numbers came from.
+///
+/// `airport_nav` is the NavAirport from VPS (None when the pilot
+/// flight had a VPS-outage or an unknown ICAO). Pass `None` to skip
+/// the Navigraph path entirely.
+pub fn lookup_runway_with_fallback(
+    lat: f64,
+    lon: f64,
+    aircraft_heading_true_deg: f32,
+    airport_nav: Option<&aeroacars_mqtt::navdata::NavAirport>,
+) -> Option<(RunwayMatch, RunwaySource)> {
+    if let Some(apt) = airport_nav {
+        if let Some(m) = lookup_runway_in_nav(lat, lon, aircraft_heading_true_deg, apt) {
+            return Some((m, RunwaySource::Navigraph));
+        }
+    }
+    lookup_runway(lat, lon, aircraft_heading_true_deg)
+        .map(|m| (m, RunwaySource::OurAirportsFallback))
+}
+
 /// Great-circle distance in meters.
 fn haversine_m(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
     let phi1 = lat1.to_radians();
@@ -694,5 +828,171 @@ mod tests {
         assert!((heading_diff(350.0, 10.0) - 20.0).abs() < 0.001);
         assert!((heading_diff(85.7, 265.7) - 180.0).abs() < 0.001);
         assert!((heading_diff(266.0, 265.7) - 0.3).abs() < 0.001);
+    }
+
+    // ─── v0.8.0: Navigraph-aware lookup tests ────────────────────────
+
+    use aeroacars_mqtt::navdata::{NavAirport, NavIls, NavPoint, NavRunway};
+
+    /// MS713-Anchor: OLBA RWY 17 mit echten Aerosoft-DFD-2604-Threshold-
+    /// Koordinaten. Wir bauen den NavAirport synthetisch nach (die Werte
+    /// kommen 1:1 aus `E:\NAV_DATA\Airports.txt` R-Record).
+    fn olba_nav_fixture() -> NavAirport {
+        NavAirport {
+            cycle: "2604".to_string(),
+            valid_to: "2026-05-14".to_string(),
+            icao: "OLBA".to_string(),
+            name: "Rafic Hariri Intl".to_string(),
+            latitude: 33.819_050,
+            longitude: 35.490_031,
+            elevation_ft: Some(85),
+            runways: vec![
+                NavRunway {
+                    designator: "17".to_string(),
+                    magnetic_course: 172.0,
+                    // Computed bearing 33.838364,35.486978 → 33.809288,35.488861.
+                    true_course: 176.94,
+                    length_ft: 10663,
+                    width_ft: Some(148),
+                    surface: Some("ASP".to_string()),
+                    threshold: NavPoint {
+                        lat: 33.838_364,
+                        lon: 35.486_978,
+                        elev_ft: Some(85),
+                    },
+                    far_end: NavPoint {
+                        lat: 33.809_288,
+                        lon: 35.488_861,
+                        elev_ft: Some(36),
+                    },
+                    displaced_threshold_ft: 0,
+                    ils: Some(NavIls {
+                        freq_mhz: 109.5,
+                        course: 172.0,
+                        category: 1,
+                    }),
+                    glideslope_angle: 3.0,
+                    tch_ft: 49,
+                },
+                NavRunway {
+                    designator: "35".to_string(),
+                    magnetic_course: 352.0,
+                    true_course: 356.94,
+                    length_ft: 10663,
+                    width_ft: Some(148),
+                    surface: Some("ASP".to_string()),
+                    threshold: NavPoint {
+                        lat: 33.809_288,
+                        lon: 35.488_861,
+                        elev_ft: Some(36),
+                    },
+                    far_end: NavPoint {
+                        lat: 33.838_364,
+                        lon: 35.486_978,
+                        elev_ft: Some(85),
+                    },
+                    displaced_threshold_ft: 2690,
+                    ils: None,
+                    glideslope_angle: 3.0,
+                    tch_ft: 50,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn nav_lookup_picks_landing_runway_by_heading() {
+        let apt = olba_nav_fixture();
+        // Aircraft heading 175° → RWY 17 (true_course 176.94).
+        let m = lookup_runway_in_nav(33.838_364, 35.486_978, 175.0, &apt)
+            .expect("touchdown at threshold should resolve");
+        assert_eq!(m.airport_ident, "OLBA");
+        assert_eq!(m.runway_ident, "17");
+        assert!(m.centerline_distance_m.abs() < 1.0);
+        assert!(m.touchdown_distance_from_threshold_ft.abs() < 5.0);
+
+        // Aircraft heading 355° → RWY 35 (true_course 356.94).
+        let m = lookup_runway_in_nav(33.809_288, 35.488_861, 355.0, &apt)
+            .expect("RWY 35 threshold");
+        assert_eq!(m.runway_ident, "35");
+    }
+
+    /// MS713 cross-track sanity: pilot touched down somewhere LEFT of
+    /// the OLBA RWY 17 centerline. Against the corrected Navigraph
+    /// threshold we get a LEFT/negative xtd value. The pre-v0.8.0 code
+    /// against OurAirports' wrong threshold gave a positive (RIGHT)
+    /// xtd — that was the bug.
+    ///
+    /// We construct a synthetic touchdown ~250 m down the RWY and ~6.6 m
+    /// LEFT of the centerline (= the actual recorded MS713 position).
+    #[test]
+    fn nav_lookup_ms713_anchor_left_of_centerline() {
+        let apt = olba_nav_fixture();
+        let landing_bearing_rad = 176.94_f64.to_radians();
+        let left_bearing = landing_bearing_rad - std::f64::consts::FRAC_PI_2;
+        // 250 m along + 6.6 m left.
+        let (lat1, lon1) = destination(33.838_364, 35.486_978, landing_bearing_rad, 250.0);
+        let (lat2, lon2) = destination(lat1, lon1, left_bearing, 6.6);
+        let m = lookup_runway_in_nav(lat2, lon2, 177.0, &apt).expect("MS713 should resolve");
+        assert_eq!(m.runway_ident, "17");
+        assert_eq!(m.side, "LEFT", "MS713 was left of centerline");
+        // Negative cross-track = LEFT, ~ -6.6 m with a small spherical
+        // drift tolerance.
+        assert!(
+            (m.centerline_distance_m + 6.6).abs() < 1.5,
+            "xtd = {} m (expected ≈ -6.6)",
+            m.centerline_distance_m
+        );
+    }
+
+    #[test]
+    fn nav_lookup_rejects_distant_touchdown() {
+        let apt = olba_nav_fixture();
+        // Far-away touchdown (Cyprus) — should NOT match OLBA.
+        let m = lookup_runway_in_nav(35.0, 33.0, 180.0, &apt);
+        assert!(m.is_none());
+    }
+
+    #[test]
+    fn fallback_uses_navigraph_when_available() {
+        let apt = olba_nav_fixture();
+        let (m, src) =
+            lookup_runway_with_fallback(33.838_364, 35.486_978, 175.0, Some(&apt))
+                .expect("should match Navigraph runway");
+        assert_eq!(src, RunwaySource::Navigraph);
+        assert_eq!(m.runway_ident, "17");
+    }
+
+    #[test]
+    fn fallback_uses_ourairports_when_nav_none() {
+        // No NavAirport provided → falls back to bundled CSV. EDDP/26R
+        // is in OurAirports, so we get a match flagged as fallback.
+        let (m, src) = lookup_runway_with_fallback(
+            EDDP_26R_THR_LAT,
+            EDDP_26R_THR_LON,
+            EDDP_26R_HEADING,
+            None,
+        )
+        .expect("OurAirports has EDDP");
+        assert_eq!(src, RunwaySource::OurAirportsFallback);
+        assert_eq!(m.airport_ident, "EDDP");
+        assert_eq!(m.runway_ident, "26R");
+    }
+
+    #[test]
+    fn fallback_uses_ourairports_when_nav_lookup_misses() {
+        // NavAirport provided but the touchdown is 1000 km away → nav
+        // returns None, fallback kicks in and resolves to EDDP/26R from
+        // OurAirports.
+        let apt = olba_nav_fixture();
+        let (m, src) = lookup_runway_with_fallback(
+            EDDP_26R_THR_LAT,
+            EDDP_26R_THR_LON,
+            EDDP_26R_HEADING,
+            Some(&apt),
+        )
+        .expect("OurAirports has EDDP");
+        assert_eq!(src, RunwaySource::OurAirportsFallback);
+        assert_eq!(m.airport_ident, "EDDP");
     }
 }

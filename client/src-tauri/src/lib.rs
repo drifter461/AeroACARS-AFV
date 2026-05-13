@@ -10,6 +10,7 @@
 // VA-Owner-kontrolliert via Webapp-Admin-Settings). Audit Q4-2026-05 (C1).
 mod accident;
 mod runway;
+mod runway_assessment;
 mod xplane_plugin_install;
 // v0.6.0 — neuer zentraler State-Owner. Aktiviert wenn die Env-Var
 // AEROACARS_LEGACY_STREAMER NICHT gesetzt ist (Default = neu). Bei
@@ -867,6 +868,117 @@ struct ActiveFlight {
     /// v0.6.2 zeigte der Indikator „queued offline" für jeden Backlog,
     /// auch ohne echten Connection-Loss → Pilot-Verwirrung.
     connection_state: std::sync::atomic::AtomicU8,
+
+    /// v0.8.0 VPS-Navdata — geladene Airport-Daten (dep/arr/alt) für
+    /// die Runway-Awareness-Features. Beim Flugstart parallel vom VPS
+    /// gezogen (`fetch_navdata_for_flight`). Cache-Lifetime = Lifetime
+    /// des aktiven Flugs (= bis PIREP filed). HashMap-Key ist das ICAO
+    /// in UPPERCASE. Empty wenn VPS nicht erreichbar — die
+    /// LandingRecord-Felder bleiben dann None und der Pilot-Client
+    /// fällt automatisch auf OurAirports zurück
+    /// (`runway::lookup_runway_with_fallback`).
+    ///
+    /// Aktiver Cycle steht zusätzlich in `navdata_cycle` — wird ins
+    /// Activity-Log + TouchdownPayload weitergegeben.
+    navdata: Mutex<NavdataCache>,
+}
+
+/// Pro-Flug-Cache der NavAirport-Daten. Default = leer = OurAirports-
+/// Fallback aktiv für alle ICAOs.
+#[derive(Debug, Default)]
+struct NavdataCache {
+    /// ICAO (uppercase) → NavAirport.
+    airports: std::collections::HashMap<String, aeroacars_mqtt::navdata::NavAirport>,
+    /// AIRAC-Cycle ("2604"). Wird beim ersten erfolgreichen Fetch
+    /// gesetzt — alle weiteren Fetches im selben Flug schreiben denselben
+    /// Wert (Recorder garantiert dass GET /airport/X dieselbe Cycle-ID
+    /// liefert wie der zuletzt aktivierte Cycle).
+    cycle: Option<String>,
+}
+
+impl NavdataCache {
+    fn get(&self, icao: &str) -> Option<&aeroacars_mqtt::navdata::NavAirport> {
+        self.airports.get(&icao.trim().to_uppercase())
+    }
+
+    fn is_empty(&self) -> bool {
+        self.airports.is_empty()
+    }
+}
+
+/// v0.8.0: Lädt Navdata für bis zu 3 ICAOs (dep/arr/alt) parallel vom
+/// VPS und schreibt sie in `flight.navdata`. Best-effort — bei Netzwerk-
+/// Fehlern bleibt der Cache leer und der Pilot-Client fällt auf
+/// OurAirports zurück. Wird vom flight_start-Pfad in einer Background-
+/// Task aufgerufen, blockiert den Flugstart nicht.
+///
+/// Behavior:
+///   * Skippt leere ICAO-Strings (z.B. wenn der Bid keinen Alternate hat).
+///   * Dedupe per uppercase-ICAO (dep == arr im local-pattern-flight).
+///   * 404 vom VPS → ICAO nicht im aktiven Cycle → silently skip.
+///   * Network-Fehler → loggt warn!, restliche ICAOs werden trotzdem versucht.
+async fn fetch_navdata_for_flight(
+    flight: Arc<ActiveFlight>,
+    icaos: Vec<String>,
+    base_override: Option<String>,
+) {
+    let mut wanted: Vec<String> = icaos
+        .into_iter()
+        .map(|s| s.trim().to_uppercase())
+        .filter(|s| !s.is_empty() && s.len() == 4)
+        .collect();
+    wanted.sort();
+    wanted.dedup();
+    if wanted.is_empty() {
+        return;
+    }
+
+    let mut handles = Vec::with_capacity(wanted.len());
+    for icao in wanted {
+        let base = base_override.clone();
+        handles.push(tokio::spawn(async move {
+            let res = aeroacars_mqtt::navdata::get_airport(&icao, base.as_deref()).await;
+            (icao, res)
+        }));
+    }
+
+    for h in handles {
+        let (icao, res) = match h.await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(error = %e, "navdata fetch task join failed");
+                continue;
+            }
+        };
+        match res {
+            Ok(airport) => {
+                let cycle = airport.cycle.clone();
+                let mut cache = flight.navdata.lock().expect("navdata lock");
+                cache.airports.insert(icao.clone(), airport);
+                if cache.cycle.is_none() {
+                    cache.cycle = Some(cycle.clone());
+                }
+                tracing::info!(
+                    icao = %icao,
+                    cycle = %cycle,
+                    "navdata: VPS-Daten geladen"
+                );
+            }
+            Err(aeroacars_mqtt::navdata::NavdataError::NotFound(_)) => {
+                tracing::debug!(
+                    icao = %icao,
+                    "navdata: ICAO nicht im aktiven Cycle, OurAirports-Fallback aktiv"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    icao = %icao,
+                    error = %e,
+                    "navdata: VPS-Fetch fehlgeschlagen, OurAirports-Fallback"
+                );
+            }
+        }
+    }
 }
 
 /// Connection-State-Konstanten für ActiveFlight.connection_state.
@@ -6265,6 +6377,11 @@ async fn flight_adopt(
         position_outbox: Mutex::new(std::collections::VecDeque::new()),
         phpvms_worker_spawned: AtomicBool::new(false),
         connection_state: std::sync::atomic::AtomicU8::new(CONN_STATE_LIVE),
+        // v0.8.0: Navdata-Cache startet leer — wird von
+        // `fetch_navdata_for_flight` (Slice B) parallel beim Flugstart
+        // populiert. Leer = OurAirports-Fallback aktiv (= Verhalten
+        // vor v0.8.0).
+        navdata: Mutex::new(NavdataCache::default()),
     });
 
     save_active_flight(&app, &flight);
@@ -6828,6 +6945,11 @@ async fn flight_start(
         position_outbox: Mutex::new(std::collections::VecDeque::new()),
         phpvms_worker_spawned: AtomicBool::new(false),
         connection_state: std::sync::atomic::AtomicU8::new(CONN_STATE_LIVE),
+        // v0.8.0: Navdata-Cache startet leer — wird von
+        // `fetch_navdata_for_flight` (Slice B) parallel beim Flugstart
+        // populiert. Leer = OurAirports-Fallback aktiv (= Verhalten
+        // vor v0.8.0).
+        navdata: Mutex::new(NavdataCache::default()),
     });
 
     save_active_flight(&app, &flight);
@@ -7429,6 +7551,11 @@ async fn flight_start_manual(
         position_outbox: Mutex::new(std::collections::VecDeque::new()),
         phpvms_worker_spawned: AtomicBool::new(false),
         connection_state: std::sync::atomic::AtomicU8::new(CONN_STATE_LIVE),
+        // v0.8.0: Navdata-Cache startet leer — wird von
+        // `fetch_navdata_for_flight` (Slice B) parallel beim Flugstart
+        // populiert. Leer = OurAirports-Fallback aktiv (= Verhalten
+        // vor v0.8.0).
+        navdata: Mutex::new(NavdataCache::default()),
     });
 
     save_active_flight(&app, &flight);
@@ -8569,6 +8696,15 @@ where
         centerline_distance_abs_ft: m.centerline_distance_abs_ft,
         side: m.side.clone(),
         touchdown_distance_from_threshold_ft: m.touchdown_distance_from_threshold_ft,
+        // v0.8.0 — wired by the streamer-tick once Navigraph navdata is
+        // available on the ActiveFlight. Slice A only stages the shape;
+        // Slice B populates these from `runway::lookup_runway_with_fallback`.
+        source: None,
+        nav_cycle: None,
+        true_course_deg: None,
+        displaced_threshold_ft: None,
+        tch_expected_ft: None,
+        glideslope_angle_deg: None,
     });
 
     let touchdown_profile = stats
@@ -8792,6 +8928,19 @@ where
         accident_confidence: stats.accident_confidence.clone(),
         accident_reasons: stats.accident_reasons.clone(),
         accident_at: stats.accident_at,
+
+        // v0.8.0 VPS-Navdata + Runway-Awareness. Slice A nur Shape;
+        // Slice B populiert die Felder aus ActiveFlight.navdata +
+        // runway_assessment::classify_*().
+        td_distance_from_threshold_m: None,
+        td_in_tdz: None,
+        td_third: None,
+        aim_delta_m: None,
+        aim_class: None,
+        tch_actual_ft: None,
+        tch_delta_ft: None,
+        tch_class: None,
+        pre_displaced_threshold: None,
     })
 }
 
@@ -13774,6 +13923,25 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                             accident_at: stats
                                 .accident_at
                                 .map(|t| t.timestamp_millis()),
+                            // v0.8.0 VPS-Navdata + Runway-Awareness.
+                            // Slice A nur Shape — Slice B populiert die
+                            // Felder beim Touchdown aus ActiveFlight.navdata.
+                            navdata_source: None,
+                            navdata_cycle: None,
+                            runway_true_course_deg: None,
+                            runway_displaced_threshold_ft: None,
+                            runway_tch_expected_ft: None,
+                            runway_glideslope_angle_deg: None,
+                            td_distance_from_threshold_m: None,
+                            td_in_tdz: None,
+                            td_tdz_length_m: None,
+                            aim_delta_m: None,
+                            aim_class: None,
+                            aim_point_m: None,
+                            tch_actual_ft: None,
+                            tch_delta_ft: None,
+                            tch_class: None,
+                            pre_displaced_threshold: None,
                         }
                     })
                 };
@@ -19416,6 +19584,11 @@ async fn try_resume_flight(
         position_outbox: Mutex::new(std::collections::VecDeque::new()),
         phpvms_worker_spawned: AtomicBool::new(false),
         connection_state: std::sync::atomic::AtomicU8::new(CONN_STATE_LIVE),
+        // v0.8.0: Navdata-Cache startet leer — wird von
+        // `fetch_navdata_for_flight` (Slice B) parallel beim Flugstart
+        // populiert. Leer = OurAirports-Fallback aktiv (= Verhalten
+        // vor v0.8.0).
+        navdata: Mutex::new(NavdataCache::default()),
     });
 
     {
