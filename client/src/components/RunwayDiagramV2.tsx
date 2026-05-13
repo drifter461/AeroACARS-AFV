@@ -346,16 +346,36 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
                   illegal (Hindernis-Clearance).
                 </title>
               </rect>
+              {/* DDS-Label am UNTEREN Rand der Zone — sodass es nicht
+                  mit der AUFSETZZONE-Beschriftung kollidiert die am
+                  oberen Rand der TDZ-Box rechts davon sitzt. */}
               <text
                 x={(padX + thresholdX) / 2}
-                y={rwyTop + 18}
+                y={rwyBot - 12}
+                textAnchor="middle"
+                fontSize="12"
+                fill="#fecaca"
+                fontWeight="800"
+                fontFamily="monospace"
+                stroke="#7c1d1d"
+                strokeWidth="2.5"
+                paintOrder="stroke"
+              >
+                DDS {ddsM.toFixed(0)} m
+              </text>
+              <text
+                x={(padX + thresholdX) / 2}
+                y={rwyBot - 26}
                 textAnchor="middle"
                 fontSize="11"
-                fill="#fca5a5"
+                fill="#fecaca"
                 fontWeight="700"
                 fontFamily="monospace"
+                stroke="#7c1d1d"
+                strokeWidth="2.5"
+                paintOrder="stroke"
               >
-                DDS {ddsM.toFixed(0)} m · LANDUNG VERBOTEN
+                ⚠ LANDUNG VERBOTEN
               </text>
             </g>
           )}
