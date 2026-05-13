@@ -274,7 +274,26 @@ pub struct TouchdownPayload {
     pub bounce: Option<bool>,
     pub bounce_count: Option<u8>,
     pub runway: Option<String>,
+    /// v0.7.18 (B-012): aufgeloester Touchdown-Airport.
+    /// - Wenn `runway_match` zur runway korreliert wurde: dessen ICAO.
+    /// - Sonst der nächste Airport innerhalb 25 nmi.
+    /// - Sonst fallback auf `flight.arr_airport`.
+    /// Vor v0.7.18 wurde immer `flight.arr_airport` gesetzt — Off-airport-
+    /// Crashes wurden so faelschlich als "Landung bei planned ICAO"
+    /// angezeigt (GAF-152 Ostsee-Crash → "EDDB").
     pub airport: Option<String>,
+    /// v0.7.18 (B-012): wie der Airport aufgeloest wurde.
+    /// Werte: "runway_match" / "nearest_25nm" / "planned_fallback".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub airport_source: Option<String>,
+    /// v0.7.18 (B-012): Distanz vom TD-Punkt zur geplanten Destination (nmi).
+    /// 0 wenn Landung am geplanten Airport, > 0 bei Divert oder Off-airport.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub airport_distance_to_destination_nm: Option<f32>,
+    /// v0.7.18 (B-012): Distanz vom TD-Punkt zum nearest Airport (nmi).
+    /// Nur gesetzt wenn `airport_source == "nearest_25nm"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub airport_nearest_distance_nm: Option<f32>,
     pub lat: Option<f64>,
     pub lon: Option<f64>,
     pub heading_true_deg: Option<f32>,

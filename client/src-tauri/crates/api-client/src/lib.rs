@@ -898,6 +898,21 @@ pub struct PirepSummary {
     pub dpt_airport_id: Option<String>,
     #[serde(default)]
     pub arr_airport_id: Option<String>,
+    // v0.7.18 (B-011): Felder fuer den Orphan-Cleanup-Pfad. phpVMS liefert
+    // diese je nach Version + VA-Plugin-Config nicht garantiert mit, daher
+    // alle Option + serde(default). Spec docs/spec/v0.7.18-orphan-flight-
+    // cleanup.md §B-011 Datenpfad-Hinweis (Option 1: Schema erweitern und
+    // schauen was kommt; bei Bedarf via Fleet-Lookup nachreichen).
+    #[serde(default)]
+    pub flight_id: Option<String>,
+    #[serde(default)]
+    pub aircraft_icao: Option<String>,
+    #[serde(default)]
+    pub aircraft_registration: Option<String>,
+    /// `created_at` aus phpVMS PirepResource — ISO-8601 String. Wird
+    /// vom Frontend zu „vor X h Y min" konvertiert.
+    #[serde(default)]
+    pub created_at: Option<String>,
 }
 
 /// v0.5.33: Subfleet mit nested Aircraft-Liste, wie phpVMS-V7
@@ -1147,7 +1162,11 @@ impl Client {
     /// 405 — this lets us work on the maximum number of phpVMS
     /// installs without forcing the VA admin to reconfigure their
     /// server.
-    pub async fn delete_bid(&self, bid_id: i64) -> Result<(), ApiError> {
+    pub async fn delete_bid(
+        &self,
+        bid_id: Option<i64>,
+        flight_id: Option<&str>,
+    ) -> Result<(), ApiError> {
         // phpVMS routes ALL bid CRUD through `/api/user/bids` — there
         // is NO `/api/user/bids/{id}` or `/api/bids/{id}` route, despite
         // what previous reverse-engineering of vmsACARS' binary
@@ -1162,29 +1181,87 @@ impl Client {
         //             $bid = Bid::findOrFail($request->input('bid_id'));
         //             ...
         //             $this->bidSvc->removeBid($flight, $user);
+        //         } elseif ($request->filled('flight_id')) {
+        //             ...
         //         }
         //     }
         //
-        // → bid_id travels in the request body. JSON is fine because
-        // Laravel's `$request->input(...)` reads from JSON body, form
-        // body, AND query string transparently.
+        // → entweder `bid_id` ODER `flight_id` reisen im Body. JSON ist
+        // fine weil Laravel's `$request->input(...)` JSON-Body / Form-
+        // Body / Query-String transparent liest.
+        //
+        // v0.7.18 (B-011): Signatur akzeptiert beide IDs als Option.
+        // Aufruf-Logik:
+        //   - bid_id Some → erster Versuch `{ bid_id }`. Bei 422/400
+        //     UND flight_id Some → zweiter Versuch `{ flight_id }`.
+        //   - bid_id None, flight_id Some → direkt `{ flight_id }`.
+        //   - beide None → InvalidUrl-Error (Caller-Bug).
+        //
+        // Manche VAs liefern in `PirepSummary` kein `bid_id`, dann ist
+        // der flight_id-Pfad der einzige Weg den Bid serverseitig zu
+        // droppen.
         let path = "/api/user/bids";
-        let url = self.endpoint(path)?;
+
         #[derive(serde::Serialize)]
-        struct Body {
+        struct BidIdBody {
             bid_id: i64,
         }
-        let response = self
-            .http
-            .delete(url)
-            .header("X-API-Key", &self.conn.api_key)
-            .header(header::ACCEPT, "application/json")
-            .json(&Body { bid_id })
-            .send()
-            .await
-            .map_err(ApiError::from)?;
-        let _ = check_status(response, path).await?;
-        Ok(())
+        #[derive(serde::Serialize)]
+        struct FlightIdBody<'a> {
+            flight_id: &'a str,
+        }
+
+        // Versuch 1: bid_id wenn vorhanden.
+        if let Some(bid_id) = bid_id {
+            let url = self.endpoint(path)?;
+            let response = self
+                .http
+                .delete(url)
+                .header("X-API-Key", &self.conn.api_key)
+                .header(header::ACCEPT, "application/json")
+                .json(&BidIdBody { bid_id })
+                .send()
+                .await
+                .map_err(ApiError::from)?;
+            let status = response.status();
+            // Bei 422/400 (Validation-Fehler vom phpVMS-Plugin) und
+            // wenn ein flight_id-Fallback verfuegbar ist: Versuch 2.
+            // Bei allen anderen Status-Codes (inkl. 2xx) durch
+            // check_status laufen lassen.
+            if (status.as_u16() == 422 || status.as_u16() == 400) && flight_id.is_some() {
+                tracing::info!(
+                    bid_id,
+                    status = status.as_u16(),
+                    "delete_bid: bid_id-Body abgelehnt, versuche flight_id-Fallback"
+                );
+                // Body verbrauchen damit kein Connection-Reuse-Glitch
+                let _ = response.text().await;
+            } else {
+                let _ = check_status(response, path).await?;
+                return Ok(());
+            }
+        }
+
+        // Versuch 2 (oder direkt wenn bid_id=None): flight_id-Body.
+        if let Some(flight_id) = flight_id {
+            let url = self.endpoint(path)?;
+            let response = self
+                .http
+                .delete(url)
+                .header("X-API-Key", &self.conn.api_key)
+                .header(header::ACCEPT, "application/json")
+                .json(&FlightIdBody { flight_id })
+                .send()
+                .await
+                .map_err(ApiError::from)?;
+            let _ = check_status(response, path).await?;
+            return Ok(());
+        }
+
+        // Beide None → Caller-Bug.
+        Err(ApiError::InvalidUrl(
+            "delete_bid called with both bid_id and flight_id = None".into(),
+        ))
     }
 
     /// `POST /api/pireps/prefile` — create an in-flight PIREP.
