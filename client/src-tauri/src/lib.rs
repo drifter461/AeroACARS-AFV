@@ -1028,26 +1028,37 @@ async fn fetch_navdata_for_flight(
 /// Fetcher kein Auth-Header und lädt damit bei keinem produktiven VPS
 /// (= 401), aber der OurAirports-Fallback greift transparent.
 ///
-/// **Idempotency-Guard** (v0.8.0 QS): wenn `flight.navdata` bereits
-/// populiert ist — egal ob durch einen früheren Spawn im selben Flug,
-/// durch einen Test-Setup oder durch einen Race auf zwei legitime
-/// Init-Pfade — wird der Fetch NICHT erneut gestartet. So bleibt der
-/// Helper safe to call from any flight-start path; ein versehentliches
-/// Einhängen im Streamer-Loop kann sich höchstens als no-op zeigen,
-/// nicht als wiederkehrender VPS-Roundtrip.
-fn spawn_navdata_fetch(app: &AppHandle, flight: &Arc<ActiveFlight>) {
-    {
+/// `icaos` enthält die zu ladenden Airports (typisch dep/arr/alt).
+/// Leere Strings + Nicht-4-Zeichen-ICAOs werden gefiltert.
+///
+/// **Per-ICAO Idempotency-Guard** (v0.8.0 QS): es werden nur die
+/// ICAOs gefetcht, die nicht bereits im Cache sind. So bleibt der
+/// Helper safe to call mehrfach — ein nach-Plan-Init-Aufruf der
+/// erstmals den Alternate kennt, fetcht nur den Alternate; alle
+/// schon geladenen Airports werden übersprungen.
+fn spawn_navdata_fetch(app: &AppHandle, flight: &Arc<ActiveFlight>, icaos: Vec<String>) {
+    // Normalize + filter against the per-flight cache. Only ICAOs that
+    // are missing trigger an actual HTTP roundtrip.
+    let missing: Vec<String> = {
         let cache = flight.navdata.lock().expect("navdata lock");
-        if !cache.airports.is_empty() {
-            tracing::debug!(
-                pirep_id = %flight.pirep_id,
-                airports = cache.airports.len(),
-                "navdata: cache already populated, skipping fetch"
-            );
-            return;
-        }
+        let mut want: Vec<String> = icaos
+            .into_iter()
+            .map(|s| s.trim().to_uppercase())
+            .filter(|s| !s.is_empty() && s.len() == 4)
+            .filter(|s| !cache.airports.contains_key(s))
+            .collect();
+        want.sort();
+        want.dedup();
+        want
+    };
+    if missing.is_empty() {
+        tracing::debug!(
+            pirep_id = %flight.pirep_id,
+            "navdata: all requested ICAOs already cached, skipping fetch"
+        );
+        return;
     }
-    let icaos = vec![flight.dpt_airport.clone(), flight.arr_airport.clone()];
+    let icaos = missing;
     let token = secrets::load_api_key(MQTT_KEYRING_PASSWORD)
         .ok()
         .flatten();
@@ -6488,9 +6499,19 @@ async fn flight_adopt(
     });
 
     save_active_flight(&app, &flight);
-    // v0.8.0: parallel-fetch dep/arr-Navdata vom VPS. Non-blocking
+    // v0.8.0: parallel-fetch dep/arr/alt-Navdata vom VPS. Non-blocking
     // (Background-Task), Failure → OurAirports-Fallback (transparent).
-    spawn_navdata_fetch(&app, &flight);
+    // Adopt-Pfad: matching_bid kann weg sein, dann fehlt nur der
+    // Alternate — dep+arr kommen immer aus dem ActiveFlight.
+    {
+        let mut icaos = vec![flight.dpt_airport.clone(), flight.arr_airport.clone()];
+        if let Some(alt) = matching_bid.and_then(|b| b.flight.alt_airport_id.clone()) {
+            if !alt.trim().is_empty() {
+                icaos.push(alt);
+            }
+        }
+        spawn_navdata_fetch(&app, &flight, icaos);
+    }
     {
         let mut guard = state.active_flight.lock().expect("active_flight lock");
         *guard = Some(Arc::clone(&flight));
@@ -7059,9 +7080,20 @@ async fn flight_start(
     });
 
     save_active_flight(&app, &flight);
-    // v0.8.0: parallel-fetch dep/arr-Navdata vom VPS. Non-blocking
+    // v0.8.0: parallel-fetch dep/arr/alt-Navdata vom VPS. Non-blocking
     // (Background-Task), Failure → OurAirports-Fallback (transparent).
-    spawn_navdata_fetch(&app, &flight);
+    // flight_start (SimBrief): Alternate kommt aus dem Bid; spätere
+    // OFP-Aktualisierungen können einen anderen Alternate setzen —
+    // der wird im post-OFP-spawn unten nachgeholt (per-ICAO-guard).
+    {
+        let mut icaos = vec![flight.dpt_airport.clone(), flight.arr_airport.clone()];
+        if let Some(alt) = bid.flight.alt_airport_id.clone() {
+            if !alt.trim().is_empty() {
+                icaos.push(alt);
+            }
+        }
+        spawn_navdata_fetch(&app, &flight, icaos);
+    }
 
     {
         let mut guard = state.active_flight.lock().expect("active_flight lock");
@@ -7086,6 +7118,12 @@ async fn flight_start(
         stats.planned_tow_kg = Some(ofp.planned_tow_kg).filter(|&v| v > 0.0);
         stats.planned_ldw_kg = Some(ofp.planned_ldw_kg).filter(|&v| v > 0.0);
         stats.planned_route = ofp.route;
+        // v0.8.0: OFP-Alternate kann sich vom Bid-Alternate
+        // unterscheiden — wenn ja, fetch ihn jetzt nach. Der
+        // per-ICAO-Guard im `spawn_navdata_fetch` macht das zu einem
+        // No-Op wenn der Wert dem Bid-Alternate gleicht (= schon im
+        // Cache).
+        let ofp_alt_for_navdata = ofp.alternate.clone();
         stats.planned_alternate = ofp.alternate;
         // v0.3.0: MAX-Werte für Overweight-Detection im Live-Loadsheet
         // + Score-Penalty im Landung-Tab. Filter Null-Werte aus —
@@ -7114,6 +7152,14 @@ async fn flight_start(
         // Persist immediately so a Tauri restart mid-flight doesn't
         // lose the plan.
         save_active_flight(&app, &flight);
+
+        // v0.8.0: post-OFP-Alternate-Fetch (per-ICAO-Guard im Helper
+        // macht das zum no-op wenn der OFP-Alt dem Bid-Alt entspricht).
+        if let Some(alt) = ofp_alt_for_navdata {
+            if !alt.trim().is_empty() {
+                spawn_navdata_fetch(&app, &flight, vec![alt]);
+            }
+        }
 
         // Push the planned waypoints to phpVMS so the live map / PIREP
         // detail can draw the planned track alongside the flown one.
@@ -7668,9 +7714,18 @@ async fn flight_start_manual(
     });
 
     save_active_flight(&app, &flight);
-    // v0.8.0: parallel-fetch dep/arr-Navdata vom VPS. Non-blocking
+    // v0.8.0: parallel-fetch dep/arr/alt-Navdata vom VPS. Non-blocking
     // (Background-Task), Failure → OurAirports-Fallback (transparent).
-    spawn_navdata_fetch(&app, &flight);
+    // Manual-Pfad: Alternate kommt aus der Plan-Eingabe.
+    {
+        let mut icaos = vec![flight.dpt_airport.clone(), flight.arr_airport.clone()];
+        if let Some(alt) = plan.alt_airport_id.clone() {
+            if !alt.trim().is_empty() {
+                icaos.push(alt);
+            }
+        }
+        spawn_navdata_fetch(&app, &flight, icaos);
+    }
     {
         let mut guard = state.active_flight.lock().expect("active_flight lock");
         *guard = Some(Arc::clone(&flight));
@@ -19982,8 +20037,24 @@ async fn try_resume_flight(
     });
 
     // v0.8.0: vor dem move den Navdata-Fetch spawnen.
-    // Resume-Pfad analog zum frischen flight_start.
-    spawn_navdata_fetch(app, &flight);
+    // Resume-Pfad: Alternate kommt aus restored_stats.planned_alternate
+    // (= via persisted JSON wiederhergestellt). Bei pre-v0.8.0-Resume-
+    // Files ohne planned_alternate bleibt es bei dep+arr.
+    {
+        let mut icaos = vec![flight.dpt_airport.clone(), flight.arr_airport.clone()];
+        let alt = flight
+            .stats
+            .lock()
+            .expect("flight stats lock")
+            .planned_alternate
+            .clone();
+        if let Some(a) = alt {
+            if !a.trim().is_empty() {
+                icaos.push(a);
+            }
+        }
+        spawn_navdata_fetch(app, &flight, icaos);
+    }
     {
         let mut guard = state.active_flight.lock().expect("active_flight lock");
         *guard = Some(flight);
