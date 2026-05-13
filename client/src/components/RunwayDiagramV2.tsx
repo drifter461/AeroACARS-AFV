@@ -929,79 +929,7 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
               : "neutral"
           }
         />
-        {/* Flugzeug-bezogene Pills — falls vorhanden. */}
-        {(props.aircraft_icao || props.aircraft_title) && (
-          <Pill
-            label="Flugzeug"
-            value={
-              [
-                props.aircraft_title || props.aircraft_icao,
-                props.aircraft_registration ? `Reg: ${props.aircraft_registration}` : null,
-              ]
-                .filter(Boolean)
-                .join(" · ")
-            }
-          />
-        )}
-        {props.landing_weight_kg != null && (
-          <Pill
-            label="Landegewicht"
-            value={
-              props.planned_ldw_kg != null
-                ? `${(props.landing_weight_kg / 1000).toFixed(1)} t · Δ ${
-                    (props.landing_weight_kg - props.planned_ldw_kg) / 1000 >= 0 ? "+" : ""
-                  }${((props.landing_weight_kg - props.planned_ldw_kg) / 1000).toFixed(1)} t`
-                : `${(props.landing_weight_kg / 1000).toFixed(1)} t`
-            }
-          />
-        )}
-        {props.landing_speed_kt != null && (
-          <Pill label="Touchdown-IAS" value={`${props.landing_speed_kt.toFixed(0)} kt`} />
-        )}
-        {(props.landing_pitch_deg != null || props.landing_bank_deg != null) && (
-          <Pill
-            label="Pitch / Bank"
-            value={`${props.landing_pitch_deg?.toFixed(1) ?? "—"}° / ${props.landing_bank_deg?.toFixed(1) ?? "—"}°`}
-            tone={
-              props.landing_pitch_deg != null && props.landing_pitch_deg < 0
-                ? "bad"
-                : props.landing_bank_deg != null && Math.abs(props.landing_bank_deg) > 5
-                ? "warn"
-                : "neutral"
-            }
-          />
-        )}
-        {props.landing_peak_g_force != null && (
-          <Pill
-            label="Peak-G"
-            value={`${props.landing_peak_g_force.toFixed(2)} g`}
-            tone={
-              props.landing_peak_g_force >= 1.7
-                ? "bad"
-                : props.landing_peak_g_force >= 1.5
-                ? "warn"
-                : "good"
-            }
-          />
-        )}
-        {(props.headwind_kt != null || props.crosswind_kt != null) && (() => {
-          const parts: string[] = [];
-          const hw = props.headwind_kt;
-          const xw = props.crosswind_kt;
-          if (hw != null) {
-            parts.push(hw >= 0 ? `HW ${Math.abs(hw).toFixed(0)} kt` : `TW ${Math.abs(hw).toFixed(0)} kt`);
-          }
-          if (xw != null && Math.abs(xw) >= 1) {
-            const side = xw > 0 ? "RECHTS" : "LINKS";
-            parts.push(`XW ${Math.abs(xw).toFixed(0)} kt ${side}`);
-          }
-          // Tone: TW oder XW > 15 kt → warn, > 25 kt → bad
-          const xwAbs = xw != null ? Math.abs(xw) : 0;
-          const isTw = hw != null && hw < -3;
-          const tone =
-            xwAbs > 25 || isTw ? "bad" : xwAbs > 15 ? "warn" : "neutral";
-          return <Pill label="Wind" value={parts.join(" · ")} tone={tone} />;
-        })()}
+        <FlugzeugBar props={props} />
       </div>
 
       {glossaryOpen && (
@@ -1012,6 +940,144 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
 }
 
 // ─── Kleine UI-Helpers ──────────────────────────────────────────────
+
+// FlugzeugBar — eine Pill-Höhen-große Box, voll Breite (flex 1 1 100%),
+// die ALLE Aircraft-Daten inline trägt. Wenn die Werte für eine Zeile
+// zu lang sind, wrappen sie via flex-wrap auf eine zweite Zeile —
+// die Pill bleibt damit auf einer Bildschirm-Zeile so lang wie nötig,
+// nicht "höher" durch gestapelte Rows.
+function FlugzeugBar({ props }: { props: RunwayDiagramV2Props }) {
+  const has =
+    props.aircraft_icao ||
+    props.aircraft_title ||
+    props.landing_weight_kg != null ||
+    props.landing_speed_kt != null ||
+    props.landing_peak_g_force != null ||
+    props.headwind_kt != null ||
+    props.crosswind_kt != null;
+  if (!has) return null;
+
+  // Sub-Stat-Items mit optionaler Tone-Farbe.
+  type Item = { label: string; value: string; color?: string };
+  const items: Item[] = [];
+
+  // Aircraft-Header
+  const acName = props.aircraft_title || props.aircraft_icao;
+  if (acName) {
+    items.push({ label: "Type", value: String(acName) });
+  }
+  if (props.aircraft_registration) {
+    items.push({ label: "Reg", value: props.aircraft_registration });
+  }
+
+  // Landegewicht ± Plan
+  if (props.landing_weight_kg != null) {
+    const realT = (props.landing_weight_kg / 1000).toFixed(1);
+    if (props.planned_ldw_kg != null) {
+      const deltaT = (props.landing_weight_kg - props.planned_ldw_kg) / 1000;
+      const sign = deltaT >= 0 ? "+" : "";
+      items.push({
+        label: "Gewicht",
+        value: `${realT} t (Δ ${sign}${deltaT.toFixed(1)} t)`,
+      });
+    } else {
+      items.push({ label: "Gewicht", value: `${realT} t` });
+    }
+  }
+
+  // TD-IAS
+  if (props.landing_speed_kt != null) {
+    items.push({ label: "TD-IAS", value: `${props.landing_speed_kt.toFixed(0)} kt` });
+  }
+
+  // Pitch / Bank
+  if (props.landing_pitch_deg != null || props.landing_bank_deg != null) {
+    const p = props.landing_pitch_deg?.toFixed(1) ?? "—";
+    const b = props.landing_bank_deg?.toFixed(1) ?? "—";
+    const tailStrike = props.landing_pitch_deg != null && props.landing_pitch_deg < 0;
+    const bankWarn = props.landing_bank_deg != null && Math.abs(props.landing_bank_deg) > 5;
+    items.push({
+      label: "P / B",
+      value: `${p}° / ${b}°`,
+      color: tailStrike ? "#ef4444" : bankWarn ? "#fbbf24" : undefined,
+    });
+  }
+
+  // Peak-G
+  if (props.landing_peak_g_force != null) {
+    const g = props.landing_peak_g_force;
+    items.push({
+      label: "Peak-G",
+      value: `${g.toFixed(2)} g`,
+      color: g >= 1.7 ? "#ef4444" : g >= 1.5 ? "#fbbf24" : "#22c55e",
+    });
+  }
+
+  // Wind
+  if (props.headwind_kt != null || props.crosswind_kt != null) {
+    const parts: string[] = [];
+    const hw = props.headwind_kt;
+    const xw = props.crosswind_kt;
+    if (hw != null) {
+      parts.push(hw >= 0 ? `HW ${Math.abs(hw).toFixed(0)}` : `TW ${Math.abs(hw).toFixed(0)}`);
+    }
+    if (xw != null && Math.abs(xw) >= 1) {
+      const side = xw > 0 ? "R" : "L";
+      parts.push(`XW ${Math.abs(xw).toFixed(0)} ${side}`);
+    }
+    const xwAbs = xw != null ? Math.abs(xw) : 0;
+    const isTw = hw != null && hw < -3;
+    const color = xwAbs > 25 || isTw ? "#ef4444" : xwAbs > 15 ? "#fbbf24" : undefined;
+    items.push({ label: "Wind", value: parts.join(" "), color });
+  }
+
+  return (
+    <div
+      style={{
+        padding: "8px 12px",
+        background: "rgba(255,255,255,0.04)",
+        border: "1px solid rgba(255,255,255,0.10)",
+        borderRadius: 8,
+        display: "flex",
+        flexDirection: "column",
+        gap: 2,
+        flex: "1 1 100%",
+        minWidth: 280,
+      }}
+    >
+      <div
+        style={{
+          fontSize: "0.68rem",
+          fontWeight: 700,
+          letterSpacing: 1.1,
+          textTransform: "uppercase",
+          opacity: 0.65,
+        }}
+      >
+        Flugzeug
+      </div>
+      <div
+        style={{
+          display: "flex",
+          flexWrap: "wrap",
+          gap: "2px 18px",
+          fontSize: "0.95rem",
+          fontWeight: 700,
+          alignItems: "baseline",
+        }}
+      >
+        {items.map((it, i) => (
+          <span key={i}>
+            <span style={{ opacity: 0.55, fontWeight: 600, marginRight: 4 }}>
+              {it.label}
+            </span>
+            <span style={{ color: it.color ?? "#e2e8f0" }}>{it.value}</span>
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 // Atomare Stat-Pille — 1 Label + 1 Value, optionale Tone-Farbe am Wert.
 // Ersetzt das alte 3-Box-DetailCard-Layout (v2.2).
