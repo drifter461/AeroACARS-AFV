@@ -428,6 +428,34 @@ pub struct LandingRecord {
     /// / "negative_float_distance"
     #[serde(default)]
     pub runway_geometry_reason: Option<String>,
+
+    // ─── v0.7.19 GAF-707 Accident-Detection ───────────────────────────
+    //
+    // Spec docs/spec/v0.7.19-gaf707-crash-accident-detection.md. Alle
+    // Felder `#[serde(default)]` damit pre-v0.7.19-Records weiter laden.
+    // `landing-scoring` bleibt unangetastet — Score-Werte oben sind
+    // orthogonal zur Accident-Klassifikation.
+    /// True wenn der Touchdown als Accident klassifiziert wurde (Confirmed
+    /// per Spec). Suspected wird hier NICHT als true gespeichert — die
+    /// Frontend-Logik liest `accident_confidence` fuer die Banner-Variante.
+    #[serde(default)]
+    pub accident: bool,
+    /// "sim_crash" | "impact" | "off_airport_impact". None wenn kein Accident.
+    #[serde(default)]
+    pub accident_kind: Option<String>,
+    /// "high" | "medium". `high` = Confirmed, `medium` = Suspected.
+    /// None wenn kein Accident-/Verdachts-Signal.
+    #[serde(default)]
+    pub accident_confidence: Option<String>,
+    /// Begruendungs-Strings (free-form, lesbar fuer Notes/UI), z. B.
+    /// `["vs_at_edge_fpm=-2249.9", "peak_g_load=4.41", "no_runway_match"]`.
+    #[serde(default)]
+    pub accident_reasons: Vec<String>,
+    /// Wann der Accident detektiert wurde. Bei Sim-Event-Pfad kann das
+    /// mehrere Sekunden vor `touchdown_at` liegen (mid-air Crash). Bei
+    /// Heuristik-Pfad gleich `touchdown_at`. None wenn kein Accident.
+    #[serde(default)]
+    pub accident_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// v0.7.1: Stability-Gate-Window-Metadaten (Spec §5.4).

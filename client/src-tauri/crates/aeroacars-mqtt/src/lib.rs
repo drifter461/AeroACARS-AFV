@@ -554,6 +554,38 @@ pub struct TouchdownPayload {
     /// "icao_mismatch" / "centerline_offset_too_large" / "negative_float_distance"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runway_geometry_reason: Option<String>,
+
+    // ─── v0.7.19 GAF-707 Accident-Detection ──────────────────────────
+    //
+    // Spec docs/spec/v0.7.19-gaf707-crash-accident-detection.md.
+    //
+    // `accident_classifier_version` ist der Sentinel: v0.7.19+ setzt
+    // ihn IMMER (auch bei `accident=false`/None), damit die Webapp
+    // "Classifier lief, kein Accident" von "historischer Payload"
+    // unterscheiden kann. Pre-v0.7.19-Payloads haben das Feld nicht
+    // → Webapp/VPS klassifiziert nach.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accident_classifier_version: Option<String>,
+    /// True wenn Confirmed Accident. Suspected wird NICHT als true
+    /// gesetzt; stattdessen liefert `accident_confidence="medium"`
+    /// das Suspected-Signal. None bei pre-v0.7.19 oder unklassifiziert.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accident: Option<bool>,
+    /// "sim_crash" | "impact" | "off_airport_impact". None wenn kein
+    /// Accident.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accident_kind: Option<String>,
+    /// "high" | "medium". `high`=Confirmed, `medium`=Suspected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accident_confidence: Option<String>,
+    /// Begruendungs-Strings, free-form lesbar.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accident_reasons: Option<Vec<String>>,
+    /// Wann der Accident detektiert wurde. Sim-Event-Pfad: kann
+    /// mehrere Sekunden vor `ts` liegen (mid-air Crash). Heuristik-
+    /// Pfad: gleich `ts`. None wenn kein Accident.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accident_at: Option<i64>,
 }
 
 fn is_false(b: &bool) -> bool { !*b }

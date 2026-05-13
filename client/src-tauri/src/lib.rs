@@ -8,6 +8,7 @@
 // v0.7.14: `mod discord` entfernt — Pilot-Client postet keine Discord-Events
 // mehr. Recorder auf live.kant.ovh macht das jetzt zentral (eine Quelle,
 // VA-Owner-kontrolliert via Webapp-Admin-Settings). Audit Q4-2026-05 (C1).
+mod accident;
 mod runway;
 mod xplane_plugin_install;
 // v0.6.0 — neuer zentraler State-Owner. Aktiviert wenn die Env-Var
@@ -2344,6 +2345,31 @@ struct FlightStats {
     // ist als Encoder-Click-Counter unzuverlaessig. Falls FCU-Logging
     // doch jemals revived wird: aus git history rausziehen (commit
     // ggf vor v0.7.13). Audit Q4-2026-05.
+
+    // ─── v0.7.19 GAF-707 Accident-Detection ───────────────────────────
+    //
+    // Latched-Zustand: gesetzt durch den Sim-Event-Pfad (SOFORT bei
+    // `snap.crashed=true`) oder durch den Heuristik-Pfad (am Touchdown-
+    // Edge in build_landing_record). Beide Pfade duerfen sich
+    // ueberlagern — `SimCrash` ist authoritativ fuer `kind`, Heuristik-
+    // Gruende werden gemerged in `accident_reasons`.
+    //
+    // `CrashReset` aus dem MSFS-Adapter loescht diese Felder NICHT —
+    // sie persistieren bis Flight-End/Cleanup/neuer Flight-Start. Spec
+    // docs/spec/v0.7.19-gaf707-crash-accident-detection.md §Leit-
+    // entscheidung 6.
+    accident_detected: bool,
+    /// Wann wurde der Accident gelatcht. Sim-Event-Pfad: kann mehrere
+    /// Sekunden vor `landing_at` liegen. Heuristik-Pfad: ≈ `landing_at`.
+    accident_at: Option<DateTime<Utc>>,
+    /// "sim_crash" | "impact" | "off_airport_impact"
+    accident_kind: Option<String>,
+    /// "high" (Confirmed) | "medium" (Suspected)
+    accident_confidence: Option<String>,
+    /// Lesbare Begruendung pro Heuristik-Marker. Wird mehrfach
+    /// erweitert wenn beide Pfade greifen (z. B. Sim-Event +
+    /// Heuristik) und der Worst-Case-Touchdown gewinnt.
+    accident_reasons: Vec<String>,
 }
 
 /// What kind of touchdown this is from the pilot's perspective.
@@ -8676,6 +8702,14 @@ where
             );
             reason.map(String::from)
         },
+        // v0.7.19 GAF-707 Accident-Detection. Felder kommen aus dem
+        // gelatchten FlightStats — gesetzt entweder durch Sim-Event-
+        // Pfad (mid-air) oder durch Heuristik am Touchdown-Edge.
+        accident: stats.accident_detected,
+        accident_kind: stats.accident_kind.clone(),
+        accident_confidence: stats.accident_confidence.clone(),
+        accident_reasons: stats.accident_reasons.clone(),
+        accident_at: stats.accident_at,
     })
 }
 
@@ -13278,6 +13312,36 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                                 );
                                 reason.map(String::from)
                             },
+                            // v0.7.19 GAF-707 Accident-Detection.
+                            // `accident_classifier_version` ist der
+                            // Sentinel — v0.7.19+ setzt ihn IMMER, auch
+                            // wenn kein Accident erkannt wurde. Webapp
+                            // unterscheidet damit "Classifier lief, kein
+                            // Accident" von "historischer Payload, bitte
+                            // nachklassifizieren".
+                            accident_classifier_version: Some(
+                                accident::ACCIDENT_CLASSIFIER_VERSION.into(),
+                            ),
+                            accident: if stats.accident_detected {
+                                Some(true)
+                            } else {
+                                None
+                            },
+                            accident_kind: stats.accident_kind.clone(),
+                            accident_confidence: stats
+                                .accident_confidence
+                                .clone(),
+                            accident_reasons: if stats
+                                .accident_reasons
+                                .is_empty()
+                            {
+                                None
+                            } else {
+                                Some(stats.accident_reasons.clone())
+                            },
+                            accident_at: stats
+                                .accident_at
+                                .map(|t| t.timestamp_millis()),
                         }
                     })
                 };
