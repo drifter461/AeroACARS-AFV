@@ -171,10 +171,11 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
       ? Math.min(100, ((props.td_distance_from_threshold_m + props.rollout_m) / lengthM) * 100)
       : null;
 
-  // Source-Label
+  // Source-Label — neutral Wording per Spec §Akzeptanz (Lizenz-Vorsicht):
+  // UI sagt "VPS Navdata (AIRAC X)" statt direkt "Navigraph".
   const sourceLabel = (() => {
     if (props.source === "navigraph") {
-      return `Navigraph${props.nav_cycle ? ` AIRAC ${props.nav_cycle}` : ""}`;
+      return `VPS Navdata (AIRAC ${props.nav_cycle ?? "?"}) ✓`;
     }
     if (props.source === "ourairports_fallback") {
       return "OurAirports (Fallback) — Schwellen-Position kann abweichen";
@@ -721,12 +722,12 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
             <>
               <DetailRow
                 tone="good"
-                label="Navigraph ✓"
+                label="VPS Navdata ✓"
                 value={`AIRAC ${props.nav_cycle ?? "?"}`}
               />
               <DetailRow
                 label=""
-                value="Schwellen-Position aus Jeppesen (±0.5 m)"
+                value="Zentrale AIRAC-Daten, vom VA-Admin gepflegt (±0.5 m)"
               />
             </>
           ) : props.source === "ourairports_fallback" ? (

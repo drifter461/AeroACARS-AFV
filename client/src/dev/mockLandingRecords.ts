@@ -111,7 +111,13 @@ function baseRecord(): LandingRecord {
   };
 }
 
-export type MockKey = "ms713" | "perfect" | "long_landing" | "dds_violation";
+export type MockKey =
+  | "ms713"
+  | "perfect"
+  | "long_landing"
+  | "dds_violation"
+  | "ourairports_fallback"
+  | "pre_v080";
 
 export interface MockOption {
   key: MockKey;
@@ -169,6 +175,48 @@ export const MOCK_LANDING_OPTIONS: MockOption[] = [
       r.score_numeric = 58;
       r.score_label = "acceptable";
       r.grade_letter = "C";
+      return r;
+    },
+  },
+  {
+    key: "ourairports_fallback",
+    label: "OurAirports-Fallback (VPS nicht erreichbar — orange Warnung)",
+    hint: "Source=ourairports_fallback, TCH/DDS null. Diagram zeigt Fallback-Warnhinweis im Header + Datenquellen-Card.",
+    build: () => {
+      const r = baseRecord();
+      r.runway_match!.source = "ourairports_fallback";
+      r.runway_match!.nav_cycle = null;
+      r.runway_match!.displaced_threshold_ft = null;
+      r.runway_match!.tch_expected_ft = null;
+      r.tch_actual_ft = null;
+      r.tch_delta_ft = null;
+      r.tch_class = null;
+      r.pre_displaced_threshold = null;
+      return r;
+    },
+  },
+  {
+    key: "pre_v080",
+    label: "Pre-v0.8.0 Legacy (alle v0.8.0-Felder null — graceful degrade)",
+    hint: "Alter PIREP von vor v0.8.0. Keine TDZ, kein Aim, keine TCH-Card — aber Basis-Geometrie + TD bleibt sichtbar.",
+    build: () => {
+      const r = baseRecord();
+      r.runway_match!.source = null;
+      r.runway_match!.nav_cycle = null;
+      r.runway_match!.displaced_threshold_ft = null;
+      r.runway_match!.tch_expected_ft = null;
+      r.td_distance_from_threshold_m = null;
+      r.runway_match!.touchdown_distance_from_threshold_ft = 0;
+      r.td_in_tdz = null;
+      r.td_third = null;
+      r.td_tdz_length_m = null;
+      r.aim_delta_m = null;
+      r.aim_class = null;
+      r.aim_point_m = null;
+      r.tch_actual_ft = null;
+      r.tch_delta_ft = null;
+      r.tch_class = null;
+      r.pre_displaced_threshold = null;
       return r;
     },
   },

@@ -1,27 +1,27 @@
-// Dev-only Preview-Tab — rendert das RunwayDiagram standalone mit
-// synthetischem LandingRecord aus `mockLandingRecords.ts`. Sichtbar
-// nur wenn `import.meta.env.DEV` (= `npm run tauri dev` oder
-// `vite dev`). Im Production-Build (`vite build`) ist die Tab-Bar-
-// Bedingung false und der Tab erscheint nicht.
+// Dev-only Preview-Tab für RunwayDiagramV2.
 //
-// Workflow für Design-Iteration:
-//   1. `cd client && npm run tauri dev`
+// Sichtbar nur in `npm run tauri dev` (import.meta.env.DEV). Im
+// Production-Build (`vite build`) blendet die App-Tab-Bar diesen Tab
+// aus. Bewusster Workflow:
+//
+//   1. cd client && npm run tauri dev
 //   2. Tab "🧪 Preview" oben anklicken
-//   3. Mock-Variante im Picker auswählen (4 Varianten)
-//   4. Container-Breite manuell ändern (Slider) um Responsive zu testen
-//   5. Code-Änderung in `LandingPanel.tsx` → Hot-Reload, kein Tauri-Rebuild
+//   3. Mock-Variante im Picker auswählen (6 Varianten)
+//   4. Container-Breite mit Slider verändern → Responsive testen
+//   5. Edits in RunwayDiagramV2.tsx oder RunwayGlossaryModal.tsx →
+//      Vite Hot-Reload, KEIN Tauri-Rebuild
+//
+// Spec: docs/spec/runway-diagram-v2.contract.md
 
 import { useMemo, useState } from "react";
-import {
-  RunwayDiagram,
-  type LandingRecord,
-  type LandingRunwayMatch,
-} from "../components/LandingPanel";
+import { RunwayDiagramV2 } from "../components/RunwayDiagramV2";
+import { mapLandingRecordToV2Props } from "./runwayDiagramV2Mapper";
+import type { LandingRecord, LandingRunwayMatch } from "../components/LandingPanel";
 import { MOCK_LANDING_OPTIONS, type MockKey } from "./mockLandingRecords";
 
 export default function RunwayDiagramPreview() {
   const [key, setKey] = useState<MockKey>("ms713");
-  const [containerWidth, setContainerWidth] = useState<number>(900);
+  const [containerWidth, setContainerWidth] = useState<number>(1100);
   const [showJson, setShowJson] = useState(false);
 
   const opt = useMemo(
@@ -30,6 +30,7 @@ export default function RunwayDiagramPreview() {
   );
   const record: LandingRecord = useMemo(() => opt.build(), [opt]);
   const rw = record.runway_match as LandingRunwayMatch;
+  const v2Props = useMemo(() => mapLandingRecordToV2Props(record), [record]);
 
   return (
     <section className="phase" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -45,13 +46,14 @@ export default function RunwayDiagramPreview() {
         }}
       >
         <strong style={{ color: "#22c55e" }}>
-          🧪 Dev-Preview — nur in `npm run tauri dev` sichtbar
+          🧪 Dev-Preview RunwayDiagramV2 — nur in `npm run tauri dev` sichtbar
         </strong>
         <span style={{ fontSize: "0.85rem", opacity: 0.85 }}>
-          Synthetische LandingRecords zum Design-Iterieren des
-          RunwayDiagrams. Code-Änderungen in{" "}
-          <code>src/components/LandingPanel.tsx</code> (
-          <code>RunwayDiagram</code>) triggern Hot-Reload.
+          Synthetische LandingRecords zum Design-Iterieren der neuen V2-
+          Geometrie. Edits in{" "}
+          <code>src/components/RunwayDiagramV2.tsx</code> oder{" "}
+          <code>RunwayGlossaryModal.tsx</code> triggern Hot-Reload. Live-
+          LandingPanel bleibt unangetastet (kein Pilot-Release).
         </span>
       </header>
 
@@ -71,7 +73,7 @@ export default function RunwayDiagramPreview() {
           <select
             value={key}
             onChange={(e) => setKey(e.target.value as MockKey)}
-            style={{ padding: "4px 8px", minWidth: 280 }}
+            style={{ padding: "4px 8px", minWidth: 360 }}
           >
             {MOCK_LANDING_OPTIONS.map((o) => (
               <option key={o.key} value={o.key}>
@@ -84,7 +86,7 @@ export default function RunwayDiagramPreview() {
           <span style={{ fontWeight: 600 }}>Container:</span>
           <input
             type="range"
-            min={320}
+            min={420}
             max={1400}
             step={20}
             value={containerWidth}
@@ -103,7 +105,6 @@ export default function RunwayDiagramPreview() {
         💡 {opt.hint}
       </p>
 
-      {/* Sample-Stats neben dem Diagram für Design-Bezug. */}
       <div
         style={{
           display: "grid",
@@ -150,14 +151,6 @@ export default function RunwayDiagramPreview() {
           }
         />
         <Stat
-          label="DDS"
-          value={
-            record.pre_displaced_threshold === true
-              ? "⚠ Pre-Threshold!"
-              : "ok"
-          }
-        />
-        <Stat
           label="Source"
           value={rw.source ?? "—"}
         />
@@ -172,15 +165,13 @@ export default function RunwayDiagramPreview() {
           background: "rgba(0,0,0,0.2)",
         }}
       >
-        <RunwayDiagram
-          rw={rw}
-          rolloutDistanceM={record.rollout_distance_m}
-          tdzLengthM={record.td_tdz_length_m}
-          tdInTdz={record.td_in_tdz}
-          aimPointM={record.aim_point_m}
-          aimClass={record.aim_class}
-          preDisplacedThreshold={record.pre_displaced_threshold}
-        />
+        {v2Props ? (
+          <RunwayDiagramV2 {...v2Props} />
+        ) : (
+          <div style={{ padding: 24, opacity: 0.7, fontStyle: "italic" }}>
+            Kein runway_match — V2 rendert nicht.
+          </div>
+        )}
       </div>
 
       {showJson && (
@@ -195,7 +186,7 @@ export default function RunwayDiagramPreview() {
             margin: 0,
           }}
         >
-          {JSON.stringify(record, null, 2)}
+          {JSON.stringify({ record, v2Props }, null, 2)}
         </pre>
       )}
     </section>
