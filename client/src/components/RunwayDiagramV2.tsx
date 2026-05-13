@@ -114,10 +114,27 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
   const rwyBot = padY + innerH;
   const rwyCl = (rwyTop + rwyBot) / 2;
 
-  // Meter → X-Pixel auf der Bahn.
+  // Bahn-Geometrie.
+  // - lengthM: nutzbare LANDE-Bahn (= nach dem displaced threshold)
+  // - ddsM: Länge der pre-threshold-Zone (DDS) vor dem Landethreshold
+  // - totalVisualM: gesamte physische Bahn (DDS + Lande-Bereich)
+  // Das tarmac-Rect spannt die gesamte physische Bahn ab; mToX(0) liegt
+  // beim Landethreshold (= NICHT am linken Rand der Bahn bei DDS > 0).
   const lengthM = Math.max(500, props.length_m);
+  const ddsM = props.displaced_threshold_m ?? 0;
+  const ddsActive = ddsM > 0;
+  const totalVisualM = lengthM + ddsM;
+
+  // thresholdX = Pixel-Position des Landethresholds.
+  //   ohne DDS: thresholdX == padX (Bahn-Anfang IS Threshold)
+  //   mit DDS:  thresholdX > padX (DDS-Bereich beansprucht erste ddsM)
+  const thresholdX = padX + (ddsM / totalVisualM) * innerW;
+
+  // Meter → X-Pixel. Eingabe m ist Distanz VOM LANDETHRESHOLD (signed).
+  // Negative m → vor dem Threshold (= in der DDS-Zone).
   const mToX = (m: number) =>
-    padX + (Math.max(-200, Math.min(lengthM, m)) / lengthM) * innerW;
+    thresholdX +
+    (Math.max(-ddsM, Math.min(lengthM, m)) / totalVisualM) * innerW;
 
   // Centerline-Offset → Y. ±widthM/2 → ±(innerH/2 - safetyMargin).
   // widthM = 45 m typisch, aber wir stretchen für Sichtbarkeit (sonst
@@ -149,12 +166,6 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
     props.td_tdz_length_m != null && props.td_tdz_length_m > 0
       ? mToX(props.td_tdz_length_m)
       : null;
-
-  // DDS-Zone (Pre-Threshold-Markierung) — Renderpolicy: nur rendern
-  // wenn displaced_threshold_m > 0. Die Zone wird LINKS der Threshold-
-  // Linie gezeichnet (negative Distanz vom Threshold).
-  const ddsM = props.displaced_threshold_m ?? 0;
-  const ddsActive = ddsM > 0;
 
   // Rollout-Endpunkt
   const exitDistM =
@@ -287,16 +298,44 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
             strokeWidth="1"
           />
 
-          {/* DDS Pre-Threshold-Zone (vor dem padX wird visuell hinzugefügt
-              durch Strich-Anhang links — bei displaced_threshold_m > 0). */}
+          {/* DDS Pre-Threshold-Zone — die ERSTEN ddsM Meter der Bahn,
+              VOR dem Landethreshold. Wird ROT gezeichnet (Landung
+              verboten) mit Chevron-Hatch (= echte Bahn-Markierung).
+              Liegt zwischen padX (Bahn-Anfang) und thresholdX (Landethreshold). */}
           {ddsActive && (
             <g>
+              <defs>
+                <pattern
+                  id="dds-chevron"
+                  patternUnits="userSpaceOnUse"
+                  width="14"
+                  height="14"
+                  patternTransform="rotate(60)"
+                >
+                  <line x1="0" y1="0" x2="0" y2="14" stroke={TOKENS.ddsBorder} strokeWidth="2.5" />
+                </pattern>
+              </defs>
               <rect
-                x={padX}
+                x={padX + 2}
                 y={rwyTop + 4}
-                width={Math.max(0, mToX(ddsM) - padX)}
+                width={Math.max(0, thresholdX - padX - 2)}
                 height={innerH - 8}
                 fill={TOKENS.ddsZone}
+              />
+              <rect
+                x={padX + 2}
+                y={rwyTop + 4}
+                width={Math.max(0, thresholdX - padX - 2)}
+                height={innerH - 8}
+                fill="url(#dds-chevron)"
+                opacity="0.6"
+              />
+              <rect
+                x={padX + 2}
+                y={rwyTop + 4}
+                width={Math.max(0, thresholdX - padX - 2)}
+                height={innerH - 8}
+                fill="none"
                 stroke={TOKENS.ddsBorder}
                 strokeDasharray="4,4"
                 strokeWidth="1.2"
@@ -308,33 +347,45 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
                 </title>
               </rect>
               <text
-                x={padX + 8}
-                y={rwyBot - 8}
+                x={(padX + thresholdX) / 2}
+                y={rwyTop + 18}
+                textAnchor="middle"
                 fontSize="11"
                 fill="#fca5a5"
                 fontWeight="700"
                 fontFamily="monospace"
               >
-                DDS {ddsM.toFixed(0)} m
+                DDS {ddsM.toFixed(0)} m · LANDUNG VERBOTEN
               </text>
             </g>
           )}
 
-          {/* Threshold-Streifen (links der Bahn, Block aus 8 weißen
-              Vertikal-Strichen). */}
+          {/* Landethreshold-Streifen — am Ort thresholdX (= 0m from
+              landing threshold). Bei aktivem DDS verschoben nach
+              rechts. */}
           <g>
             {Array.from({ length: 8 }, (_, i) => (
               <rect
                 key={i}
-                x={padX + 4}
+                x={thresholdX + 4}
                 y={rwyTop + 4 + (i * (innerH - 8)) / 8}
                 width={20}
                 height={(innerH - 8) / 8 - 2}
                 fill={TOKENS.threshold}
               />
             ))}
+            {/* Senkrechte Solid-Line links der Chevrons — markiert
+                eindeutig "ab HIER fängt das landbare Stück an". */}
+            <line
+              x1={thresholdX}
+              y1={rwyTop + 4}
+              x2={thresholdX}
+              y2={rwyBot - 4}
+              stroke="rgba(255,255,255,0.9)"
+              strokeWidth="2"
+            />
             <title>
-              Schwelle (Threshold) — Beginn des landbaren Bahn-Teils.
+              Landeschwelle (Threshold) — Beginn des landbaren Bahn-Teils.
             </title>
           </g>
 
@@ -366,7 +417,7 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
           {/* TDZ-Box — gelbe Schraffur als Bereichs-Indikator + dünner
               Rahmen + Label. Die diagonale Schraffur soll visuell
               vermitteln "hier soll der Touchdown rein". */}
-          {tdzEndX != null && tdzEndX > padX + 24 && (
+          {tdzEndX != null && tdzEndX > thresholdX + 24 && (
             <g>
               <defs>
                 <pattern
@@ -387,17 +438,17 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
                 </pattern>
               </defs>
               <rect
-                x={padX + 24}
+                x={thresholdX + 24}
                 y={rwyTop + 30}
-                width={tdzEndX - padX - 24}
+                width={tdzEndX - thresholdX - 24}
                 height={innerH - 60}
                 fill="url(#tdz-hatch)"
                 opacity="0.55"
               />
               <rect
-                x={padX + 24}
+                x={thresholdX + 24}
                 y={rwyTop + 30}
-                width={tdzEndX - padX - 24}
+                width={tdzEndX - thresholdX - 24}
                 height={innerH - 60}
                 fill={TOKENS.tdzFill}
                 stroke={TOKENS.tdzStroke}
@@ -410,7 +461,7 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
                 </title>
               </rect>
               <text
-                x={padX + 24 + (tdzEndX - padX - 24) / 2}
+                x={thresholdX + 24 + (tdzEndX - thresholdX - 24) / 2}
                 y={rwyTop + 18}
                 fontSize="12"
                 fill={TOKENS.tdzStroke}
@@ -425,7 +476,7 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
 
           {/* Centerline (gestrichelt). */}
           <line
-            x1={padX + 28}
+            x1={thresholdX + 28}
             y1={rwyCl}
             x2={padX + innerW - 6}
             y2={rwyCl}
