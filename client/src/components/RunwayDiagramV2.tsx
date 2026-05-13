@@ -517,46 +517,54 @@ export function RunwayDiagramV2(props: RunwayDiagramV2Props) {
                   y1={rwyTop + 6}
                   x2={padX + innerW - 4}
                   y2={rwyBot - 6}
-                  stroke="rgba(255,255,255,0.55)"
-                  strokeWidth="2"
+                  stroke="rgba(255,255,255,0.75)"
+                  strokeWidth="2.5"
                 />
-                {/* Doppelpfeil "von Exit bis Bahn-Ende" */}
+                {/* Doppelpfeil "von Bremspunkt bis Bahn-Ende" */}
                 <line
                   x1={exitX + 14}
-                  y1={rwyCl - 30}
+                  y1={rwyCl - 34}
                   x2={padX + innerW - 8}
-                  y2={rwyCl - 30}
-                  stroke="rgba(148,163,184,0.75)"
-                  strokeWidth="1.5"
-                  strokeDasharray="4,3"
+                  y2={rwyCl - 34}
+                  stroke="rgba(226,232,240,0.85)"
+                  strokeWidth="2"
+                  strokeDasharray="5,3"
                 />
                 <polygon
-                  points={`${padX + innerW - 8},${rwyCl - 30} ${padX + innerW - 14},${rwyCl - 34} ${padX + innerW - 14},${rwyCl - 26}`}
-                  fill="rgba(148,163,184,0.85)"
+                  points={`${padX + innerW - 8},${rwyCl - 34} ${padX + innerW - 16},${rwyCl - 39} ${padX + innerW - 16},${rwyCl - 29}`}
+                  fill="rgba(226,232,240,0.95)"
                 />
                 <polygon
-                  points={`${exitX + 14},${rwyCl - 30} ${exitX + 20},${rwyCl - 34} ${exitX + 20},${rwyCl - 26}`}
-                  fill="rgba(148,163,184,0.85)"
+                  points={`${exitX + 14},${rwyCl - 34} ${exitX + 22},${rwyCl - 39} ${exitX + 22},${rwyCl - 29}`}
+                  fill="rgba(226,232,240,0.95)"
                 />
-                {/* "Bahn verbleibend X m" Label */}
+                {/* "Bahn verbleibend X m" Label — bright + Outline-Stroke
+                    damit es auf dem dunklen Asphalt nicht untergeht. */}
                 <text
                   x={(exitX + padX + innerW) / 2}
-                  y={rwyCl - 38}
+                  y={rwyCl - 12}
                   textAnchor="middle"
-                  fontSize="13"
-                  fill="rgba(226,232,240,0.85)"
-                  fontWeight="600"
+                  fontSize="15"
+                  fill="#f1f5f9"
+                  fontWeight="800"
                   fontFamily="monospace"
+                  stroke="#0c1628"
+                  strokeWidth="3"
+                  paintOrder="stroke"
                 >
                   Bahn verbleibend {(lengthM - (props.td_distance_from_threshold_m + props.rollout_m)).toFixed(0)} m
                 </text>
                 <text
                   x={(exitX + padX + innerW) / 2}
-                  y={rwyCl + 8}
+                  y={rwyCl + 10}
                   textAnchor="middle"
-                  fontSize="11"
-                  fill="rgba(148,163,184,0.7)"
+                  fontSize="12"
+                  fill="#cbd5e1"
+                  fontWeight="700"
                   fontFamily="monospace"
+                  stroke="#0c1628"
+                  strokeWidth="3"
+                  paintOrder="stroke"
                 >
                   ({(((lengthM - (props.td_distance_from_threshold_m + props.rollout_m)) / lengthM) * 100).toFixed(0)} % unbenutzt)
                 </text>
