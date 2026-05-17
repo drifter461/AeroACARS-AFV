@@ -396,6 +396,24 @@ pub struct LandingRecord {
     #[serde(default)]
     pub forensic_sample_count: Option<u32>,
 
+    // ─── v0.8.3 (#8) — Forensische Bounce-Counts surface ─────────────
+    /// Hoechster gemessener AGL-Wert in den post-TD-Excursions, ft.
+    /// Aus `touchdown_v2::compute_landing_rate`. None wenn kein Hopser
+    /// erkannt oder Sampler-Buffer unvollstaendig. Quelle fuer das
+    /// „Hopser X ft erkannt"-Label im UI bei score-freien Bounces.
+    #[serde(default)]
+    pub bounce_max_agl_ft: Option<f32>,
+    /// Anzahl forensisch erkannter Hopser (>= 5 ft AGL). Subset:
+    /// `forensic_bounce_count >= scored_bounce_count`. Wenn
+    /// `bounce_count = 0` aber `forensic_bounce_count > 0`: rein
+    /// score-freie Hopser — UI zeigt dezenten „Light bounce"-Hinweis.
+    #[serde(default)]
+    pub forensic_bounce_count: Option<u8>,
+    /// Anzahl score-relevanter Hopser (>= 15 ft AGL). Was in
+    /// `bounce_count` und den Landing-Score einfliesst.
+    #[serde(default)]
+    pub scored_bounce_count: Option<u8>,
+
     // ─── v0.7.1 Erweiterung (Spec §5.1 + §5.4) ───────────────────────
     // Alle Felder mit #[serde(default)] — alte landing_history.json-
     // Eintraege ohne diese Felder bleiben deserialisierbar.

@@ -117,6 +117,8 @@
       "hard": "HARTE LANDUNG",
       "severe": "SCHWERE LANDUNG",
       "bounce": "BOUNCE",
+      "bounce_light": "Light bounce (score-frei)",
+      "bounce_light_with_height": "Light bounce {{ft}} ft (score-frei)",
       "off_centerline": "ABSEITS DER MITTELLINIE",
       "unstable_approach": "UNSTABILER ANFLUG"
     },
@@ -1039,7 +1041,7 @@
       "bid_not_found": "Bid nicht gefunden — bitte aktualisieren.",
       "aircraft_not_available": "Flugzeug nicht verfügbar — Details siehe unten. Häufige Ursachen: das Flugzeug steht an einem anderen Flughafen, ist gerade „in use“ durch einen offenen PIREP, oder Ihr Rang hat keinen Zugriff. Aufräumen via phpVMS-Admin (PIREPs canceln + Aircraft-Standort prüfen).",
       "aircraft_mismatch": "Flugzeug-Typ passt nicht — Sie sitzen im falschen Flugzeug für diese Bid. Laden Sie den richtigen Typ im Simulator oder wählen Sie eine andere Bid.",
-      "aircraft_mismatch_warning": "Flugzeug-Typ passt nicht zur Picker-Wahl — Sim hat einen anderen Typ geladen. Im VFR-Mode kannst du trotzdem starten (deine Wahl wird respektiert), aber Score-Limits gelten weiterhin für den gewählten Typ.",
+      "aircraft_mismatch_warning": "Flugzeug-Typ passt nicht: Bid und Sim zeigen unterschiedliche Typen. Bei Wetlease (PaxStudio-Loadsheet erlaubt jedes aktive Aircraft) → „Trotzdem starten“ klicken, die Wahl wird respektiert. Bei versehentlich falsch geladenem Flugzeug → jetzt im Sim umladen. Score-Limits gelten weiterhin für den im Sim geladenen Typ.",
       "invalid_block_fuel": "Block-Fuel muss eine positive Zahl in kg sein.",
       "invalid_flight_time": "Erwartete Flugzeit muss eine positive Zahl in Minuten sein.",
       "invalid_zfw": "ZFW (Zero Fuel Weight) ist Pflicht — bitte den geplanten Leerflug-Wert (Aircraft + Pilot + Pax + Cargo, ohne Sprit) in kg eintragen.",

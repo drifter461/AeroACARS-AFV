@@ -30,6 +30,10 @@ fn fixture_path(name: &str) -> std::path::PathBuf {
 struct FixtureFlight {
     sim: SimKind,
     samples: Vec<recorder::TouchdownWindowSample>,
+    // v0.8.3: `edge_at` wird vom Fixture-Loader noch befuellt aber von
+    // den aktuellen Test-Bodies nicht gelesen — kept fuer zukuenftige
+    // Tests die den echten Edge-Timestamp verifizieren wollen.
+    #[allow(dead_code)]
     edge_at: Option<DateTime<Utc>>,
 }
 
@@ -112,7 +116,7 @@ fn run_pipeline(fixture: &FixtureFlight) -> Vec<EpisodeOutcome> {
                 cand.edge_agl_ft, cand.edge_vs_fpm, impact_vs,
                 match &validation {
                     ValidationResult::Validated{..} => "VALIDATED",
-                    ValidationResult::FalseEdge{reason, result} => {
+                    ValidationResult::FalseEdge{reason: _, result} => {
                         eprintln!("    detail: gear_pass={} g_pass={:?} sustained_pass={:?} low_agl_pass={} vs_neg_pass={}",
                             result.gear_force_pass, result.g_force_pass,
                             result.sustained_ground_pass, result.low_agl_persistence_pass,

@@ -431,13 +431,10 @@ fn clean_atc_model(raw: &str) -> Option<String> {
 /// counts as a match. Without this, a pilot on a real GSG flight
 /// (Emirates UAE770 EK770, A359 bid, A350-900 sim) got blocked
 /// with "Aircraft mismatch" even though it's the same aircraft.
-/// Test-/Compatibility-Wrapper ohne VPS-Override. Production-Code
-/// nutzt `title_mentions_icao_with_extra` direkt mit dem AppState-
-/// Cache.
-#[cfg(test)]
-fn title_mentions_icao(title: &str, icao: &str) -> bool {
-    title_mentions_icao_with_extra(title, icao, &HashMap::new())
-}
+// v0.8.3: `title_mentions_icao(&str, &str)` (Test-Wrapper ohne VPS-
+// Override) entfernt — wurde von keinem Test mehr aufgerufen seit die
+// `_with_extra`-Variante alleinige Single-Source-of-Truth ist. Wer die
+// Default-Variante braucht, ruft `_with_extra(title, icao, &HashMap::new())`.
 
 /// v0.8.0: title-substring-Check mit VPS-Alias-Override. Long-form
 /// strings aus dem Sim ("mg hjet ha420 [Preset Default]") werden
@@ -3753,15 +3750,27 @@ fn aircraft_limits_for(icao: &str) -> AircraftLimits {
         "CL30" | "CL35" | "CL60" | "CL64" | "CL65" => AircraftLimits { max_bank_landing_deg: 6.0, typical_vref_kt: Some(115.0) },
         "GLF5" | "GLF6" | "GLEX" | "G280" | "GL5T" | "GL7T" => AircraftLimits { max_bank_landing_deg: 7.0, typical_vref_kt: Some(120.0) },
         "C25A" | "C25B" | "C25C" | "C525" | "C56X" | "C68A" => AircraftLimits { max_bank_landing_deg: 8.0, typical_vref_kt: Some(105.0) },
-        // Turboprops
+        // Turboprops — Regional/Commuter
         "DH8A" | "DH8B" | "DH8C" | "DH8D" | "AT43" | "AT72" | "AT75" | "AT76" => AircraftLimits { max_bank_landing_deg: 8.0, typical_vref_kt: Some(110.0) },
-        "B190" | "B350" | "B190" => AircraftLimits { max_bank_landing_deg: 10.0, typical_vref_kt: Some(95.0) },
+        // Beechcraft King Air family (turboprop). v0.8.3: duplicate B190
+        // removed, BE9L/BE10/BE20/BE30 hinzugefuegt — vorher fielen alle
+        // King-Air-Varianten ausser B190/B350 auf den 8°/None-Fallback.
+        "B190" | "B350" | "BE9L" | "BE10" | "BE20" | "BE30" => AircraftLimits { max_bank_landing_deg: 10.0, typical_vref_kt: Some(95.0) },
+        // GA Twins (piston). v0.8.3: BE58 (Baron) + PA34 (Seneca) +
+        // AEST (Aerostar) hinzugefuegt — Reports zeigten GSG-Piloten mit
+        // Baron/Seneca landeten mit Airliner-Bank-Limits (8° statt 15°).
+        "BE58" | "BE76" | "PA34" | "PA44" | "AEST" => AircraftLimits { max_bank_landing_deg: 15.0, typical_vref_kt: Some(85.0) },
         // GA Singles
         "C172" | "C152" | "C150" | "C162" => AircraftLimits { max_bank_landing_deg: 15.0, typical_vref_kt: Some(65.0) },
         "C182" | "C206" | "C208" => AircraftLimits { max_bank_landing_deg: 12.0, typical_vref_kt: Some(75.0) },
         "DA40" | "DA42" | "DA62" => AircraftLimits { max_bank_landing_deg: 12.0, typical_vref_kt: Some(75.0) },
-        "P28A" | "PA28" | "PA32" | "PA46" => AircraftLimits { max_bank_landing_deg: 12.0, typical_vref_kt: Some(75.0) },
+        "P28A" | "PA28" | "PA32" | "PA46" | "P28R" | "PA24" => AircraftLimits { max_bank_landing_deg: 12.0, typical_vref_kt: Some(75.0) },
         "SR20" | "SR22" | "SR2T" => AircraftLimits { max_bank_landing_deg: 12.0, typical_vref_kt: Some(80.0) },
+        // Beechcraft Bonanza family (single-engine piston, Svenny's Bird).
+        // v0.8.3: zuvor war BE36 nicht aufgelistet → Airliner-Fallback.
+        "BE33" | "BE35" | "BE36" => AircraftLimits { max_bank_landing_deg: 15.0, typical_vref_kt: Some(75.0) },
+        // Mooney + andere High-Performance Singles
+        "M20P" | "M20T" | "MU2" => AircraftLimits { max_bank_landing_deg: 12.0, typical_vref_kt: Some(80.0) },
         // Fallback fuer unbekannte
         _ => AircraftLimits { max_bank_landing_deg: 8.0, typical_vref_kt: None },
     }
@@ -4193,9 +4202,23 @@ const BOUNCE_WINDOW_SECS: i64 = 8;
 
 /// AGL altitude (ft) the aircraft must climb above before we can
 /// detect a bounce. Below this, on-ground flickers are noise (gear
-/// strut oscillation, sloppy SimVar updates). Matches BeatMyLanding's
-/// `BounceRadioAltThresholdFeet`. f64 to match `SimSnapshot::altitude_agl_ft`.
-const BOUNCE_AGL_THRESHOLD_FT: f64 = 35.0;
+/// strut oscillation, sloppy SimVar updates).
+///
+/// v0.8.3 (#3): von 35 ft auf 15 ft gesenkt. Vorher war der Wert an
+/// BeatMyLanding's `BounceRadioAltThresholdFeet` (35) ausgerichtet, was
+/// zur Folge hatte dass Standard-Bounces von 5-15 ft (= das was Piloten
+/// als „typischer Hopser" wahrnehmen) NIE gezaehlt wurden. In 14 Tagen
+/// Produktion: 183 Touchdowns, **5** Bounces erkannt (2.7 %), null aus
+/// X-Plane, alle 5 nur bei extrem harten MSFS-Landungen (vs <= -500 fpm).
+/// Reported von Adrian (2026-05-14 PR-Kontext, Beispiel #167).
+///
+/// Neuer Wert 15 ft = `touchdown_v2::BOUNCE_SCORED_MIN_AGL_FT`, damit
+/// der live-Streamer-Tally und der Forensics-Override-Pfad gegen
+/// dieselbe Schwelle messen. Forensic-only Bounces unter 15 ft fliessen
+/// weiterhin nur in den touchdown_v2-Pfad ein (5-ft Forensic-Threshold),
+/// werden nicht in `stats.bounce_count` gezaehlt. f64 to match
+/// `SimSnapshot::altitude_agl_ft`.
+const BOUNCE_AGL_THRESHOLD_FT: f64 = 15.0;
 
 /// AGL altitude (ft) the aircraft must come back below to count one
 /// bounce. The detector arms when AGL crosses up through THRESHOLD
@@ -6191,6 +6214,23 @@ fn clear_persisted_flight(app: &AppHandle) {
     if path.exists() {
         let _ = std::fs::remove_file(&path);
     }
+    // v0.8.3 (#2): Auto-Start-Lock zuruecksetzen. Vorher: `auto_start_last_bid_id`
+    // wurde nur bei FEHLGESCHLAGENEM flight_start gecleart ([:20616]), bei
+    // erfolgreichem Flugstart blieb es bis App-Neustart gesetzt. Effekt: ein
+    // zweiter Flug mit dem GLEICHEN bid_id (z.B. Roundtrip-Hin- und Rueckflug
+    // ueber denselben Bid, oder Re-Acceptance nach Cancel) wurde stumm vom
+    // Auto-Start-Watcher uebersprungen mit der Activity-Log-Meldung
+    // "Bid X wurde diese Session schon mal auto-gestartet". Reported von
+    // Svenny 2026-05-17 (BE36 TAPA→TRPG → TRPG→TDCF Roundtrip).
+    //
+    // Beim Aufraeumen des aktiven Flugs ist die Session aus Auto-Start-Sicht
+    // abgeschlossen — der naechste Tick darf wieder matchen, egal welcher Bid.
+    let state = app.state::<AppState>();
+    let mut g = state
+        .auto_start_last_bid_id
+        .lock()
+        .expect("auto_start_last_bid_id lock");
+    *g = None;
 }
 
 fn save_active_flight(app: &AppHandle, flight: &ActiveFlight) {
@@ -6719,7 +6759,15 @@ async fn flight_start(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
     bid_id: i64,
+    // v0.8.3 (#7): Optional acknowledge-Flag fuer Aircraft-Mismatch.
+    // Bei None / Some(false) liefert der Mismatch-Check eine WARNUNG
+    // (Error-Code "aircraft_mismatch_warning"), bei Some(true) wird der
+    // Check uebersprungen — analog `flight_start_manual`. Erlaubt
+    // Wetlease-Workflows (PaxStudio-Loadsheet) ohne Hard-Block.
+    #[allow(non_snake_case)]
+    acknowledgeAircraftMismatch: Option<bool>,
 ) -> Result<ActiveFlightInfo, UiError> {
+    let ack_aircraft_mismatch = acknowledgeAircraftMismatch.unwrap_or(false);
     // Same race protection as flight_adopt: a double-click on "Start flight"
     // would otherwise prefile two PIREPs against the same bid.
     let setup_guard = FlightSetupGuard::try_acquire(&state.flight_setup_in_progress)?;
@@ -6849,19 +6897,42 @@ async fn flight_start(
                 .registration
                 .as_deref()
                 .unwrap_or("?");
+            // v0.8.3 (#7): von Hard-Block zu Warning-with-Acknowledge.
+            // Vorher: Aircraft-Mismatch im Standard-Flow (SimBrief) war
+            // ein harter „aircraft_mismatch"-Error, der den Flugstart
+            // abbrach. Pilot konnte nur via VFR-Mode (`flight_start_manual`)
+            // umgehen. Problem: Wetlease-Flows (PaxStudio-Loadsheet
+            // erlaubt jedes aktive Aircraft) hatten keine Chance — Pilot
+            // musste auf manual switchen.
+            //
+            // Neuer Default: Warnung mit „Trotzdem starten"-Button,
+            // identisch zu `flight_start_manual`. Auf Zweit-Aufruf mit
+            // acknowledgeAircraftMismatch=true wird der Check
+            // uebersprungen. phpVMS macht sowieso nur einen laxen
+            // Title-Substring-Check beim PIREP-File — kein Bedarf,
+            // strenger zu sein als der Server.
+            if !ack_aircraft_mismatch {
+                tracing::warn!(
+                    expected = %expected,
+                    actual = %actual,
+                    title = %sim_title,
+                    registration = %registration,
+                    "aircraft type mismatch — returning warning (acknowledge to proceed)"
+                );
+                return Err(UiError::new(
+                    "aircraft_mismatch_warning",
+                    format!(
+                        "Aircraft passt nicht: gewaehlt {expected} ({registration}), Sim hat {actual}. Wetlease? Dann 'Trotzdem starten'. Falsches Flugzeug geladen? Im Sim umladen.",
+                    ),
+                ));
+            }
             tracing::warn!(
                 expected = %expected,
                 actual = %actual,
                 title = %sim_title,
                 registration = %registration,
-                "aircraft type mismatch — blocking flight start"
+                "aircraft mismatch acknowledged by pilot — proceeding (Wetlease or manual override)"
             );
-            return Err(UiError::new(
-                "aircraft_mismatch",
-                format!(
-                    "Aircraft mismatch: bid wants {expected} ({registration}), sim has {actual} (title \"{sim_title}\"). Load the correct aircraft type in the sim or pick a matching bid.",
-                ),
-            ));
         }
     }
 
@@ -8271,6 +8342,47 @@ fn spawn_pirep_queue_worker(app: AppHandle) {
                         spawn_flight_log_upload(&app, q.pirep_id.clone());
                     }
                     Err(e) => {
+                        // v0.8.3 (#1): Hard-Errors NICHT mehr endlos
+                        // re-enqueuen. Vorher: jeder Fehler — auch HTTP 400
+                        // "PIREP is read-only" (= phpVMS hat den PIREP
+                        // bereits als ACCEPTED markiert, lehnt jedes
+                        // weitere /file ab) — wurde als transient behandelt
+                        // und alle 60 s nochmal probiert, bis MAX_ATTEMPTS
+                        // erreicht war. Pilot sah 50 Min lang rote
+                        // "PIREP file failed"-Spam-Eintraege im Activity-Log
+                        // (Reported 2026-05-17 Svenny, BE36-Session 819).
+                        //
+                        // Jetzt: bei nicht-transienten Fehlern den Queue-
+                        // Eintrag verwerfen + EINEN sauberen Activity-Log-
+                        // Hinweis schreiben. Bei transienten Fehlern (Netz
+                        // weg, 5xx, 408, 429) bleibt das alte Verhalten.
+                        if !is_transient_pirep_error(&e) {
+                            pirep_queue::remove(&app, &q.pirep_id);
+                            tracing::warn!(
+                                pirep_id = %q.pirep_id,
+                                error = %e,
+                                "queued PIREP rejected by server — removing from queue"
+                            );
+                            log_activity_handle(
+                                &app,
+                                ActivityLevel::Warn,
+                                format!(
+                                    "PIREP {} serverseitig abgelehnt — Queue-Eintrag entfernt",
+                                    format_callsign(&q.airline_icao, &q.flight_number),
+                                ),
+                                Some(format!(
+                                    "{}. Falls Du den Flug filen wolltest: phpVMS-Web pruefen \
+                                     (PIREP evtl. bereits eingereicht oder gecancelt).",
+                                    friendly_net_error(&e),
+                                )),
+                            );
+                            // Best-effort: JSONL-Upload trotzdem versuchen
+                            // — Forensik-Log ist auch dann wertvoll wenn
+                            // der PIREP nicht (mehr) angenommen wurde.
+                            // (Fix #6 — siehe Worker-Success-Pfad oben.)
+                            spawn_flight_log_upload(&app, q.pirep_id.clone());
+                            continue;
+                        }
                         q.last_error = Some(friendly_net_error(&e));
                         // Update das File mit dem neuen attempt-count + Error
                         let _ = pirep_queue::enqueue(&app, &q);
@@ -8278,7 +8390,7 @@ fn spawn_pirep_queue_worker(app: AppHandle) {
                             pirep_id = %q.pirep_id,
                             attempt = q.attempt_count,
                             error = %e,
-                            "queued PIREP file failed — will retry next tick"
+                            "queued PIREP file failed (transient) — will retry next tick"
                         );
                     }
                 }
@@ -9307,6 +9419,18 @@ where
         flare_quality_score: ana_i32(&stats.landing_analysis, "flare_quality_score"),
         flare_detected: ana_bool(&stats.landing_analysis, "flare_detected"),
         forensic_sample_count: ana_u32(&stats.landing_analysis, "sample_count"),
+
+        // ─── v0.8.3 (#8) — Forensische Bounce-Counts ins LandingRecord ───
+        // Damit das UI „Light bounce X ft erkannt (score-frei)" zeigen
+        // kann auch bei 5-14 ft Hopsern, die per Spec score-frei sind.
+        // Reported 2026-05-14 Adrian: Touchdown #167 hatte
+        // bounce_max_agl_ft=14.05, aber UI zeigte bounce_count=0 →
+        // Pilot dachte "nicht erkannt".
+        bounce_max_agl_ft: ana_f32(&stats.landing_analysis, "bounce_max_agl_ft"),
+        forensic_bounce_count: ana_u32(&stats.landing_analysis, "forensic_bounce_count")
+            .map(|n| n.min(u8::MAX as u32) as u8),
+        scored_bounce_count: ana_u32(&stats.landing_analysis, "scored_bounce_count")
+            .map(|n| n.min(u8::MAX as u32) as u8),
 
         // ─── v0.7.1 Felder (Spec docs/spec/v0.7.1-landing-ux-fairness.md §5) ──
         // Phase 1 = backbone: Felder durchreichen, kein Pilot-sichtbares
@@ -14318,6 +14442,16 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                             flare_detected: ana_bool(&stats.landing_analysis, "flare_detected"),
                             bounce_max_agl_ft: ana_f32(&stats.landing_analysis, "bounce_max_agl_ft"),
                             forensic_sample_count: ana_u32(&stats.landing_analysis, "sample_count"),
+                            // v0.8.3 (#8): Forensic + scored Counts mit-publizieren.
+                            // Quelle: touchdown_v2::compute_landing_analysis schreibt
+                            // beide ins analysis-JSON (Zeile ~12863). aeroacars-live
+                            // (recorder) + LandingPanel.tsx (Pilot-Client) sehen so
+                            // den UnterschiedDes zwischen forensic (5 ft) und scored
+                            // (15 ft) und koennen score-freie Hopser dezent surface.
+                            forensic_bounce_count: ana_u32(&stats.landing_analysis, "forensic_bounce_count")
+                                .map(|n| n.min(u8::MAX as u32) as u8),
+                            scored_bounce_count: ana_u32(&stats.landing_analysis, "scored_bounce_count")
+                                .map(|n| n.min(u8::MAX as u32) as u8),
                             // v0.7.6 P1-3: Trust-Status auch in den
                             // touchdown_complete-Payload damit aeroacars-
                             // live (Touchdown-Tab) und ggf. Pilot-Client-
@@ -16680,7 +16814,8 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
                 // bounces on a clean landing.
                 //
                 // Arm: AGL crosses up through BOUNCE_AGL_THRESHOLD_FT
-                //      (35 ft, BeatMyLanding's `BounceRadioAltThresholdFeet`).
+                //      (v0.8.3: 15 ft = touchdown_v2 SCORED-Threshold,
+                //       gesenkt von 35 ft weil typische Hopser nie zaehlten).
                 // Fire: AGL drops back below BOUNCE_AGL_RETURN_FT
                 //      (5 ft, `BounceRadioAltReturnFeet`).
                 // Both must happen inside BOUNCE_WINDOW_SECS for a bounce
@@ -20589,8 +20724,12 @@ fn spawn_auto_start_watcher(app: AppHandle) {
                 let bid_id = bid.id;
                 tauri::async_runtime::spawn(async move {
                     let state_ref = app_for_call.state::<AppState>();
+                    // v0.8.3 (#7): Auto-Start liefert kein acknowledge mit.
+                    // Bei Aircraft-Mismatch endet der Spawn mit
+                    // "aircraft_mismatch_warning" Error — Pilot muss im
+                    // Cockpit-UI manuell „Trotzdem starten" klicken.
                     if let Err(e) =
-                        flight_start(app_for_call.clone(), state_ref, bid_id).await
+                        flight_start(app_for_call.clone(), state_ref, bid_id, None).await
                     {
                         tracing::warn!(
                             ?e,
@@ -22713,6 +22852,35 @@ mod v0_7_6_payload_consistency_tests {
         let bounce_height = 13.57_f32;
         assert!(bounce_height >= touchdown_v2::BOUNCE_FORENSIC_MIN_AGL_FT);
         assert!(bounce_height < touchdown_v2::BOUNCE_SCORED_MIN_AGL_FT);
+    }
+
+    #[test]
+    fn streamer_bounce_threshold_matches_scored_v2_threshold() {
+        // v0.8.3 (#3): Der live-Streamer-Tally (BOUNCE_AGL_THRESHOLD_FT)
+        // muss gegen dieselbe Schwelle messen wie der touchdown_v2
+        // Forensics-SCORED-Pfad — sonst weichen scored_bounce_count und
+        // stats.bounce_count (Fallback bei unvollstaendigem Sampler-
+        // Buffer) auseinander, und Piloten sehen je nach Pfad andere
+        // Bounce-Counts.
+        //
+        // Wenn dieser Test fehlschlaegt: BOUNCE_AGL_THRESHOLD_FT (lib.rs)
+        // und BOUNCE_SCORED_MIN_AGL_FT (touchdown_v2.rs) gemeinsam
+        // anpassen — KEINE der beiden Konstanten in Isolation aendern.
+        assert_eq!(
+            BOUNCE_AGL_THRESHOLD_FT as f32,
+            touchdown_v2::BOUNCE_SCORED_MIN_AGL_FT,
+            "Streamer-Threshold ({} ft) muss gleich v2-SCORED-Threshold ({} ft) sein",
+            BOUNCE_AGL_THRESHOLD_FT,
+            touchdown_v2::BOUNCE_SCORED_MIN_AGL_FT,
+        );
+    }
+
+    #[test]
+    fn streamer_bounce_return_strictly_below_threshold() {
+        // Sanity: nach dem Hopser muss der Flieger wieder TIEFER als
+        // RETURN sinken (5 ft). Wenn RETURN >= THRESHOLD waere, koennte
+        // der Detector nie firen.
+        assert!(BOUNCE_AGL_RETURN_FT < BOUNCE_AGL_THRESHOLD_FT);
     }
 }
 

@@ -142,6 +142,20 @@ export interface LandingRecord {
   flare_detected?: boolean | null;
   forensic_sample_count?: number | null;
 
+  // v0.8.3 (#8): Forensische Bounce-Counts — surface fuer den Pilot,
+  // damit „kleine" Hopser (5-14 ft, per Spec score-frei) trotzdem
+  // sichtbar werden statt im UI als „0 Bounces" verloren zu gehen.
+  // Quelle: touchdown_v2::compute_landing_rate Forensik-Pipeline.
+  /// Hoechster gemessener AGL-Wert in Post-TD-Hopsern, ft.
+  /// >= 5 ft = sichtbar (forensic), >= 15 ft = scored.
+  bounce_max_agl_ft?: number | null;
+  /// Anzahl Hopser >= 5 ft. Subset: forensic_bounce_count >= scored.
+  /// Wenn > 0 aber bounce_count = 0 → rein score-freie Hopser.
+  forensic_bounce_count?: number | null;
+  /// Anzahl Hopser >= 15 ft (= was im Score bestraft wird,
+  /// identisch mit bounce_count nach Override-Pfad).
+  scored_bounce_count?: number | null;
+
   // ─── v0.7.1 Felder (Spec docs/spec/v0.7.1-landing-ux-fairness.md §5) ──
   // Phase 1: nur Felder durchreichen, keine UI-Aenderung. Phase 3
   // konsumiert sie (ForensicsBadge + StabilityDetailPanel + Sub-Score-
@@ -1532,10 +1546,28 @@ function QuickFlags({ record }: { record: LandingRecord }) {
   }
 
   // BOUNCE × n
+  // v0.8.3 (#8): Auch score-freie Hopser (5-14 ft) zeigen. Vorher
+  // landeten 14-ft-Hopser stumm bei bounce_count=0 — Pilot dachte
+  // „nicht erkannt" (Reported 2026-05-14 Adrian, TD #167).
+  //
+  // Drei Faelle:
+  //   bounce_count > 0                            → wie bisher, voller Flag
+  //   bounce_count = 0, forensic_bounce_count > 0 → Light-bounce-Hinweis
+  //   alle 0                                       → kein Flag
   if (record.bounce_count > 0) {
     flags.push({
       label: `${t("landing.flag.bounce")} × ${record.bounce_count}`,
       tone: record.bounce_count >= 2 ? "err" : "warn",
+    });
+  } else if ((record.forensic_bounce_count ?? 0) > 0) {
+    const heightFt = record.bounce_max_agl_ft != null
+      ? Math.round(record.bounce_max_agl_ft)
+      : null;
+    flags.push({
+      label: heightFt != null
+        ? t("landing.flag.bounce_light_with_height", { ft: heightFt })
+        : t("landing.flag.bounce_light"),
+      tone: "warn",
     });
   }
 

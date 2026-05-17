@@ -187,6 +187,16 @@ struct PositionPayload {
     aircraft_icao: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     aircraft_registration: Option<String>,
+    /// v0.8.3 (#5 follow-up): voller Sim-Aircraft-Title (z.B.
+    /// "Black Square A36TC Bonanza Professional N920LG") aus
+    /// `SimVar TITLE` / X-Plane `acf_descrip`. Bisher nirgends ueber
+    /// MQTT publiziert — der Recorder konnte `flight_session_stats.
+    /// aircraft_title` deshalb nie befuellen. Mit diesem Feld kann
+    /// `recomputeSessionStats` ihn aus `flights.last_position_json`
+    /// extrahieren. skip_if_none → alte Clients ohne Titel
+    /// vergiften die DB nicht.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    aircraft_title: Option<String>,
     simulator: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     dep: Option<String>,
@@ -280,6 +290,22 @@ pub struct TouchdownPayload {
     pub score: Option<i32>,
     pub bounce: Option<bool>,
     pub bounce_count: Option<u8>,
+    /// v0.8.3 (#8): Forensisch erkannte Hopser >= 5 ft AGL (
+    /// `touchdown_v2::BOUNCE_FORENSIC_MIN_AGL_FT`). Wird unabhaengig
+    /// vom Score gezaehlt — auch „kleine" Hopser (5-14 ft), die per
+    /// Spec score-frei sind, tauchen hier auf. Wenn `Some(0)` und
+    /// `bounce_count > 0`: alle Hopser sind ueber 15 ft (scored).
+    /// Wenn `Some(n)` und `bounce_count = 0`: ausschliesslich
+    /// score-freie Hopser. None = pre-v0.8.3 PIREP / Sampler-Buffer
+    /// unvollstaendig.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forensic_bounce_count: Option<u8>,
+    /// v0.8.3 (#8): Score-relevante Hopser >= 15 ft AGL (
+    /// `touchdown_v2::BOUNCE_SCORED_MIN_AGL_FT`). Subset von
+    /// `forensic_bounce_count`. Was in den Landing-Score-Sub-Score
+    /// „bounces" einfliesst — ueber `scored_bounce_count_for_score()`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scored_bounce_count: Option<u8>,
     pub runway: Option<String>,
     /// v0.7.18 (B-012): aufgeloester Touchdown-Airport.
     /// - Wenn `runway_match` zur runway korreliert wurde: dessen ICAO.
@@ -977,6 +1003,10 @@ impl Handle {
                     .as_deref()
                     .and_then(non_empty)
             },
+            // v0.8.3 (#5 follow-up): Sim-Aircraft-Title fuer Recorder-
+            // Stats-Recompute. Quelle: SimVar TITLE (MSFS) /
+            // acf_descrip (XP12). non_empty() filtert leere Strings.
+            aircraft_title: snap.aircraft_title.as_deref().and_then(non_empty),
             simulator: simulator_label(snap.simulator),
             dep: non_empty(&meta.dep_icao),
             arr: non_empty(&meta.arr_icao),

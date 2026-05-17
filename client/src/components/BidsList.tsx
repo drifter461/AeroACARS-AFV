@@ -255,6 +255,14 @@ export function BidsList({
     bidId: number;
     message: string;
   } | null>(null);
+  // v0.8.3 (#7): Wenn Backend "aircraft_mismatch_warning" liefert,
+  // zeigen wir hier ein gelbes Banner mit "Trotzdem starten"-Button —
+  // statt der roten Hard-Block-Bar. Unterstuetzt Wetlease-Flows
+  // (PaxStudio-Loadsheet erlaubt jedes aktive Aircraft).
+  const [startWarning, setStartWarning] = useState<{
+    bidId: number;
+    message: string;
+  } | null>(null);
   /** v0.5.27: Manual/VFR-Mode-Modal — Bid für den's gerade geöffnet ist. */
   const [manualModalBid, setManualModalBid] = useState<Bid | null>(null);
   /** Cached airport coords keyed by uppercase ICAO. */
@@ -567,17 +575,30 @@ export function BidsList({
     }
   }
 
-  async function startFlight(bid: Bid) {
+  async function startFlight(bid: Bid, acknowledgeAircraftMismatch = false) {
     if (startingId !== null || hasActiveFlight) return;
     setStartingId(bid.id);
     setStartError(null);
+    setStartWarning(null);
     try {
       const result = await invoke<ActiveFlightInfo>("flight_start", {
         bidId: bid.id,
+        // v0.8.3 (#7): bei "Trotzdem starten"-Klick wird der Aircraft-
+        // Mismatch-Check serverseitig uebersprungen.
+        acknowledgeAircraftMismatch,
       });
       onFlightStarted?.(result);
     } catch (err: unknown) {
       const ui = asUiError(err);
+      // v0.8.3 (#7): aircraft_mismatch_warning ist KEIN Hard-Block —
+      // gelbes Warn-Banner mit "Trotzdem starten"-Button anzeigen.
+      if (ui.code === "aircraft_mismatch_warning") {
+        setStartWarning({
+          bidId: bid.id,
+          message: `${t("flight.error.aircraft_mismatch_warning")} (${ui.message})`,
+        });
+        return;
+      }
       // Map known backend error codes to localized messages; fall back to the
       // raw server-supplied message if the code is unfamiliar.
       const knownCodes = [
@@ -982,6 +1003,29 @@ export function BidsList({
                     <p className="bid-card__start-error" role="alert">
                       {startError.message}
                     </p>
+                  )}
+                  {/* v0.8.3 (#7): Wetlease-/Mismatch-Warning mit
+                      Override-Button (gelb) — analog ManualFlightModal. */}
+                  {startWarning?.bidId === bid.id && (
+                    <div className="manual-modal__warning" role="alert" style={{ marginTop: 8 }}>
+                      <div className="manual-modal__warning-title">
+                        {t("manual_flight.warning_title")}
+                      </div>
+                      <div className="manual-modal__warning-text">
+                        {startWarning.message}
+                      </div>
+                      <div style={{ marginTop: 8 }}>
+                        <button
+                          type="button"
+                          className="button button--primary"
+                          onClick={() => void startFlight(bid, true)}
+                          disabled={startingId !== null || hasActiveFlight}
+                          style={{ background: "#fbbf24", borderColor: "#fbbf24", color: "#1f1f1f" }}
+                        >
+                          {t("manual_flight.start_anyway")}
+                        </button>
+                      </div>
+                    </div>
                   )}
                 </article>
               </li>
