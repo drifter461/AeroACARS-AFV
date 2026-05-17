@@ -2074,179 +2074,32 @@ function LandingDetail({
                 ⚠ {trustWarning}
               </div>
             )}
-            {geometryTrusted && (() => {
-              // v0.8.2: alte RunwayDiagram → RunwayDiagramV2. Mapping
-              // identisch zum DevPreview-Mapper, hier inline weil wir
-              // hier den vollen LandingRecord zur Hand haben.
+            {(() => {
+              // v0.8.2: alte RunwayDiagram → RunwayDiagramV2.
+              //
+              // v0.8.3.1 (Hotfix): die legacy <dl>-Liste die hier vorher
+              // ZUSAETZLICH rendert wurde entfernt — V2 hat alle Felder
+              // (bahn/laenge/hinter-schwelle/mittellinie/rollout/bahn-
+              // auslastung/navdata/tdz/aim/tch/dds) als eigene Pills.
+              // Vorher liefen beide parallel und zeigten WIDERSPRECHENDE
+              // Werte: Bahn-Auslastung 52% (V2: (td_dist+rollout)/length)
+              // vs 38% (legacy: rollout/length). Reported von Thomas
+              // 2026-05-18 mit Fenix-A320 EVRA-Landung.
+              //
+              // Bei untrusted geometry NICHTS rendern — die trust-Warn-
+              // Box oberhalb erklaert dem Piloten warum (vorher zeigten
+              // einige legacy-Felder auch bei untrusted weiter, was
+              // inkonsistent zur V2-Logik war).
+              //
+              // Bei v2Props=null trotz trusted geometry → das ist ein
+              // Mapping-Bug, kein UI-Fallback. Tritt nicht auf weil
+              // mapLandingRecordToV2Props bei trusted records komplett
+              // ist (alle Pflichtfelder kommen aus record.runway_match,
+              // das bei trusted=true garantiert vollstaendig ist).
+              if (!geometryTrusted) return null;
               const v2Props = mapLandingRecordToV2Props(record);
-              if (!v2Props) return null;
-              return <RunwayDiagramV2 {...v2Props} />;
+              return v2Props ? <RunwayDiagramV2 {...v2Props} /> : null;
             })()}
-            <dl className="landing-keyvals landing-keyvals--inline">
-              {/* v0.7.6 P1 (Refinement-Round-2): Auch runway_id und
-                  runway_length sind aus der Runway-DB und damit bei
-                  untrusted geometry irrefuehrend (GSG303-Klasse: zeigt
-                  sonst "K5S9/16 (asphalt) · 1152 m" obwohl der Pilot
-                  nach OR66 wollte). Bei untrusted komplett ausblenden —
-                  die Hint-Pill oben erklaert dem Piloten warum. */}
-              {geometryTrusted && (
-                <div>
-                  <dt>{t("landing.runway_id")}</dt>
-                  <dd>
-                    {record.runway_match.airport_ident}/{record.runway_match.runway_ident}{" "}
-                    ({record.runway_match.surface})
-                  </dd>
-                </div>
-              )}
-              {geometryTrusted && (
-                <div>
-                  <dt>{t("landing.runway_length")}</dt>
-                  <dd>
-                    {(record.runway_match.length_ft * 0.3048).toFixed(0)} m
-                  </dd>
-                </div>
-              )}
-              {/* v0.7.6 P1-3: Centerline-Offset nur bei trusted geometry */}
-              {geometryTrusted && (
-                <div>
-                  <dt>{t("landing.centerline_offset")}</dt>
-                  <dd>
-                    {Math.abs(record.runway_match.centerline_distance_m).toFixed(1)} m{" "}
-                    {t(sideKey(record.runway_match.side))}
-                  </dd>
-                </div>
-              )}
-              {/* v0.7.6 P1-3: Past-Threshold (= Float-Distance-Equivalent)
-                  nur bei trusted geometry. */}
-              {geometryTrusted && (
-                <div>
-                  <dt>{t("landing.past_threshold")}</dt>
-                  <dd>
-                    {(record.runway_match.touchdown_distance_from_threshold_ft * 0.3048).toFixed(0)} m
-                  </dd>
-                </div>
-              )}
-              {/* Rollout bleibt unconditional sichtbar — GPS-basiert,
-                  nicht runway-DB-abhaengig. */}
-              {record.rollout_distance_m != null && (
-                <div>
-                  <dt>{t("landing.rollout")}</dt>
-                  <dd>{record.rollout_distance_m.toFixed(0)} m</dd>
-                </div>
-              )}
-              {/* v0.7.6 P1-3: runway_used_pct nutzt runway_length aus DB
-                  → nur bei trusted geometry zeigen. */}
-              {geometryTrusted &&
-                record.runway_match.length_ft > 0 &&
-                record.rollout_distance_m != null && (
-                  <div>
-                    <dt>{t("landing.runway_used_pct")}</dt>
-                    <dd>
-                      {(
-                        ((record.rollout_distance_m * 3.28084) /
-                          record.runway_match.length_ft) *
-                        100
-                      ).toFixed(0)}
-                      %
-                    </dd>
-                  </div>
-                )}
-              {/* v0.8.0 Navdata-Source + AIRAC-Cycle. Pilot sieht ob die
-                  Bewertung gegen Jeppesen-Daten oder den OurAirports-
-                  Fallback gelaufen ist. */}
-              {geometryTrusted && record.runway_match.source && (
-                <div>
-                  <dt>{t("landing.navdata_source")}</dt>
-                  <dd>
-                    {record.runway_match.source === "navigraph"
-                      ? t("landing.navdata_source_navigraph", {
-                          cycle:
-                            record.runway_match.nav_cycle ?? "?",
-                          defaultValue:
-                            "Navigraph (AIRAC {{cycle}})",
-                        })
-                      : t("landing.navdata_source_fallback", {
-                          defaultValue:
-                            "OurAirports (Fallback — ±10 m möglich)",
-                        })}
-                  </dd>
-                </div>
-              )}
-              {/* v0.8.0 TDZ — nur wenn assessable (= RWY ≥ 1200 m). */}
-              {geometryTrusted && record.td_in_tdz != null && (
-                <div>
-                  <dt>{t("landing.tdz_label")}</dt>
-                  <dd>
-                    {record.td_in_tdz
-                      ? t("landing.tdz_in", { defaultValue: "TDZ ✓" })
-                      : t("landing.tdz_out", {
-                          defaultValue: "ausserhalb TDZ",
-                        })}
-                    {record.td_third != null && record.td_third > 1
-                      ? ` · ${t("landing.runway_third", {
-                          n: record.td_third,
-                          defaultValue: "Drittel {{n}}",
-                        })}`
-                      : ""}
-                  </dd>
-                </div>
-              )}
-              {/* v0.8.0 Aim-Point */}
-              {geometryTrusted &&
-                record.aim_point_m != null &&
-                record.aim_delta_m != null && (
-                  <div>
-                    <dt>{t("landing.aim_label")}</dt>
-                    <dd>
-                      {record.aim_point_m.toFixed(0)} m,{" "}
-                      {record.aim_delta_m >= 0 ? "+" : ""}
-                      {record.aim_delta_m.toFixed(0)} m{" "}
-                      {record.aim_class &&
-                        ` · ${t(`landing.aim_class.${record.aim_class}`, {
-                          defaultValue: record.aim_class,
-                        })}`}
-                    </dd>
-                  </div>
-                )}
-              {/* v0.8.0 TCH (F5) — actual vs expected an der Threshold-
-                  Linie. Nur surfaced wenn aus Navigraph-Geometrie +
-                  AGL-Scan beide vorhanden sind. */}
-              {geometryTrusted &&
-                record.tch_actual_ft != null &&
-                record.tch_delta_ft != null && (
-                  <div>
-                    <dt>{t("landing.tch_label")}</dt>
-                    <dd>
-                      {record.tch_actual_ft.toFixed(0)} ft
-                      {record.runway_match.tch_expected_ft != null
-                        ? ` (Soll ${record.runway_match.tch_expected_ft})`
-                        : ""}
-                      {", "}
-                      {record.tch_delta_ft >= 0 ? "+" : ""}
-                      {record.tch_delta_ft.toFixed(0)} ft
-                      {record.tch_class &&
-                        ` · ${t(`landing.tch_class.${record.tch_class}`, {
-                          defaultValue: record.tch_class,
-                        })}`}
-                    </dd>
-                  </div>
-                )}
-              {/* v0.8.0 DDS — nur surface bei Verstoss damit der pilot
-                  nicht bei jedem normal-Touchdown eine "DDS ok"-Zeile
-                  sieht. */}
-              {geometryTrusted &&
-                record.pre_displaced_threshold === true && (
-                  <div>
-                    <dt>{t("landing.dds_label")}</dt>
-                    <dd style={{ color: "#ef4444" }}>
-                      {t("landing.dds_violation", {
-                        defaultValue:
-                          "⚠ Touchdown im Pre-Threshold-Bereich (illegal IRL)",
-                      })}
-                    </dd>
-                  </div>
-                )}
-            </dl>
           </section>
         );
       })()}
