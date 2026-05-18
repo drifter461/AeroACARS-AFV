@@ -146,7 +146,26 @@ fn create_and_bind() -> bool {
         return false;
     };
     let release_tag = options.release.as_ref().map(|c| c.to_string()).unwrap_or_default();
+
+    // QS-Hotfix F17 (Runde 6): apply_defaults() MUSS vor Client::from() laufen.
+    // sentry::init() macht das normalerweise hinter den Kulissen, aber wir
+    // bauen den Client manuell (= F13-Lifecycle ohne ClientInitGuard).
+    // apply_defaults setzt:
+    //   - Default-Transport (reqwest-basiert) — ohne den hat der Client
+    //     KEINEN Transport und Events gehen nicht raus
+    //   - Default-Integrations (Panic, Backtrace, Contexts, …)
+    //   - Env/Proxy-Defaults
+    // Ohne diesen Call laeuft alles ins Leere — der Client ist "bound"
+    // aber stumm. Vorherige F13-Runde hatte das verpasst.
+    let options = sentry::apply_defaults(options);
+
     let client = Arc::new(Client::from(options));
+    // Sanity-Check: Transport vorhanden? client.is_enabled() returnt true
+    // nur wenn DSN gesetzt UND Transport gebaut wurde. False heisst No-Op-
+    // Modus — irgendwas mit der Build-Konfig stimmt nicht (z.B. DSN-Parse
+    // fehlgeschlagen, oder apply_defaults konnte keinen Transport bauen weil
+    // sentry-feature `reqwest` nicht aktiv ist).
+    let enabled = client.is_enabled();
     sentry::Hub::current().bind_client(Some(Arc::clone(&client)));
     *slot = Some(client);
     drop(slot);
@@ -158,8 +177,17 @@ fn create_and_bind() -> bool {
         scope.set_tag("app.version", env!("CARGO_PKG_VERSION"));
         scope.set_tag("os", std::env::consts::OS);
     });
-    tracing::info!("[sentry] client bound for release {}", release_tag);
-    true
+    tracing::info!(
+        "[sentry] client bound for release {} (enabled={})",
+        release_tag, enabled
+    );
+    if !enabled {
+        tracing::warn!(
+            "[sentry] client.is_enabled() == false — DSN or transport problem; \
+             events will not be sent. Check AEROACARS_SENTRY_DSN at build time."
+        );
+    }
+    enabled
 }
 
 /// Setzt den Pilot-Consent. Symmetrisch beide Richtungen — Re-Opt-In im
