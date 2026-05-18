@@ -28,6 +28,16 @@ Alle nennenswerten Änderungen an AeroACARS. Format: lose an [Keep a Changelog](
 **Runde 3 (F12) nach 3. QS-Pass:**
 - **F12:** Asymmetrischer Opt-In nach Opt-Out — F9 droppte den Client hart bei Opt-Out, aber Opt-In schaltete nur die Atomic wieder an ohne Client neu zu binden. Pilot der "aus → an" klickte hatte native Crash-Reports kaputt bis App-Neustart. Settings-Hint sagte aber "wirkt sofort, kein Neustart noetig". Fix: `build_options()` aus `init()` extrahiert, `set_consent(true)` baut bei fehlendem Client einen neuen via `Client::from(options)` + `Hub::bind_client(Some(...))` + Initial-Scope. Aus-an-aus-an funktioniert jetzt symmetrisch in einem App-Run, ohne Neustart.
 
+**Runde 4 (F13-F15) nach 4. QS-Pass:**
+- **F13 (P1):** F9-Implementierung war architektonisch unvollstaendig — der `SENTRY_GUARD: OnceLock<Option<ClientInitGuard>>` hielt eine `Arc<Client>`-Referenz dauerhaft am Leben. `Hub::bind_client(None)` unbindet nur vom Hub, aber der Guard hielt weiter. Pending Events im Transport-Buffer haetten beim Guard-Drop ueber `Client::close()` drainen koennen. DS7-Garantie nicht belastbar. **Fix:** Kompletter Lifecycle-Umbau:
+  - `SENTRY_GUARD` (=`ClientInitGuard` im `OnceLock`) entfernt
+  - Neuer `SENTRY_CLIENT: OnceLock<Mutex<Option<Arc<Client>>>>` — wir kontrollieren die Arc-Referenz selbst
+  - `init()` ruft `create_and_bind()`: baut `Client::from(options)`, bindet via `Hub::bind_client(Some(Arc::clone))`, speichert Arc im Slot
+  - `set_consent(false)`: `slot.take()` → unsere Arc weg + `client.close(Some(ZERO))` → Transport-Worker signalisiert Pending-Queue zu verwerfen + `Hub::bind_client(None)` → Hub-Referenz weg. Arc-Refcount geht auf 0, Drop laeuft, Transport-Worker-Thread terminiert sauber.
+  - `set_consent(true)`: `create_and_bind()` — no-op wenn Client schon da, sonst Neu-Bau.
+- **F14 (P2):** Release-Notes verlinkten `docs/spec/v0.9.1-*` (existiert nicht — Specs heissen `v0.9.0-*`). Fix: alle 4 Spec-Links pro Sprache zurueck auf `v0.9.0-*`.
+- **F15 (P2):** Known-Issue-Block sagte „sim-lost-Suffix kommt in v0.9.1" — aber v0.9.1 ist genau dieses Release. Fix: auf „kommt in einem spaeteren v0.9.x-Release (vorgesehen v0.9.2)" korrigiert.
+
 ## [v0.9.0] — 2026-05-18 · INTERN (nie publiziert, kurz als latest sichtbar)
 
 Versionsnummer **verbrannt** wegen ~15-min-Sichtbarkeits-Fenster im `releases/latest` waehrend QS noch lief. Inhalt vollstaendig in v0.9.1 enthalten. Tag bleibt im Git-Log fuer Audit-Trail, keine Pilot-Distribution.
@@ -80,7 +90,7 @@ Beide Features halten sich an `docs/spec/v0.9.0-telemetry-contract.md` (Sektion 
 
 ### Bekannte Einschränkungen v0.9.0
 
-- **Discord-RPC „⚠ Sim getrennt"-Suffix:** Der Code ist vorhanden (Spec LE8) und getestet, aber der Caller wird noch nicht von der MQTT-Disconnect-Logik aufgerufen — kommt in v0.9.1. Pilot sieht bei MQTT-Drop einfach die letzte Presence stehen statt eine Warn-Variante.
+- **Discord-RPC „⚠ Sim getrennt"-Suffix:** Der Code ist vorhanden (Spec LE8) und getestet, aber der Caller wird noch nicht von der MQTT-Disconnect-Logik aufgerufen — kommt in einem spaeteren v0.9.x-Release (vorgesehen v0.9.2). Pilot sieht bei MQTT-Drop einfach die letzte Presence stehen statt eine Warn-Variante.
 - **Phase-Expansion (REJECTED-TAKEOFF, GO-AROUND, DEBOARDING):** Spec definiert, Discord-Mapping vorhanden, aber der Rust-FSM emittiert diese Phasen noch nicht — kommt mit v0.10.0 (Phase-Expansion-Release laut Roadmap).
 
 ### Sonstiges
