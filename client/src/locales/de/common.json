@@ -549,6 +549,16 @@
     "minimize_to_tray_label": "Beim Schließen in System-Tray minimieren",
     "minimize_to_tray_hint": "Statt zu beenden wird AeroACARS in den System-Tray (Mac: in die Menüleiste) minimiert. Klick aufs Tray-Icon öffnet das Fenster wieder. Über das Tray-Menü → „Beenden“ wird die App tatsächlich geschlossen.<br/><br/>Empfohlen während aktiver Flüge: AeroACARS läuft im Hintergrund weiter und sendet Heartbeat + Position-Updates an phpVMS."
   },
+  "error_reporting": {
+    "section_title": "Fehler-Telemetrie (anonym)",
+    "intro": "AeroACARS kann technische Crash- und Fehlerberichte automatisch an unseren self-hosted GlitchTip-Server (live.kant.ovh) senden. Das hilft Bugs zu fixen, bevor sie viele Piloten treffen. Alles anonym, freiwillig, jederzeit abschaltbar.",
+    "toggle_label": "Anonyme Crash-Berichte senden",
+    "toggle_hint": "<strong>Was wird gesendet?</strong> Crash-Stack-Traces, Sim-Name, Aircraft-ICAO, AeroACARS-Version, OS.<br/><strong>Was wird NICHT gesendet?</strong> Position, Route, Login, IP-Adresse, Passwörter, E-Mail.<br/><strong>Wohin?</strong> live.kant.ovh (selbst gehostet, kein 3rd-Party). Datenschutz nach DSGVO Art. 6 (1) a.<br/>Toggle wirkt sofort — kein Neustart nötig.",
+    "banner_title": "Hilf uns AeroACARS zu verbessern",
+    "banner_body": "AeroACARS kann anonyme Crash-Berichte an unseren eigenen Server (live.kant.ovh) senden — ohne Position, ohne Login, ohne IP. Das hilft uns Bugs zu finden, bevor sie viele Piloten treffen. Du kannst diese Wahl jederzeit in den Settings ändern.",
+    "banner_accept": "Ja, anonym senden",
+    "banner_decline": "Nein, danke"
+  },
   "release_notes": {
     "modal_title": "Was ist neu in {{version}}",
     "published_prefix": "veröffentlicht am",

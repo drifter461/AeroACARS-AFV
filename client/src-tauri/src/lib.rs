@@ -12,6 +12,9 @@ mod accident;
 mod runway;
 mod runway_assessment;
 mod xplane_plugin_install;
+// v0.9.0 (#GlitchTip): Sentry-Init + Allowlist + Redaction. Opt-In, Default OFF.
+// Spec: docs/spec/v0.9.0-glitchtip-self-hosted.md
+mod sentry_init;
 // v0.6.0 — neuer zentraler State-Owner. Aktiviert wenn die Env-Var
 // AEROACARS_LEGACY_STREAMER NICHT gesetzt ist (Default = neu). Bei
 // Problemen kann der Pilot auf Legacy zurueck via Env-Var ohne Re-Install.
@@ -4979,6 +4982,22 @@ fn set_minimize_to_tray(
     if was != enabled {
         tracing::info!(enabled, "minimize_to_tray toggled");
     }
+    Ok(())
+}
+
+// v0.9.0 (#GlitchTip): Pilot-Consent fuer anonyme Fehler-Telemetrie an
+// GlitchTip. Default = aus (Opt-In). Frontend persisted in localStorage
+// `aeroacars.errorReporting.enabled` und ruft diesen Command auf jedem
+// Mount + jedem Toggle. Gleiche Pattern wie minimize_to_tray.
+//
+// Bei `false` werden vor dem before_send-Hook ALLE Events verworfen —
+// auch wenn anderer Code sentry::capture_message() aufruft.
+//
+// Spec: docs/spec/v0.9.0-glitchtip-self-hosted.md (LE4) +
+//       docs/spec/v0.9.0-telemetry-contract.md Sektion 9 (DSGVO).
+#[tauri::command]
+fn error_reporting_set_consent(enabled: bool) -> Result<(), UiError> {
+    sentry_init::set_consent(enabled);
     Ok(())
 }
 
@@ -21184,6 +21203,11 @@ fn init_tracing() {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     init_tracing();
+    // v0.9.0 (#GlitchTip): Sentry-Init MUSS vor allem anderen passieren, damit
+    // Bootstrap-Panics gefangen werden. No-Op wenn DSN nicht in build-time env.
+    // Pilot-Consent wird im Setup-Hook bzw. vom Frontend per Command gesetzt;
+    // bis dahin verwirft before_send alle Events (Default-Consent = aus).
+    sentry_init::init();
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "AeroACARS starting");
 
     // Restore the activity log from disk before anything else uses
@@ -21368,6 +21392,8 @@ pub fn run() {
             divert_nearest_airports,
             fetch_release_notes,
             set_minimize_to_tray,
+            // v0.9.0 (#GlitchTip): Opt-In fuer anonyme Fehler-Telemetrie.
+            error_reporting_set_consent,
             // v0.7.14: Discord-Posts macht der Recorder zentral — keine
             // Pilot-Client-Commands mehr fuer Webhook-URL. Audit C1.
             // v0.7.8 SimBrief Integration (Spec §4)

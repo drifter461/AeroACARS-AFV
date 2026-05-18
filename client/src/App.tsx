@@ -13,6 +13,7 @@ import { LandingPanel } from "./components/LandingPanel";
 import RunwayDiagramPreview from "./dev/RunwayDiagramPreview";
 import { UpdateButton } from "./components/UpdateButton";
 import { UpdateBanner } from "./components/UpdateBanner";
+import { ErrorReportingFirstRunBanner } from "./components/ErrorReportingFirstRunBanner";
 import { LiveRecordingIndicator } from "./components/LiveRecordingIndicator";
 import { useSimSession } from "./hooks/useSimSession";
 import { useUpdateChecker } from "./hooks/useUpdateChecker";
@@ -399,6 +400,10 @@ function App() {
         checker={updateChecker}
         activePhase={activeFlight?.phase ?? null}
       />
+      {/* v0.9.0 (#GlitchTip) — First-Run-Consent fuer anonyme Fehler-Telemetrie.
+          Selbst-versteckend nach der ersten Entscheidung. Zeigt sich
+          NUR beim allerersten Start (= leerer localStorage-Key). */}
+      <ErrorReportingFirstRunBanner />
       <header className="app__header">
         <div className="app__brand">
           <h1>{t("app.name")}</h1>
