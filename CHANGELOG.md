@@ -40,6 +40,9 @@ Alle nennenswerten Änderungen an AeroACARS. Format: lose an [Keep a Changelog](
 
 **Runde 5 (F16) nach 5. QS-Pass:**
 - **F16 (F7-Auflösung, P2 → done):** statt F7 als Known-Issue auf v0.9.2 zu verschieben, doch noch in v0.9.1 verdrahtet. Spec-LE8 ist damit voll implementiert.
+
+**Runde 6 (F17) nach 6. QS-Pass:**
+- **F17 (P0):** F13-Refactor hatte `Client::from(options)` direkt benutzt, dabei aber `sentry::apply_defaults(options)` ausgelassen. `apply_defaults` setzt den Default-Transport (reqwest-basiert), die Default-Integrations (Panic, Backtrace, Contexts) und Env/Proxy-Defaults. **Ohne diesen Call hatte der Client KEINEN Transport — Events gingen nicht raus, native GlitchTip war faktisch tot.** Lifecycle-Fix von F13 war OK, aber halbfertig. Fix: `let options = sentry::apply_defaults(options)` vor `Client::from()`. Zusaetzlich `client.is_enabled()` als Boot-Log + Warn-Log wenn false (= sichtbar in journalctl/console wenn die Build-Konfig was vermisst).
   - Neuer Tauri-Command `discord_rpc_set_sim_lost(lost: bool)` → ruft `Manager::set_sim_lost`
   - Frontend-Hook `useDiscordRpcPush` hat zweiten useEffect der auf `simStatus.state`-Aenderungen reagiert: `lost = simStatus.state !== "connected"`, ruft Command. Backend-Manager dedupliziert intern.
   - Wirkt waehrend aktivem Flug — kein Flug = kein Suffix sinnvoll
