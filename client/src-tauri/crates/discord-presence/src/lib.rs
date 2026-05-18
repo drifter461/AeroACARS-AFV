@@ -35,15 +35,13 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-/// Discord-App-ID. Wird zur Build-Zeit aus env `AEROACARS_DISCORD_APP_ID`
-/// gelesen — wenn nicht gesetzt, faellt der Manager auf einen Sentinel
-/// zurueck der den Init absichtlich scheitern laesst (= No-Op-Pfad).
+/// Discord-App-ID. Wird vom Pilot-Client zur Laufzeit beim Init gesetzt —
+/// die Quelle ist `GET /api/public/discord-rpc-config` der VA-eigenen
+/// aeroacars-live VPS (von dort vom VA-Owner via Webapp-Admin gepflegt).
 ///
-/// Der VA-Owner registriert die App einmal auf https://discord.com/developers/applications
-/// und setzt die ID als env in der Release-CI (GitHub-Actions-Secret).
-pub fn client_id() -> &'static str {
-    option_env!("AEROACARS_DISCORD_APP_ID").unwrap_or("")
-}
+/// Konsequenz: kein Re-Release noetig wenn die VA die Discord-App wechselt
+/// oder erst nachschiebt; nicht im Binary einkompiliert; Forks sind
+/// automatisch konfigurierbar gegen die jeweilige VPS-Konfiguration.
 
 /// Heartbeat-Intervall — Discord erwartet einen Refresh innerhalb ~120s,
 /// sonst loescht es die Activity. 60s gibt Sicherheits-Marge ohne nervig zu sein.
@@ -158,32 +156,47 @@ struct Inner {
     last_input: Option<PresenceInput>,
     sim_lost: bool,
     heartbeat_handle: Option<JoinHandle<()>>,
+    /// Runtime-konfigurierte App-ID vom VPS-Public-Endpoint. Leerer String
+    /// = vom VA-Owner noch nicht gepflegt → enable() scheitert mit Hinweis.
+    app_id: String,
 }
 
 impl DiscordPresenceManager {
     pub fn new(settings: DiscordPresenceSettings) -> Arc<Self> {
-        let id = client_id();
-        let initial_status = if settings.enabled {
-            PresenceStatus::Disabled // wird beim enable() auf Connected/NotFound aktualisiert
-        } else {
-            PresenceStatus::Disabled
-        };
         Arc::new(Self {
             inner: Mutex::new(Inner {
                 client: None,
                 settings,
                 state: DiscordPresenceState {
-                    status: initial_status,
+                    status: PresenceStatus::Disabled,
                     last_connect_attempt_at: None,
                     last_update_at: None,
-                    client_id: id.to_string(),
+                    client_id: String::new(),
                     error_message: None,
                 },
                 last_input: None,
                 sim_lost: false,
                 heartbeat_handle: None,
+                app_id: String::new(),
             }),
         })
+    }
+
+    /// Discord-App-ID setzen. Wird vom Wiring-Code direkt nach `new()`
+    /// aufgerufen, sobald `GET /api/public/discord-rpc-config` antwortet.
+    /// Idempotent — wenn die ID sich aendert (selten), schliessen wir die
+    /// aktuelle Pipe und der naechste enable() oeffnet eine neue.
+    pub async fn set_app_id(self: &Arc<Self>, app_id: String) {
+        let mut inner = self.inner.lock().await;
+        if inner.app_id == app_id {
+            return;
+        }
+        inner.app_id = app_id.clone();
+        inner.state.client_id = app_id;
+        // Bestehende Verbindung passt zur alten ID — wegwerfen
+        if let Some(mut c) = inner.client.take() {
+            let _ = c.close();
+        }
     }
 
     /// Snapshot fuer das Frontend (Settings-Status-Anzeige).
@@ -224,16 +237,19 @@ impl DiscordPresenceManager {
     }
 
     async fn enable(self: &Arc<Self>) -> Result<()> {
-        let id = client_id();
+        let id = {
+            let inner = self.inner.lock().await;
+            inner.app_id.clone()
+        };
         if id.is_empty() {
             let mut inner = self.inner.lock().await;
             inner.state.status = PresenceStatus::Error;
             inner.state.error_message = Some(
-                "Discord-App-ID ist nicht gesetzt (Build ohne AEROACARS_DISCORD_APP_ID). \
-                 Bitte aus einem offiziellen Release-Build laufen."
+                "Discord-App-ID ist nicht vom Server konfiguriert. Der VA-Owner \
+                 muss sie im Webapp-Admin → Settings → Discord setzen."
                     .to_string(),
             );
-            return Err(anyhow!("missing Discord client_id"));
+            return Err(anyhow!("missing Discord app_id from server"));
         }
 
         let now = Utc::now().to_rfc3339();
@@ -244,7 +260,7 @@ impl DiscordPresenceManager {
             // Discord-IPC-Client erstellen + connecten.
             // In discord-rich-presence v0.2.5 returns DiscordIpcClient::new ein
             // Result (kann beim Pipe-Path-Build scheitern); .connect() ist sync.
-            match DiscordIpcClient::new(id).and_then(|mut client| {
+            match DiscordIpcClient::new(&id).and_then(|mut client| {
                 client.connect().map(|_| client)
             }) {
                 Ok(client) => {
@@ -408,8 +424,8 @@ impl DiscordPresenceManager {
         // Re-connect-Versuch wenn keine Verbindung
         {
             let mut inner = self.inner.lock().await;
-            if inner.client.is_none() {
-                if let Ok(client) = DiscordIpcClient::new(client_id())
+            if inner.client.is_none() && !inner.app_id.is_empty() {
+                if let Ok(client) = DiscordIpcClient::new(&inner.app_id)
                     .and_then(|mut c| c.connect().map(|_| c))
                 {
                     inner.client = Some(client);

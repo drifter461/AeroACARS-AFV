@@ -52,19 +52,48 @@ fn save_settings(settings: &DiscordPresenceSettings) {
     }
 }
 
-/// Einmaliger Init im Tauri-setup-Hook. Spawnt den Manager + ruft enable
-/// wenn der Pilot in einem frueheren Run bereits zugestimmt hatte.
+/// Einmaliger Init im Tauri-setup-Hook. Spawnt den Manager + zieht die
+/// Discord-App-ID vom VPS-Public-Endpoint nach + ruft enable wenn der Pilot
+/// in einem frueheren Run bereits zugestimmt hatte.
 pub fn init(app: &AppHandle) {
     let settings = load_settings(app);
     let manager = DiscordPresenceManager::new(settings.clone());
     let _ = MANAGER.set(manager.clone());
-    // Wenn der Pilot persistent zugestimmt hatte: gleich connecten.
-    // Fehler ist OK (Discord nicht offen → Status::NotFound, Pilot sieht das in der UI).
-    if settings.enabled {
-        tauri::async_runtime::spawn(async move {
+    // App-ID vom Server nachziehen — laufzeit-konfiguriert via Webapp-Admin.
+    // Wenn das fehlschlaegt (Server offline beim Boot), versucht's beim
+    // naechsten Settings-Touch erneut (set_settings ruft refresh_app_id).
+    tauri::async_runtime::spawn(async move {
+        let _ = refresh_app_id(&manager).await;
+        if settings.enabled {
             let _ = manager.apply_settings(settings).await;
-        });
+        }
+    });
+}
+
+/// VPS-Public-Endpoint nachfragen + dem Manager die App-ID melden.
+/// No-op-tolerant: jede Fehler-Stufe (Netz, JSON, leeres Feld) macht
+/// einfach keine ID — der Manager zeigt im UI "nicht konfiguriert".
+async fn refresh_app_id(manager: &Arc<DiscordPresenceManager>) -> Result<(), ()> {
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        rpc_app_id: String,
     }
+    // Recorder-URL ist die gleiche wie fuer phpVMS-Position-Posts (= aus
+    // Login-State); wir nutzen aber den festen Public-Pfad — keine Auth.
+    // Wenn die VPS-URL noch nicht konfiguriert ist, fallen wir auf die
+    // Default-VPS aus dem `aeroacars-mqtt`-Crate zurueck.
+    let url = "https://live.kant.ovh/api/public/discord-rpc-config";
+    let resp = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|_| ())?
+        .get(url)
+        .send()
+        .await
+        .map_err(|_| ())?;
+    let cfg: Resp = resp.json().await.map_err(|_| ())?;
+    manager.set_app_id(cfg.rpc_app_id).await;
+    Ok(())
 }
 
 fn manager() -> Option<Arc<DiscordPresenceManager>> {
@@ -89,6 +118,9 @@ pub async fn discord_rpc_set_settings(
     let Some(m) = manager() else {
         return Err("discord_rpc not initialized".into());
     };
+    // App-ID nochmal frisch ziehen — falls Server beim Boot offline war oder
+    // der VA-Owner gerade die ID neu gesetzt hat, sieht's der Pilot sofort.
+    let _ = refresh_app_id(&m).await;
     // apply_settings selbst loggt; UI bekommt den frischen State zurueck
     let _ = m.apply_settings(settings).await;
     Ok(m.current_state().await)
