@@ -45,7 +45,7 @@ function isUiError(value: unknown): value is UiError {
  * whatever URL the form sent and always uses this, so we just
  * surface it read-only in the UI for transparency.
  */
-const LOCKED_HOST = "https://german-sky-group.eu";
+const LOCKED_HOST = "https://africanava.ddns.net";
 
 export function LoginPage({ initialUrl: _initialUrl = "", onSuccess }: Props) {
   const { t } = useTranslation();
@@ -89,8 +89,6 @@ export function LoginPage({ initialUrl: _initialUrl = "", onSuccess }: Props) {
           <input
             type="url"
             value={LOCKED_HOST}
-            readOnly
-            disabled
           />
         </label>
 

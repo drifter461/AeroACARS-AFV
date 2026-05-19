@@ -901,7 +901,7 @@ struct ActiveFlight {
     /// ("DLH155" instead of just "155"). Empty string when unknown.
     airline_icao: String,
     /// v0.4.0: phpVMS-hosted Airline-Logo-URL (von `bid.flight.airline.logo`,
-    /// z.B. `https://german-sky-group.eu/storage/uploads/airlines/4/.../logo.png`).
+    /// z.B. `https://africanava.ddns.net/storage/uploads/airlines/4/.../logo.png`).
     /// Discord-Webhook-Embeds nutzen das als großes Bild unten —
     /// Pilot sieht in seinem Channel das Logo der gerade geflogenen
     /// Airline ohne dass wir es im Repo selbst hosten müssen.
@@ -4631,7 +4631,7 @@ fn app_info() -> AppInfo {
 /// the core is hardened. The login UI ignores whatever URL the
 /// user types and always uses this — the input field stays for
 /// continuity but the value is overwritten before validation.
-const ALLOWED_PHPVMS_HOST: &str = "german-sky-group.eu";
+const ALLOWED_PHPVMS_HOST: &str = "africanava.ddns.net";
 
 /// Authenticate against a phpVMS site. On success: stores key in OS keyring,
 /// writes URL to site config, and caches the live `Client` in `AppState`.
@@ -10605,7 +10605,7 @@ async fn flight_end(
     //     does not route through auto_approve_manual.
     //   * Once the PIREP is ACCEPTED, PirepController::checkReadOnly()
     //     blocks any further state-update, so (b) returns "PIREP is
-    //     read-only" (verified against german-sky-group.eu, 2026-05-04).
+    //     read-only" (verified against africanava.ddns.net, 2026-05-04).
     //
     // The path that actually works: while the PIREP is still IN_PROGRESS
     // (not read-only), mass-assign EVERYTHING /file would have written —
