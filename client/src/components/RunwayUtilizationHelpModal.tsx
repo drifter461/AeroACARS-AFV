@@ -1,12 +1,16 @@
-// Pilot-Hilfe-Modal für den "Bahn-Auslastung"-Sub-Score (v0.10.0 LDA-basiert).
+// Pilot-Hilfe-Modal für den "Bahn-Auslastung"-Sub-Score (LDA-basiert,
+// v0.12.0 mit 15 %-Float-Toleranz).
 //
 // Wird über einen "🛬 Wie wird das berechnet?"-Button am Boden der
 // rollout-Card im LandingPanel geöffnet. Inhalt erklärt Formel, die
-// fünf Punkte-Bänder, Heavy-Bonus, Pre-Displaced-Cap und Skip-Reasons —
-// in einfacher Pilot-Sprache, mit derselben Modal-Hülle wie GlossaryModal.
+// Float-Toleranz, die fünf Punkte-Bänder, Heavy-Bonus, Pre-Displaced-Cap,
+// den long_float-Fall und Skip-Reasons — in einfacher Pilot-Sprache, mit
+// derselben Modal-Hülle wie GlossaryModal.
 //
-// Spec-Quelle für den Inhalt: docs/spec/v0.10.0-runway-utilization-score.md
-// (Algorithmus in client/src-tauri/crates/landing-scoring/src/sub_rollout.rs).
+// Spec-Quelle für den Inhalt: docs/spec/v0.12.0-runway-utilization-
+// refinement.md (Float-Toleranz-Refinement; baut auf v0.10.0-runway-
+// utilization-score.md auf). Algorithmus in
+// client/src-tauri/crates/landing-scoring/src/sub_rollout.rs.
 //
 // Accessible: ESC schließt, Focus-Trap auf Modal, role="dialog". DE/EN/IT
 // via `landing.runway_utilization_help.*`.
