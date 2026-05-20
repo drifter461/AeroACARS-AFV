@@ -4765,6 +4765,29 @@ fn app_info() -> AppInfo {
 /// continuity but the value is overwritten before validation.
 const ALLOWED_PHPVMS_HOST: &str = "german-sky-group.eu";
 
+/// v0.12.1 (Stream B) — phpVMS 7 `UserState::ACTIVE`. The other states
+/// (0 PENDING, 2 REJECTED, 3 ON_LEAVE, 4 SUSPENDED) all block login.
+const USER_STATE_ACTIVE: i32 = 1;
+
+/// v0.12.1 (Stream B LE6): map a pilot profile's `state` to a login
+/// block reason, or `None` if the pilot may use AeroACARS (ACTIVE).
+///
+/// **Fail-closed:** a missing or unexpected `state` value blocks with
+/// `pilot_state_unknown` — we do not let an unverifiable account through.
+/// The returned `&str` is both the `UiError` code and the i18n key stem
+/// (`login.error.<code>`); `LoginPage.tsx` maps it.
+fn pilot_state_block_reason(profile: &api_client::Profile) -> Option<&'static str> {
+    match profile.state {
+        Some(USER_STATE_ACTIVE) => None,
+        Some(0) => Some("pilot_pending"),
+        Some(2) => Some("pilot_rejected"),
+        Some(3) => Some("pilot_on_leave"),
+        Some(4) => Some("pilot_suspended"),
+        // None (field absent) or any unexpected integer → fail-closed.
+        _ => Some("pilot_state_unknown"),
+    }
+}
+
 /// Authenticate against a phpVMS site. On success: stores key in OS keyring,
 /// writes URL to site config, and caches the live `Client` in `AppState`.
 ///
@@ -4787,6 +4810,19 @@ async fn phpvms_login(
     let conn = Connection::new(&locked_url, api_key.trim())?;
     let client = Client::new(conn)?;
     let profile = client.get_profile().await?;
+
+    // v0.12.1 (Stream B LE6): pilot-status gate. Only ACTIVE GSG pilots
+    // may use AeroACARS — a pending / rejected / on-leave / suspended
+    // account is rejected with a status-specific message. The MQTT
+    // credential cache is wiped so a previously-active pilot who is now
+    // blocked does not keep live-tracking from a stale cache (LE7).
+    if let Some(reason) = pilot_state_block_reason(&profile) {
+        clear_mqtt_credentials_cache();
+        return Err(UiError::new(
+            reason,
+            format!("pilot state gate: {reason}"),
+        ));
+    }
 
     secrets::store_api_key(KEYRING_ACCOUNT, api_key.trim())
         .map_err(|e| UiError::new("keyring", e.to_string()))?;
@@ -5023,6 +5059,28 @@ async fn phpvms_load_session(
     let client = Client::new(conn)?;
     match client.get_profile().await {
         Ok(profile) => {
+            // v0.12.1 (Stream B LE6): pilot-status gate on session
+            // restore. A pilot whose GSG account became pending /
+            // suspended / on-leave between sessions must not silently
+            // get their session (and live-tracking) back. Drop the
+            // stored key + MQTT cache and land on the login form — the
+            // explicit re-login then shows the status-specific message.
+            if let Some(reason) = pilot_state_block_reason(&profile) {
+                let _ = secrets::delete_api_key(KEYRING_ACCOUNT);
+                let _ = clear_site_config(&app);
+                clear_mqtt_credentials_cache();
+                log_activity_handle(
+                    &app,
+                    ActivityLevel::Warn,
+                    "AeroACARS-Sitzung beendet — GSG-Account nicht aktiv"
+                        .to_string(),
+                    Some(format!(
+                        "Status-Gate: {reason}. Bitte neu einloggen oder \
+                         die VA-Leitung kontaktieren."
+                    )),
+                );
+                return Ok(None);
+            }
             let base_url = client.connection().base_url().to_string();
             *state.client.lock().expect("client mutex") = Some(client.clone());
             cache_pilot(&state, &profile);
@@ -24134,6 +24192,79 @@ mod sim_pause_tests {
         // 9 ft balloon dev ≈ 837 — the balloon must be excluded.
         assert!(max_dev < 500.0, "flare balloon excluded, got {max_dev}");
         assert!(max_dev > 200.0, "real 200 ft excursion kept, got {max_dev}");
+    }
+
+    // ---- v0.12.1 Stream B — pilot-status gate (LE6) ----
+
+    fn profile_with_state(state: Option<i32>) -> api_client::Profile {
+        api_client::Profile {
+            id: 1,
+            pilot_id: 1,
+            ident: None,
+            name: "Test Pilot".to_string(),
+            email: None,
+            airline_id: None,
+            curr_airport: None,
+            home_airport: None,
+            airline: None,
+            rank: None,
+            callsign: None,
+            state,
+        }
+    }
+
+    #[test]
+    fn pilot_state_active_is_allowed() {
+        assert_eq!(pilot_state_block_reason(&profile_with_state(Some(1))), None);
+    }
+
+    #[test]
+    fn pilot_state_pending_blocks() {
+        assert_eq!(
+            pilot_state_block_reason(&profile_with_state(Some(0))),
+            Some("pilot_pending"),
+        );
+    }
+
+    #[test]
+    fn pilot_state_rejected_blocks() {
+        assert_eq!(
+            pilot_state_block_reason(&profile_with_state(Some(2))),
+            Some("pilot_rejected"),
+        );
+    }
+
+    #[test]
+    fn pilot_state_on_leave_blocks() {
+        assert_eq!(
+            pilot_state_block_reason(&profile_with_state(Some(3))),
+            Some("pilot_on_leave"),
+        );
+    }
+
+    #[test]
+    fn pilot_state_suspended_blocks() {
+        assert_eq!(
+            pilot_state_block_reason(&profile_with_state(Some(4))),
+            Some("pilot_suspended"),
+        );
+    }
+
+    #[test]
+    fn pilot_state_missing_fails_closed() {
+        // No `state` field on the profile → fail-closed, not allowed.
+        assert_eq!(
+            pilot_state_block_reason(&profile_with_state(None)),
+            Some("pilot_state_unknown"),
+        );
+    }
+
+    #[test]
+    fn pilot_state_unexpected_value_fails_closed() {
+        assert_eq!(
+            pilot_state_block_reason(&profile_with_state(Some(99))),
+            Some("pilot_state_unknown"),
+        );
     }
 }
 

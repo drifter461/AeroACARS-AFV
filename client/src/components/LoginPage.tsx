@@ -22,6 +22,12 @@ const KNOWN_ERROR_CODES = new Set([
   "config_read",
   "config_write",
   "config_parse",
+  // v0.12.1 (Stream B) — pilot-status gate
+  "pilot_pending",
+  "pilot_rejected",
+  "pilot_on_leave",
+  "pilot_suspended",
+  "pilot_state_unknown",
 ]);
 
 function errorKey(code: string): string {

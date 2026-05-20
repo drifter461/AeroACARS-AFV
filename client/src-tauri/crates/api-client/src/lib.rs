@@ -283,6 +283,13 @@ pub struct Profile {
     /// Falls Pilot-Profile das Feld nicht hat: None, kein Schaden.
     #[serde(default)]
     pub callsign: Option<String>,
+    /// v0.12.1 (Stream B): phpVMS 7 `UserState` — pilot account status.
+    /// 0 = PENDING, 1 = ACTIVE, 2 = REJECTED, 3 = ON_LEAVE, 4 = SUSPENDED.
+    /// `/api/user` returns it; only ACTIVE pilots may use AeroACARS
+    /// (see `pilot_state_block_reason`). `None` on legacy installs that
+    /// don't expose the field.
+    #[serde(default)]
+    pub state: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
