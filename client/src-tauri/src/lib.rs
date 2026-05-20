@@ -207,6 +207,19 @@ fn is_reload_gap(gap_secs: f64, interval_secs: f64) -> bool {
     gap_secs > RELOAD_GAP_FACTOR * interval_secs
 }
 
+/// v0.12.1 (Stream A LE2): the Pushback→TaxiOut "powered taxi" signal.
+/// Gated by `!reload_gap_suspect` so a sim-reload glitch tick (which can
+/// spike `groundspeed_kt`) cannot drive the velocity-derived TaxiOut
+/// transition — same rule the Boarding branch already applies.
+fn powered_taxi_move(
+    reload_gap_suspect: bool,
+    on_ground: bool,
+    engines_running: bool,
+    groundspeed_kt: f32,
+) -> bool {
+    !reload_gap_suspect && on_ground && engines_running && groundspeed_kt > 3.0
+}
+
 /// v0.12.1 (Stream A LE1): pure decision for the Boarding→Pushback/TaxiOut
 /// trigger. Real movement = on the surface, groundspeed over threshold
 /// for two consecutive ticks (de-bounce), AND genuine position
@@ -5079,7 +5092,15 @@ async fn phpvms_load_session(
                          die VA-Leitung kontaktieren."
                     )),
                 );
-                return Ok(None);
+                // v0.12.1 (Stream B LE6, QS-P2): return the block reason as
+                // a UiError (not a silent `Ok(None)`) so the login form can
+                // surface the status-specific message. The pilot still
+                // lands on the login form — App.tsx maps this to
+                // `loggedOut` + an initial error.
+                return Err(UiError::new(
+                    reason,
+                    format!("pilot state gate (restore): {reason}"),
+                ));
             }
             let base_url = client.connection().base_url().to_string();
             *state.client.lock().expect("client mutex") = Some(client.clone());
@@ -15976,9 +15997,16 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
             // 9 h hängen geblieben weil pushback_state konstant 3 war).
             const PUSHBACK_DWELL_SECS: i64 = 10;
             let engines_running = engines_effectively_running(&stats, snap, now);
-            let powered_taxi = snap.on_ground
-                && engines_running
-                && snap.groundspeed_kt > 3.0;
+            // v0.12.1 (Stream A LE2): gate the velocity-derived TaxiOut
+            // signal on `!reload_gap_suspect` — a reload glitch tick must
+            // not flip Pushback→TaxiOut any more than it may flip
+            // Boarding→Pushback.
+            let powered_taxi = powered_taxi_move(
+                reload_gap_suspect,
+                snap.on_ground,
+                engines_running,
+                snap.groundspeed_kt,
+            );
             // tug_done greift nur wenn der State MAL aktiv (≠3) war
             let tug_done = snap.pushback_state == Some(3)
                 && stats.saw_pushback_state_active;
@@ -24047,6 +24075,17 @@ mod sim_pause_tests {
         // is exclusive: exactly 2.5× the interval does not count.
         assert!(!is_reload_gap(5.0, 4.0));
         assert!(!is_reload_gap(10.0, 4.0));
+    }
+
+    #[test]
+    fn pushback_reload_gap_does_not_taxiout() {
+        // QS-P2: a reload-suspect tick must not drive Pushback→TaxiOut
+        // either — even with engines on and groundspeed over threshold.
+        assert!(!powered_taxi_move(true, true, true, 12.0));
+        // Without the reload gap, the same inputs DO mean powered taxi.
+        assert!(powered_taxi_move(false, true, true, 12.0));
+        // Below the 3 kt threshold it is never powered taxi.
+        assert!(!powered_taxi_move(false, true, true, 2.0));
     }
 
     // ---- v0.12.1 Stream E — resume position check (LE14) ----

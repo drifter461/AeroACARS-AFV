@@ -5,6 +5,10 @@ import type { LoginResult, UiError } from "../types";
 
 interface Props {
   initialUrl?: string;
+  /** v0.12.1 (Stream B LE6): pre-seeded error — set when a session
+   *  restore was blocked by the pilot-status gate, so the form opens
+   *  with the status-specific message instead of blank. */
+  initialError?: UiError | null;
   onSuccess: (result: LoginResult) => void;
 }
 
@@ -53,11 +57,16 @@ function isUiError(value: unknown): value is UiError {
  */
 const LOCKED_HOST = "https://german-sky-group.eu";
 
-export function LoginPage({ initialUrl: _initialUrl = "", onSuccess }: Props) {
+export function LoginPage({
+  initialUrl: _initialUrl = "",
+  initialError = null,
+  onSuccess,
+}: Props) {
   const { t } = useTranslation();
   const [apiKey, setApiKey] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<UiError | null>(null);
+  // v0.12.1 (Stream B LE6): seed with the restore-block error if present.
+  const [error, setError] = useState<UiError | null>(initialError);
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
