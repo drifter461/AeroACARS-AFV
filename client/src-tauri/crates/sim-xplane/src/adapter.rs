@@ -327,15 +327,28 @@ impl Drop for XPlaneAdapter {
 ///
 /// * `title` — the Web API aircraft title, or `None` (Web API off / XP11).
 /// * `probe_fresh` — per-profile (index = position in `PROFILES`): did
-///   that profile's probe DataRef answer recently enough to count as
-///   the loaded aircraft.
+///   that profile's probe DataRef answer within `PROBE_STALE_AFTER`.
+/// * `probe_seen` — per-profile: has that probe DataRef *ever* answered.
 ///
-/// A title that matches a profile wins; otherwise a fresh probe decides.
-/// When neither points at a profile the result is `None` → base catalog.
-fn desired_profile(title: Option<&str>, probe_fresh: &[bool]) -> Option<usize> {
+/// The probe is the **live ground truth**: a profile whose signature
+/// DataRef answered recently IS the loaded aircraft, so a fresh probe
+/// always wins. A title match only counts during the initial discovery
+/// window — before that profile's probe has answered even once. Once a
+/// probe has been heard and then fallen silent, the aircraft is gone;
+/// the laggy Web API title (polled every 30 s, so up to 30 s stale)
+/// must NOT revive a profile the probe already retired (QS-R2/P2).
+/// When nothing points at a profile the result is `None` → base catalog.
+fn desired_profile(
+    title: Option<&str>,
+    probe_fresh: &[bool],
+    probe_seen: &[bool],
+) -> Option<usize> {
+    if let Some(pi) = probe_fresh.iter().position(|&fresh| fresh) {
+        return Some(pi);
+    }
     title
         .and_then(profile_index_for_title)
-        .or_else(|| probe_fresh.iter().position(|&fresh| fresh))
+        .filter(|&pi| !probe_seen.get(pi).copied().unwrap_or(false))
 }
 
 /// The blocking listener thread. Binds a UDP socket on an ephemeral
@@ -518,18 +531,17 @@ fn run_listener(shared: Arc<AdapterShared>) {
             .iter()
             .map(|t| t.is_some_and(|seen| seen.elapsed() < PROBE_STALE_AFTER))
             .collect();
-        let desired = desired_profile(current_title.as_deref(), &probe_fresh);
+        let probe_seen: Vec<bool> = probe_last_seen.iter().map(|t| t.is_some()).collect();
+        let desired = desired_profile(current_title.as_deref(), &probe_fresh, &probe_seen);
 
         if desired != active_profile {
             match desired {
                 Some(pi) => tracing::info!(
                     profile = PROFILES[pi].name,
-                    via = if current_title.as_deref().and_then(profile_index_for_title)
-                        == Some(pi)
-                    {
-                        "title"
-                    } else {
+                    via = if probe_fresh.get(pi).copied().unwrap_or(false) {
                         "probe"
+                    } else {
+                        "title"
                     },
                     "X-Plane: aircraft DataRef profile activated"
                 ),
@@ -691,25 +703,26 @@ mod tests {
 
     #[test]
     fn title_match_activates_profile() {
-        assert_eq!(desired_profile(Some(CL650_TITLE), &[false]), Some(0));
+        // Initial discovery: title matches, probe has not answered yet.
+        assert_eq!(desired_profile(Some(CL650_TITLE), &[false], &[false]), Some(0));
     }
 
     #[test]
     fn probe_activates_profile_without_title() {
         // XP11 / Web API off: title is None but the probe answered.
-        assert_eq!(desired_profile(None, &[true]), Some(0));
+        assert_eq!(desired_profile(None, &[true], &[true]), Some(0));
     }
 
     #[test]
     fn no_signal_yields_base_catalog() {
-        assert_eq!(desired_profile(None, &[false]), None);
-        assert_eq!(desired_profile(Some("Cessna 172"), &[false]), None);
+        assert_eq!(desired_profile(None, &[false], &[false]), None);
+        assert_eq!(desired_profile(Some("Cessna 172"), &[false], &[false]), None);
     }
 
     #[test]
     fn probe_wins_when_title_does_not_match() {
         // A title that matches no profile must not veto a fresh probe.
-        assert_eq!(desired_profile(Some("Cessna 172"), &[true]), Some(0));
+        assert_eq!(desired_profile(Some("Cessna 172"), &[true], &[true]), Some(0));
     }
 
     /// QS-R4/P1: the regression the old `last_title`-diff logic missed —
@@ -719,10 +732,23 @@ mod tests {
     #[test]
     fn probe_activated_then_stale_resets_to_base() {
         // CL650 loaded, probe fresh, no title → profile active.
-        assert_eq!(desired_profile(None, &[true]), Some(0));
+        assert_eq!(desired_profile(None, &[true], &[true]), Some(0));
         // Pilot swaps to a non-profile aircraft: probe DataRef vanishes,
         // `probe_last_seen` goes stale → probe_fresh = false, title still
         // None. desired_profile must drop back to the base catalog.
-        assert_eq!(desired_profile(None, &[false]), None);
+        assert_eq!(desired_profile(None, &[false], &[true]), None);
+    }
+
+    /// QS-R2/P2: the laggy Web API title (polled every 30 s) must not
+    /// revive a profile the probe already retired. CL650 → non-profile
+    /// swap: the probe goes stale within 8 s, but `aircraft.descrip` can
+    /// still name the CL650 for up to 30 s. Because the CL650 probe HAS
+    /// been seen and is now stale, the stale title must not win.
+    #[test]
+    fn stale_title_cannot_revive_retired_profile() {
+        // probe seen earlier, now stale; title still says CL650 → base.
+        assert_eq!(desired_profile(Some(CL650_TITLE), &[false], &[true]), None);
+        // sanity: same title, but probe fresh again (swapped back) → active.
+        assert_eq!(desired_profile(Some(CL650_TITLE), &[true], &[true]), Some(0));
     }
 }
