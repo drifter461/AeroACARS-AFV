@@ -57,6 +57,17 @@ export function ResumeFlightBanner({
    * Without this, three streamers got spawned in the same tick.
    */
   const confirmingRef = useRef(false);
+  /**
+   * v0.12.1 (Stream E): true when the resumed sim position looks like a
+   * glitchy crash-reload (persisted phase airborne but sim on-ground, or
+   * implausible drift). While true the countdown must NOT auto-confirm —
+   * the pilot has to actively press Resume. Kept in a ref so the countdown
+   * effect can read it without re-subscribing to every activeFlight poll.
+   */
+  const positionSuspectRef = useRef(false);
+  useEffect(() => {
+    positionSuspectRef.current = activeFlight?.resume_position_suspect === true;
+  }, [activeFlight]);
 
   // Disk-resume: when activeFlight first arrives with was_just_resumed=true,
   // show the auto-resumed banner.
@@ -116,6 +127,9 @@ export function ResumeFlightBanner({
   useEffect(() => {
     if (mode.kind !== "auto_resumed" && mode.kind !== "discovered") return;
     if (mode.busy) return;
+    // v0.12.1 (Stream E): a suspect resume position freezes the countdown —
+    // no silent auto-confirm. The pilot must press Resume themselves.
+    if (mode.kind === "auto_resumed" && positionSuspectRef.current) return;
     if (mode.secondsLeft <= 0) {
       if (confirmingRef.current) return;
       confirmingRef.current = true;
@@ -205,6 +219,12 @@ export function ResumeFlightBanner({
 
   if (mode.kind === "idle") return null;
 
+  // v0.12.1 (Stream E): suspect resume position — show a warning + no
+  // countdown, the pilot must confirm manually.
+  const positionSuspect =
+    mode.kind === "auto_resumed" &&
+    activeFlight?.resume_position_suspect === true;
+
   const flight =
     mode.kind === "auto_resumed"
       ? {
@@ -244,17 +264,36 @@ export function ResumeFlightBanner({
 
         <div className="resume-modal__callsign">{flight.callsign}</div>
 
-        <div className="resume-modal__countdown">
+        {positionSuspect ? (
           <div
-            className="resume-modal__countdown-bar"
+            className="resume-modal__warning"
+            role="alert"
             style={{
-              width: `${(mode.secondsLeft / COUNTDOWN_SECONDS) * 100}%`,
+              margin: "10px 0",
+              padding: "8px 12px",
+              borderRadius: 6,
+              background: "rgba(251,191,36,0.12)",
+              border: "1px solid rgba(251,191,36,0.45)",
+              color: "#fbbf24",
+              fontSize: "0.85rem",
+              lineHeight: 1.45,
             }}
-          />
-          <span className="resume-modal__countdown-text">
-            {t("resume.countdown", { seconds: mode.secondsLeft })}
-          </span>
-        </div>
+          >
+            {t("resume.position_suspect")}
+          </div>
+        ) : (
+          <div className="resume-modal__countdown">
+            <div
+              className="resume-modal__countdown-bar"
+              style={{
+                width: `${(mode.secondsLeft / COUNTDOWN_SECONDS) * 100}%`,
+              }}
+            />
+            <span className="resume-modal__countdown-text">
+              {t("resume.countdown", { seconds: mode.secondsLeft })}
+            </span>
+          </div>
+        )}
 
         <div className="resume-modal__actions">
           <button

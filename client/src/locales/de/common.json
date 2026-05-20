@@ -1014,6 +1014,11 @@
       "config_read": "Gespeicherte Konfiguration konnte nicht gelesen werden.",
       "config_write": "Konfiguration konnte nicht gespeichert werden.",
       "config_parse": "Die gespeicherte Konfiguration ist beschädigt.",
+      "pilot_pending": "Dein GSG-Account wartet noch auf Freigabe durch die VA-Leitung. Sobald er aktiv ist, kannst du AeroACARS nutzen.",
+      "pilot_rejected": "Dieser GSG-Account wurde nicht freigegeben. Bitte wende dich an die VA-Leitung.",
+      "pilot_on_leave": "Dein GSG-Account ist als „im Urlaub\" markiert. Melde dich im Crew-Center zurück, um wieder zu fliegen.",
+      "pilot_suspended": "Dein GSG-Account ist gesperrt. Bitte wende dich an die VA-Leitung.",
+      "pilot_state_unknown": "Dein GSG-Account-Status konnte nicht bestätigt werden. Bitte versuche es später erneut oder wende dich an die VA-Leitung.",
       "unknown": "Ein unerwarteter Fehler ist aufgetreten."
     }
   },
@@ -1160,6 +1165,7 @@
   "resume": {
     "title": "Aktiver Flug erkannt",
     "countdown": "In {{seconds}}s wird der Flug fortgesetzt — solange läuft kein Position-Stream",
+    "position_suspect": "⚠ Die aktuelle Sim-Position weicht stark vom gespeicherten Flug ab — der Sim ist evtl. nach einem Crash neu geladen worden. Kein automatisches Fortsetzen: bitte erst prüfen, dass der Sim sauber geladen ist, dann „Jetzt fortsetzen\" drücken.",
     "adopt_now": "Jetzt fortsetzen",
     "adopting": "Setze fort…",
     "cancel_flight": "Flug abbrechen",

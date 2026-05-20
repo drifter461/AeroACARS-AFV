@@ -1014,6 +1014,11 @@
       "config_read": "Impossibile leggere la configurazione salvata.",
       "config_write": "Impossibile salvare la configurazione.",
       "config_parse": "La configurazione salvata è corrotta.",
+      "pilot_pending": "Il tuo account GSG è ancora in attesa di approvazione dalla direzione VA. Potrai usare AeroACARS appena sarà attivo.",
+      "pilot_rejected": "Questo account GSG non è stato approvato. Contatta la direzione VA.",
+      "pilot_on_leave": "Il tuo account GSG è contrassegnato come „in ferie\". Rientra dal crew centre per volare di nuovo.",
+      "pilot_suspended": "Il tuo account GSG è sospeso. Contatta la direzione VA.",
+      "pilot_state_unknown": "Lo stato del tuo account GSG non è stato confermato. Riprova più tardi o contatta la direzione VA.",
       "unknown": "Si è verificato un errore imprevisto."
     }
   },
@@ -1160,6 +1165,7 @@
   "resume": {
     "title": "Volo attivo rilevato",
     "countdown": "Tra {{seconds}}s il volo viene ripreso — fino allora nessun stream di posizioni",
+    "position_suspect": "⚠ La posizione attuale del sim differisce molto dal volo salvato — il sim potrebbe essersi ricaricato dopo un crash. Nessuna ripresa automatica: verifica che il sim sia caricato correttamente, poi premi “Riprendi adesso”.",
     "adopt_now": "Riprendi adesso",
     "adopting": "Ripresa…",
     "cancel_flight": "Annulla volo",

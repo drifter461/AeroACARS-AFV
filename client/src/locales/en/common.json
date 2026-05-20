@@ -1014,6 +1014,11 @@
       "config_read": "Could not read the saved configuration.",
       "config_write": "Could not save the configuration.",
       "config_parse": "The saved configuration is corrupted.",
+      "pilot_pending": "Your GSG account is still awaiting approval by the VA management. You can use AeroACARS once it is active.",
+      "pilot_rejected": "This GSG account was not approved. Please contact the VA management.",
+      "pilot_on_leave": "Your GSG account is marked as „on leave\". Report back in the crew centre to fly again.",
+      "pilot_suspended": "Your GSG account is suspended. Please contact the VA management.",
+      "pilot_state_unknown": "Your GSG account status could not be confirmed. Please try again later or contact the VA management.",
       "unknown": "An unexpected error occurred."
     }
   },
@@ -1160,6 +1165,7 @@
   "resume": {
     "title": "Active flight detected",
     "countdown": "Resuming in {{seconds}}s — no position stream is running yet",
+    "position_suspect": "⚠ The current sim position differs sharply from the saved flight — the sim may have reloaded after a crash. No automatic resume: please check the sim has loaded cleanly, then press “Resume now”.",
     "adopt_now": "Resume now",
     "adopting": "Resuming…",
     "cancel_flight": "Cancel flight",
