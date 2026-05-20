@@ -262,7 +262,8 @@ pub fn compute_sub_scores(input: &LandingScoringInput) -> Vec<SubScoreEntry> {
     // v0.10.0 (#runway-utilization-score): Wenn die v2-Datenlage da ist,
     // wird der neue LDA-basierte Sub-Score gerechnet (auch bei
     // Skip-Outcomes wie `missing_td_distance`). Der Caller markiert die
-    // Records dann mit `score_algorithm_version = Some(2)`.
+    // Records dann mit `score_algorithm_version = Some(3)` (v0.12.0:
+    // Float-Toleranz-Refinement; vor v0.12.0 war es `Some(2)`).
     //
     // Wenn keines der v2-Felder gesetzt ist (= Caller ist nicht-migriert
     // oder Test-Fixture ohne Touchdown-Forensik), fallen wir auf den

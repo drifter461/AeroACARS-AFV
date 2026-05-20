@@ -310,8 +310,8 @@ fn btx8815_real_case_long_float() {
     // aufgesetzt.
     //   tolerance      = 0.15 * 2849.88 = 427.5 m
     //   effective_float= max(540.85 - 427.5, 0) = 113.4 m
-    //   effective_dist = 442.15 + 113.4 = 555.5 m
-    //   effective_ratio= 555.5 / 2849.88 = 19.5 %  → < 30 → excellent (100)
+    //   effective_dist = 442.50 + 113.4 = 555.9 m
+    //   effective_ratio= 555.9 / 2849.88 = 19.5 %  → < 30 → excellent (100)
     //   long_float: Float 540.85 > 427.5 ✓ · rollout/LDA 15.5 % < 30 ✓ ·
     //               Band Good ✓  → Rationale-Override → long_float
     let r = sub_rollout_v2(&ok_input(540.85, 442.50, 2849.88, 0, "A319"));
