@@ -9644,7 +9644,7 @@ where
         // Record mit dem LDA-basierten Bahn-Auslastungs-Score gebaut
         // wurde. UI (LandingPanel.tsx) gated darauf das Rendering der
         // neuen `extra`-Lines + erweiterten Rationale-/Warning-Keys.
-        score_algorithm_version: Some(2),
+        score_algorithm_version: Some(3),
     })
 }
 
@@ -10862,7 +10862,8 @@ async fn flight_end(
                         };
                         // v0.10.0 (#runway-utilization-score): LDA-basierter
                         // Bahn-Auslastungs-Score. Markiert weiter unten am
-                        // PirepPayload via score_algorithm_version: Some(2).
+                        // PirepPayload via score_algorithm_version: Some(3)
+                        // (v0.12.0: Float-Toleranz-Refinement).
                         fill_v2_rollout_fields(&mut scoring_input, &stats, &flight.arr_airport);
                         let payload_sub_scores =
                             landing_scoring::compute_sub_scores(&scoring_input);
@@ -11030,7 +11031,7 @@ async fn flight_end(
                             // Bahn-Auslastungs-Algorithmus stammen. Webapp
                             // (LandingAnalysis.tsx) gated darauf das
                             // Rendering der neuen extra-Lines.
-                            score_algorithm_version: Some(2),
+                            score_algorithm_version: Some(3),
                         }
                     };
                     // v0.5.34: PIREP-Forensik ins JSONL — Block/Flight-Time,
@@ -14721,7 +14722,7 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                             // dass das nachgelagert berechnete sub_scores-
                             // Array via sub_rollout_v2 (LDA-basiert)
                             // entstanden ist.
-                            score_algorithm_version: Some(2),
+                            score_algorithm_version: Some(3),
                         }
                     })
                 };

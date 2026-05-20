@@ -117,10 +117,31 @@ fn skip_reason(input: &RolloutInput) -> Option<&'static str> {
     None
 }
 
-/// Spec LE1..LE9 (R5-SPEC-ACCEPTED). Einzige Compute-Stelle (SSoT) für
-/// den v0.10.0-Bahn-Auslastungs-Sub-Score. UI rendert NUR.
+/// v0.12.0 (#runway-utilization-refinement): Float-Toleranz als Anteil
+/// der LDA. Float bis zu diesem Anteil belastet das Punkte-Banding
+/// nicht — nur der Überschuss zählt. Spec LE1. 0.15 = exakt unterhalb
+/// der offiziellen Touchdown-Zone (min(900 m, LDA/3) ≈ 30 % LDA), und
+/// identisch mit der `long_float`-Rationale-Schwelle (LE2).
+const FLOAT_TOLERANCE_FRACTION: f32 = 0.15;
+
+/// Spec docs/spec/v0.10.0-runway-utilization-score.md (R5 ACCEPTED) +
+/// v0.12.0-runway-utilization-refinement.md (R2 ACCEPTED). Einzige
+/// Compute-Stelle (SSoT) für den Bahn-Auslastungs-Sub-Score. UI
+/// rendert NUR.
+///
+/// v0.12.0-Änderungen (`score_algorithm_version` 3):
+///   - LE1: Float-Toleranz 15 % LDA — `effective_distance = rollout +
+///     max(0, td_dist - 0.15*LDA)`. Float in der normalen Touchdown-Zone
+///     belastet das Banding nicht.
+///   - LE3: Banding auf `effective_ratio_pct`; Overrun-Gate bleibt auf
+///     der echten ungekürzten `raw_ratio_pct` (Toleranz darf ein echtes
+///     Overrun-Risiko nicht verstecken).
+///   - LE2: `long_float`-Rationale wenn Float über Toleranz UND der
+///     reine Bremsweg `< 30 % LDA` (= excellent-Niveau) UND Band good.
+///   - LE5: `extra` bleibt LEER — der TS-Renderer baut die Zeilen aus
+///     den Record-Feldern (i18n-fähig). value bleibt sprachneutral.
 pub fn sub_rollout_v2(input: &RolloutInput) -> SubScoreEntry {
-    // ── Skip-Gate (LE6) ──────────────────────────────────────────────
+    // ── Skip-Gate (v0.10.0 LE6) ──────────────────────────────────────
     if let Some(reason) = skip_reason(input) {
         return SubScoreEntry::skipped("rollout", "landing.sub.rollout", reason);
     }
@@ -132,28 +153,38 @@ pub fn sub_rollout_v2(input: &RolloutInput) -> SubScoreEntry {
     let displaced_m = input.runway_displaced_threshold_ft.unwrap_or(0) as f32 * 0.3048;
     let lda_m = runway_m - displaced_m;
 
-    // ── Numerator + Negativ-Schutz (LE1 + LE3 Halb-1) ────────────────
-    // Pre-displaced + neg TD-Distance → raw_used könnte < rollout sein
-    // (Pilot hat „virtuell" weniger Bahn genutzt als der reine Rollout).
+    // ── Echte genutzte Distanz + Negativ-Schutz (v0.10.0 LE1 + LE3) ──
+    // Pre-displaced + neg TD-Distance → raw_used könnte < rollout sein.
     // Wir clampen auf max(rollout) damit niemand mit Aufsetzen-vor-
     // Schwelle einen kürzeren Distance-Used als sein eigener Rollout
     // bekommt (würde Score künstlich verbessern).
     let raw_used = td_dist + rollout;
     let distance_used = raw_used.max(rollout);
-
-    // ── Raw-Ratio als Float (KEINE Pre-Rundung — R2-P2-1) ────────────
+    // Echte Auslastung — Basis fürs Overrun-Gate UND fürs Display.
     let raw_ratio_pct: f32 = (distance_used / lda_m) * 100.0;
 
-    // ── Overrun-Check ZUERST auf RAW (LE4 Step 2, R2-P0-2) ───────────
-    // Wichtig: VOR Heavy-Allowance. Sonst würde 103 % Heavy → 98 %
-    // effective → marginal_runway und der Overrun verschwindet.
+    // ── v0.12.0 LE1: Float-Toleranz (15 % LDA) ───────────────────────
+    // Nur Float ÜBER der Toleranz belastet das Banding. Bei negativem
+    // td_dist (pre-displaced) ist `td_dist - tolerance` erst recht
+    // negativ → effective_float = 0 → effective_distance = rollout.
+    let float_tolerance_m = FLOAT_TOLERANCE_FRACTION * lda_m;
+    let effective_float_m = (td_dist - float_tolerance_m).max(0.0);
+    let effective_distance_m = rollout + effective_float_m;
+    let effective_ratio_pct: f32 = (effective_distance_m / lda_m) * 100.0;
+
+    // ── Overrun-Check ZUERST auf der ECHTEN Distanz (v0.10.0 LE4 + ───
+    //    v0.12.0 LE3). Die Float-Toleranz darf ein echtes Overrun-
+    //    Risiko NICHT verstecken — wer wirklich > 100 % LDA braucht,
+    //    bekommt 0 PT, egal wie der Float aufgeteilt ist.
     let (points, rationale, band) = if raw_ratio_pct > 100.0 {
         (0u8, "overrun_risk", Band::Bad)
     } else {
+        // ── v0.12.0 LE3: Banding auf der toleranzbereinigten Distanz ─
+        // Heavy-Allowance VOR Banding (v0.10.0 LE5, unverändert).
         let allowance_pp: f32 = if is_heavy(input.aircraft_icao) { 5.0 } else { 0.0 };
-        let effective_pct: f32 = raw_ratio_pct - allowance_pp;
+        let banding_pct: f32 = effective_ratio_pct - allowance_pp;
 
-        match effective_pct {
+        match banding_pct {
             e if e < 30.0 => (100, "excellent_margin", Band::Good),
             e if e < 50.0 => (80, "good_stop", Band::Good),
             e if e < 70.0 => (55, "ok_stop", Band::Ok),
@@ -162,11 +193,11 @@ pub fn sub_rollout_v2(input: &RolloutInput) -> SubScoreEntry {
         }
     };
 
-    // ── pre_displaced-Cap (LE3 Halb-2, R2-P1-4, R4-P1-3) ─────────────
+    // ── pre_displaced-Cap (v0.10.0 LE3 Halb-2, R4-P1-3) ──────────────
     // Bei Cap wird Rationale-Key auf "pre_displaced_capped" überschrieben
     // (sonst UI „Viel Bahn-Reserve" bei 55 PTS = unehrlich).
     let pre_displaced = input.pre_displaced_threshold.unwrap_or(false);
-    let (final_points, final_rationale, final_band) = if pre_displaced {
+    let (capped_points, capped_rationale, capped_band) = if pre_displaced {
         let pts = points.min(55);
         let band = if pts >= 75 {
             Band::Good
@@ -180,13 +211,33 @@ pub fn sub_rollout_v2(input: &RolloutInput) -> SubScoreEntry {
         (points, rationale, band)
     };
 
+    // ── v0.12.0 LE2: long_float-Rationale-Override ───────────────────
+    // Drei Bedingungen — „Bremsen war exzellent, nur spät aufgesetzt":
+    //   1. Float über der 15 %-Toleranz
+    //   2. Ausrollstrecke ALLEIN wäre excellent_margin (rollout/LDA < 30 %)
+    //   3. finaler Band ist Good (good_stop / excellent_margin)
+    // pre_displaced hat Vorrang (eigener Cap + eigene Rationale).
+    let float_over_tolerance = td_dist > float_tolerance_m;
+    let rollout_alone_excellent = (rollout / lda_m) * 100.0 < 30.0;
+    let (final_points, final_rationale, final_band) = if !pre_displaced
+        && float_over_tolerance
+        && rollout_alone_excellent
+        && matches!(capped_band, Band::Good)
+    {
+        (capped_points, "long_float", capped_band)
+    } else {
+        (capped_points, capped_rationale, capped_band)
+    };
+
     let warning = if pre_displaced {
         Some("pre_displaced_threshold".to_string())
     } else {
         None
     };
 
-    // ── Display-Strings (LE9) ────────────────────────────────────────
+    // ── Display-Value (v0.10.0 LE9, v0.12.0 LE4) ─────────────────────
+    // SPRACHNEUTRAL — zeigt die ECHTE Auslastung (raw, nicht effective).
+    // Labels („genutzt", „von LDA") baut der TS-Renderer drumherum.
     let display_pct = raw_ratio_pct.round() as i32;
     let value = format!(
         "{} m / {} m  ·  {} %",
@@ -195,20 +246,13 @@ pub fn sub_rollout_v2(input: &RolloutInput) -> SubScoreEntry {
         display_pct
     );
 
-    let mut extra: Vec<String> = Vec::new();
-    if let Some(float) = input.landing_float_distance_m {
-        if float > 0.0 {
-            extra.push(format!("davon ~{} m Float vor Aufsetzen", float.round() as i32));
-        }
-    }
-    if let (Some(icao), Some(ident)) = (input.runway_match_icao, input.runway_match_ident) {
-        extra.push(format!(
-            "Bahn: {} {}, LDA {} m",
-            icao,
-            ident,
-            lda_m.round() as i32
-        ));
-    }
+    // ── v0.12.0 LE5: extra bleibt LEER ───────────────────────────────
+    // Der TS-Renderer (LandingPanel.tsx / LandingAnalysis.tsx) baut die
+    // Float-/Ausrollstrecke-/Bahn-Zeilen aus den Record-Feldern + i18n.
+    // Kein hardcoded Deutsch mehr im Crate. `extra` hat
+    // skip_serializing_if=Vec::is_empty → erscheint gar nicht im
+    // Wire-JSON. Alt-v2-Records behalten ihre gespeicherten extra.
+    let extra: Vec<String> = Vec::new();
 
     SubScoreEntry::scored(
         "rollout",
