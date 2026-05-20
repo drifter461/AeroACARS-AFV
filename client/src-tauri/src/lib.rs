@@ -186,6 +186,44 @@ fn position_interval(phase: FlightPhase) -> Duration {
 /// add it to the running total. Filters out GPS jitter while parked.
 const DISTANCE_EPSILON_M: f64 = 5.0;
 
+/// v0.12.1 (Stream A LE1): minimum real position displacement (metres)
+/// from the Boarding reference point before the Boarding→Pushback/TaxiOut
+/// transition may fire. A sim-reload velocity glitch can spike
+/// `groundspeed_kt` but cannot move `lat`/`lon` — so genuine displacement
+/// is the trustworthy signal. 5 m is small enough not to delay a real
+/// pushback, large enough to clear GPS jitter (< 1 m parked).
+const MIN_BOARDING_MOVEMENT_M: f64 = 5.0;
+
+/// v0.12.1 (Stream A LE2): a gap between two processed `step_flight`
+/// snapshots longer than `RELOAD_GAP_FACTOR × position_interval(phase)`
+/// is treated as a sim reload/reposition — the first snapshot after the
+/// gap carries glitch-prone velocity values and must not drive a
+/// velocity-derived phase transition.
+const RELOAD_GAP_FACTOR: f64 = 2.5;
+
+/// v0.12.1 (Stream A LE2): true if `gap_secs` between two processed
+/// snapshots is long enough to count as a sim reload/reposition.
+fn is_reload_gap(gap_secs: f64, interval_secs: f64) -> bool {
+    gap_secs > RELOAD_GAP_FACTOR * interval_secs
+}
+
+/// v0.12.1 (Stream A LE1): pure decision for the Boarding→Pushback/TaxiOut
+/// trigger. Real movement = on the surface, groundspeed over threshold
+/// for two consecutive ticks (de-bounce), AND genuine position
+/// displacement past `MIN_BOARDING_MOVEMENT_M`. A velocity glitch can
+/// satisfy the speed checks but never the displacement one.
+fn boarding_real_movement(
+    on_surface: bool,
+    gs_over_threshold: bool,
+    prev_gs_over_threshold: bool,
+    moved_m: f64,
+) -> bool {
+    on_surface
+        && gs_over_threshold
+        && prev_gs_over_threshold
+        && moved_m > MIN_BOARDING_MOVEMENT_M
+}
+
 /// Kilograms → pounds. We collect fuel in kg internally because every
 /// SimConnect adapter normalises to SI, but phpVMS-Core's `acars` table
 /// and the PIREP `file` endpoint expect pounds — convert at the boundary.
@@ -1863,6 +1901,21 @@ struct FlightStats {
     /// brake transitions cleanly.
     was_on_ground: Option<bool>,
     was_parking_brake: Option<bool>,
+
+    // ---- v0.12.1 (Stream A) — Boarding→Pushback de-glitch state ----
+    /// Reference position captured on the first Boarding tick (or after a
+    /// reload gap). The Boarding→Pushback/TaxiOut trigger requires the
+    /// aircraft to have physically moved away from this point — a velocity
+    /// glitch can fake `groundspeed_kt` but not `lat`/`lon`. Runtime-only.
+    boarding_ref_pos: Option<(f64, f64)>,
+    /// True if the previous snapshot already had `groundspeed_kt > 0.5`.
+    /// The pushback trigger needs movement sustained across 2 ticks, not
+    /// a single spike. Runtime-only.
+    prev_gs_over_threshold: bool,
+    /// Wall-clock time of the previous processed `step_flight` snapshot.
+    /// A long gap = sim reload/reposition → the next snapshot is
+    /// glitch-suspect (LE2). Runtime-only.
+    last_step_at: Option<DateTime<Utc>>,
 
     // ---- Block / takeoff / landing timestamps (real-time UTC) ----
     block_off_at: Option<DateTime<Utc>>,
@@ -15526,6 +15579,25 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
         return None;
     }
 
+    // v0.12.1 (Stream A LE2): reload-gap detection. A gap between two
+    // processed snapshots well above the expected tick interval means the
+    // sim was reloading / repositioning — the first snapshot after the gap
+    // carries glitch-prone velocity values (verified: BTX8815 EDVE, an
+    // 11 s gap produced a spurious gs 2.6 kt tick with zero actual
+    // displacement). The Boarding branch uses this to skip velocity-
+    // derived transitions on that one suspect tick.
+    let interval_secs = position_interval(prev_phase).as_secs_f64();
+    let reload_gap_suspect = stats
+        .last_step_at
+        .map(|prev| {
+            is_reload_gap(
+                (now - prev).num_milliseconds() as f64 / 1000.0,
+                interval_secs,
+            )
+        })
+        .unwrap_or(false);
+    stats.last_step_at = Some(now);
+
     // Match on a local Copy so the rest of the body is free to mutate `stats`.
     match prev_phase {
         FlightPhase::Boarding => {
@@ -15558,7 +15630,41 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
             let on_surface = snap.on_ground
                 || (snap.altitude_agl_ft < 5.0
                     && snap.vertical_speed_fpm.abs() < 50.0);
-            if on_surface && snap.groundspeed_kt > 0.5 {
+            // v0.12.1 (Stream A LE1+LE2): de-glitch the Boarding→Pushback
+            // / TaxiOut trigger. A single `groundspeed_kt > 0.5` sample is
+            // NOT enough — a sim-reload glitch can spike groundspeed while
+            // the aircraft sits still (verified BTX8815: post-reload tick
+            // gs 2.6 kt, bit-identical lat/lon, parking brake set). We now
+            // require BOTH: gs sustained across 2 ticks AND real position
+            // displacement (> MIN_BOARDING_MOVEMENT_M) from a reference
+            // point. lat/lon can't be faked by a velocity glitch. A
+            // reload-suspect tick (LE2) re-baselines the reference and
+            // triggers nothing.
+            let gs_over_threshold = snap.groundspeed_kt > 0.5;
+            let real_movement = if reload_gap_suspect {
+                stats.boarding_ref_pos = Some((snap.lat, snap.lon));
+                stats.prev_gs_over_threshold = false;
+                false
+            } else {
+                if stats.boarding_ref_pos.is_none() {
+                    stats.boarding_ref_pos = Some((snap.lat, snap.lon));
+                }
+                let moved_m = stats
+                    .boarding_ref_pos
+                    .map(|(rlat, rlon)| {
+                        ::geo::distance_m(rlat, rlon, snap.lat, snap.lon)
+                    })
+                    .unwrap_or(0.0);
+                let moved = boarding_real_movement(
+                    on_surface,
+                    gs_over_threshold,
+                    stats.prev_gs_over_threshold,
+                    moved_m,
+                );
+                stats.prev_gs_over_threshold = gs_over_threshold;
+                moved
+            };
+            if real_movement {
                 stats.block_off_at = Some(now);
                 // Note: block_fuel_kg is tracked as a running peak
                 // (see top of step_flight), not captured here. APU
@@ -15632,7 +15738,10 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
             // glider winch launches fire correctly. AGL > 3 ft +
             // VS > 100 fpm remain as the safety net against sim-
             // glitch on_ground-flicker during boarding.
-            else if was_on_ground
+            // v0.12.1 (Stream A LE2): a reload-suspect tick must not drive
+            // the velocity-derived vertical-takeoff hatch either.
+            else if !reload_gap_suspect
+                && was_on_ground
                 && !snap.on_ground
                 && snap.altitude_agl_ft > 3.0
                 && snap.vertical_speed_fpm > 100.0
@@ -23717,6 +23826,57 @@ mod sim_pause_tests {
         let decoded: PersistedFlightStats =
             serde_json::from_str(legacy_json).expect("legacy json must load");
         assert_eq!(decoded.current_pause_reason, None);
+    }
+
+    // ---- v0.12.1 Stream A — Boarding→Pushback de-glitch (LE1 + LE2) ----
+
+    #[test]
+    fn boarding_glitch_sample_is_not_real_movement() {
+        // BTX8815: a post-reload tick spiked gs to 2.6 kt but the aircraft
+        // had not moved (bit-identical lat/lon → 0 m displacement). That
+        // must NOT count as real movement → no Boarding→Pushback.
+        assert!(!boarding_real_movement(true, true, true, 0.0));
+    }
+
+    #[test]
+    fn boarding_single_gs_spike_is_not_real_movement() {
+        // gs over threshold this tick but not the previous one — not
+        // sustained (no de-bounce) → no transition, even with displacement.
+        assert!(!boarding_real_movement(true, true, false, 12.0));
+    }
+
+    #[test]
+    fn boarding_sustained_movement_with_displacement_triggers() {
+        // gs over threshold across two ticks + real displacement
+        // > MIN_BOARDING_MOVEMENT_M → genuine movement.
+        assert!(boarding_real_movement(true, true, true, 6.0));
+    }
+
+    #[test]
+    fn boarding_movement_below_threshold_does_not_trigger() {
+        // 4 m sits inside the GPS-jitter band (< MIN_BOARDING_MOVEMENT_M).
+        assert!(!boarding_real_movement(true, true, true, 4.0));
+    }
+
+    #[test]
+    fn boarding_airborne_sample_is_not_surface_movement() {
+        // not on the surface → the Boarding pushback trigger never fires.
+        assert!(!boarding_real_movement(false, true, true, 50.0));
+    }
+
+    #[test]
+    fn reload_gap_detects_btx8815_eleven_second_gap() {
+        // BTX8815 EDVE: an 11 s gap in Boarding (position_interval = 4 s).
+        // 11 > 2.5 × 4 = 10 → reload-suspect, the glitch tick is ignored.
+        assert!(is_reload_gap(11.0, 4.0));
+    }
+
+    #[test]
+    fn reload_gap_ignores_normal_tick_cadence() {
+        // A normal ~4-5 s Boarding tick is not a reload gap. The threshold
+        // is exclusive: exactly 2.5× the interval does not count.
+        assert!(!is_reload_gap(5.0, 4.0));
+        assert!(!is_reload_gap(10.0, 4.0));
     }
 }
 
