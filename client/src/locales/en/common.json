@@ -1160,6 +1160,7 @@
   "resume": {
     "title": "Active flight detected",
     "countdown": "Resuming in {{seconds}}s — no position stream is running yet",
+    "position_suspect": "⚠ The current sim position differs sharply from the saved flight — the sim may have reloaded after a crash. No automatic resume: please check the sim has loaded cleanly, then press “Resume now”.",
     "adopt_now": "Resume now",
     "adopting": "Resuming…",
     "cancel_flight": "Cancel flight",

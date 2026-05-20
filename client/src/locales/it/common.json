@@ -1160,6 +1160,7 @@
   "resume": {
     "title": "Volo attivo rilevato",
     "countdown": "Tra {{seconds}}s il volo viene ripreso — fino allora nessun stream di posizioni",
+    "position_suspect": "⚠ La posizione attuale del sim differisce molto dal volo salvato — il sim potrebbe essersi ricaricato dopo un crash. Nessuna ripresa automatica: verifica che il sim sia caricato correttamente, poi premi “Riprendi adesso”.",
     "adopt_now": "Riprendi adesso",
     "adopting": "Ripresa…",
     "cancel_flight": "Annulla volo",

@@ -1160,6 +1160,7 @@
   "resume": {
     "title": "Aktiver Flug erkannt",
     "countdown": "In {{seconds}}s wird der Flug fortgesetzt — solange läuft kein Position-Stream",
+    "position_suspect": "⚠ Die aktuelle Sim-Position weicht stark vom gespeicherten Flug ab — der Sim ist evtl. nach einem Crash neu geladen worden. Kein automatisches Fortsetzen: bitte erst prüfen, dass der Sim sauber geladen ist, dann „Jetzt fortsetzen\" drücken.",
     "adopt_now": "Jetzt fortsetzen",
     "adopting": "Setze fort…",
     "cancel_flight": "Flug abbrechen",

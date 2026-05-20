@@ -344,6 +344,11 @@ export interface ActiveFlightInfo {
   landing_rate_fpm: number | null;
   landing_g_force: number | null;
   was_just_resumed: boolean;
+  /** v0.12.1 (Stream E): on a resume, true when the sim position looks
+   *  like a glitchy crash-reload (persisted phase airborne but sim
+   *  on-ground, or implausibly large drift). The resume banner then
+   *  disables its 10-second auto-confirm and waits for an explicit click. */
+  resume_position_suspect: boolean;
   /** Stand the aircraft pushed back from (MSFS ATC PARKING NAME). */
   dep_gate: string | null;
   /** Stand the pilot parked at after arrival. */

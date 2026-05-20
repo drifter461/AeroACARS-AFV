@@ -224,6 +224,43 @@ fn boarding_real_movement(
         && moved_m > MIN_BOARDING_MOVEMENT_M
 }
 
+/// v0.12.1 (Stream E LE14): does the first post-resume sim position look
+/// like a glitchy crash-reload rather than the flight we persisted?
+/// Suspicious when:
+///   1. the persisted phase was airborne but the sim now reports on-ground
+///      (classic sim-crash → reload-on-a-runway), OR
+///   2. the sim position is implausibly far from the last known position.
+/// A separate altitude-delta condition was deliberately dropped (QS-R5):
+/// a pilot legitimately restarting the app mid-climb/descent would almost
+/// always show an altitude delta — too restrictive.
+fn is_resume_position_suspect(
+    persisted_phase: FlightPhase,
+    persisted_pos: Option<(f64, f64)>,
+    snap_on_ground: bool,
+    snap_lat: f64,
+    snap_lon: f64,
+) -> bool {
+    let persisted_airborne = matches!(
+        persisted_phase,
+        FlightPhase::Climb
+            | FlightPhase::Cruise
+            | FlightPhase::Holding
+            | FlightPhase::Descent
+            | FlightPhase::Approach
+            | FlightPhase::Final
+    );
+    if persisted_airborne && snap_on_ground {
+        return true;
+    }
+    if let Some((plat, plon)) = persisted_pos {
+        let drift_nm = ::geo::distance_m(plat, plon, snap_lat, snap_lon) / 1852.0;
+        if drift_nm > RESUME_DRIFT_WARN_NM {
+            return true;
+        }
+    }
+    false
+}
+
 /// Kilograms → pounds. We collect fuel in kg internally because every
 /// SimConnect adapter normalises to SI, but phpVMS-Core's `acars` table
 /// and the PIREP `file` endpoint expect pounds — convert at the boundary.
@@ -3060,6 +3097,11 @@ pub struct ActiveFlightInfo {
     /// status after an automatic resume (disk or remote). Lets the dashboard
     /// surface a one-time banner with a 10-second cancel window.
     was_just_resumed: bool,
+    /// v0.12.1 (Stream E): true when, on a resume, the current sim position
+    /// looks like a glitchy crash-reload (persisted phase airborne but sim
+    /// on-ground, or implausibly large drift). The resume banner then
+    /// disables its 10-second auto-confirm and requires an explicit click.
+    resume_position_suspect: bool,
     /// Departure stand from MSFS `ATC PARKING NAME` (snapshotted at
     /// the start of the flight). Empty until captured.
     dep_gate: Option<String>,
@@ -6394,7 +6436,7 @@ async fn airport_get(
 
 // ---- Flight workflow ----
 
-fn flight_info(flight: &ActiveFlight) -> ActiveFlightInfo {
+fn flight_info(flight: &ActiveFlight, resume_position_suspect: bool) -> ActiveFlightInfo {
     let stats = flight.stats.lock().expect("flight stats");
     // Don't consume here — the flag stays true until the resume banner has
     // run its course (flight_resume_confirm or flight_cancel clears it).
@@ -6424,6 +6466,7 @@ fn flight_info(flight: &ActiveFlight) -> ActiveFlightInfo {
         landing_rate_fpm: stats.canonical_landing_rate_fpm(),
         landing_g_force: stats.landing_g_force,
         was_just_resumed,
+        resume_position_suspect,
         dep_gate: stats.dep_gate.clone(),
         arr_gate: stats.arr_gate.clone(),
         approach_runway: stats.approach_runway.clone(),
@@ -6500,9 +6543,41 @@ fn phase_to_snake(phase: FlightPhase) -> &'static str {
 }
 
 #[tauri::command]
-fn flight_status(state: tauri::State<'_, AppState>) -> Option<ActiveFlightInfo> {
+fn flight_status(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Option<ActiveFlightInfo> {
     let guard = state.active_flight.lock().expect("active_flight lock");
-    guard.as_ref().map(|f| flight_info(f.as_ref()))
+    let flight = guard.as_ref()?;
+    // v0.12.1 (Stream E): while the resume banner is up, check on every
+    // poll whether the current sim position matches the persisted flight.
+    // If the sim crashed and reloaded the aircraft on the ground (or far
+    // away), the banner must NOT auto-confirm — the pilot has to click.
+    let resume_position_suspect = if flight.was_just_resumed.load(Ordering::Relaxed) {
+        match current_snapshot(&app) {
+            Some(snap) => {
+                let (phase, pos) = {
+                    let stats = flight.stats.lock().expect("flight stats");
+                    let pos = match (stats.last_lat, stats.last_lon) {
+                        (Some(la), Some(lo)) => Some((la, lo)),
+                        _ => None,
+                    };
+                    (stats.phase, pos)
+                };
+                is_resume_position_suspect(
+                    phase,
+                    pos,
+                    snap.on_ground,
+                    snap.lat,
+                    snap.lon,
+                )
+            }
+            None => false,
+        }
+    } else {
+        false
+    };
+    Some(flight_info(flight.as_ref(), resume_position_suspect))
 }
 
 #[derive(Serialize)]
@@ -6810,7 +6885,7 @@ async fn flight_adopt(
     // and the user can still cancel. `flight_resume_confirm` spawns it.
     let _ = client;
 
-    let info = flight_info(flight.as_ref());
+    let info = flight_info(flight.as_ref(), false);
     log_activity(
         &state,
         ActivityLevel::Info,
@@ -7570,7 +7645,7 @@ async fn flight_start(
     // continuation history we want to keep.
     clear_activity_log_for_new_flight(&app);
 
-    let info = flight_info(flight.as_ref());
+    let info = flight_info(flight.as_ref(), false);
     log_activity(
         &state,
         ActivityLevel::Info,
@@ -8098,7 +8173,7 @@ async fn flight_start_manual(
     spawn_touchdown_sampler(app.clone(), Arc::clone(&flight));
     clear_activity_log_for_new_flight(&app);
 
-    let info = flight_info(flight.as_ref());
+    let info = flight_info(flight.as_ref(), false);
     log_activity(
         &state,
         ActivityLevel::Info,
@@ -23877,6 +23952,57 @@ mod sim_pause_tests {
         // is exclusive: exactly 2.5× the interval does not count.
         assert!(!is_reload_gap(5.0, 4.0));
         assert!(!is_reload_gap(10.0, 4.0));
+    }
+
+    // ---- v0.12.1 Stream E — resume position check (LE14) ----
+
+    #[test]
+    fn resume_suspect_when_airborne_phase_but_on_ground() {
+        // Sim crash in the cruise → reload spawns the aircraft on a runway.
+        assert!(is_resume_position_suspect(
+            FlightPhase::Cruise,
+            Some((52.0, 10.0)),
+            true,  // on_ground
+            52.0,
+            10.0,
+        ));
+    }
+
+    #[test]
+    fn resume_suspect_on_large_drift() {
+        // Persisted near (52,10), sim now ~60 NM away (1° latitude).
+        assert!(is_resume_position_suspect(
+            FlightPhase::Cruise,
+            Some((52.0, 10.0)),
+            false,
+            53.0,
+            10.0,
+        ));
+    }
+
+    #[test]
+    fn resume_not_suspect_on_altitude_delta_while_airborne() {
+        // Airborne → still airborne, position matches. A pure altitude
+        // delta is NOT flagged (the altitude condition was dropped, QS-R5).
+        assert!(!is_resume_position_suspect(
+            FlightPhase::Descent,
+            Some((52.0, 10.0)),
+            false, // still airborne
+            52.0,
+            10.0,
+        ));
+    }
+
+    #[test]
+    fn resume_not_suspect_when_position_matches() {
+        // App restart, sim kept running — ground phase, on ground, no drift.
+        assert!(!is_resume_position_suspect(
+            FlightPhase::Boarding,
+            Some((52.0, 10.0)),
+            true,
+            52.0,
+            10.0,
+        ));
     }
 }
 
