@@ -153,6 +153,18 @@ npm run tauri build -- --bundles nsis   # Release-Installer bauen
 
 ---
 
+## X-Plane: Study-Level-Add-ons (CL650, ToLiss, FlightFactor …)
+
+Tiefe Study-Level-Flugzeuge in X-Plane steuern Cockpit- und System-Funktionen oft über **eigene DataRefs** statt der Standard-`sim/...`-DataRefs. AeroACARS liest die Standard-DataRefs — bedient ein Add-on sie nicht, „sieht" AeroACARS z.B. die Flaps-Stellung nicht (Folge: `LANDING CONFIG: INCOMPLETE`, obwohl Flaps gesetzt waren).
+
+Ab **v0.12.1** wird ein nicht lesbarer Wert fair behandelt — Anzeige „nicht bewertbar" statt rotem Fehler, **kein** Punktabzug. Für eine echte, flugzeug-genaue Auswertung gibt es eine ausfüllbare Vorlage, mit der die add-on-eigenen DataRefs erfasst werden:
+
+→ **[docs/xplane-aircraft-dataref-overrides.md](docs/xplane-aircraft-dataref-overrides.md)**
+
+Wer ein Study-Level-Flugzeug fliegt: einmal die Tabelle mit dem [DataRefTool](https://datareftool.com/) ausfüllen und über den [Issue-Tracker](https://github.com/MANFahrer-GF/AeroACARS/issues) einreichen — dann kann das Flugzeug ein passendes DataRef-Profil bekommen.
+
+---
+
 ## Troubleshooting / Logs
 
 Wenn AeroACARS sich komisch verhält und du dem Issue-Tracker etwas Substanzielles mitschicken willst — hier ist, was wo liegt.
