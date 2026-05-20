@@ -18150,9 +18150,16 @@ fn build_pirep_fields(
         let value = stats.landing_peak_vs_fpm.unwrap_or(rate);
         f.insert("Landing Rate".into(), format!("{:.0}", value));
     }
-    if let Some(g) = stats.landing_peak_g_force.or(stats.landing_g_force) {
+    if stats.landing_peak_g_force.or(stats.landing_g_force).is_some() {
         // v0.5.16: pure numeric (no " G" suffix). Some maintenance
         // plugins also read this; same is_numeric() reasoning.
+        //
+        // v0.12.3: das phpVMS-/Wartungs-Feld trägt denselben **gescorten**
+        // (EMA, FOQA-Methode) G-Wert wie die Pilot-Anzeige — nicht den
+        // rohen 50-Hz-Einzelframe-Peak. Pilot-Anzeige und Maintenance-
+        // Penalty-Basis müssen konsistent sein (sonst sieht der Pilot
+        // 1.78, das Plugin straft auf 1.95).
+        let g = score_g_for_stats(stats).scored_g;
         f.insert("Landing G-Force".into(), format!("{:.2}", g));
     }
     if let Some(p) = stats.landing_pitch_deg {
