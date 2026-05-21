@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { applyTheme, getInitialTheme, type Theme } from "./theme";
@@ -18,11 +18,13 @@ import { useDiscordRpcPush } from "./hooks/useDiscordRpcPush";
 import { LiveRecordingIndicator } from "./components/LiveRecordingIndicator";
 import { useSimSession } from "./hooks/useSimSession";
 import { useUpdateChecker } from "./hooks/useUpdateChecker";
-import type { ActiveFlightInfo, LoginResult, Profile } from "./types";
+import type { ActiveFlightInfo, LoginResult, Profile, UiError } from "./types";
 
 type SessionStatus =
   | { kind: "loading" }
-  | { kind: "loggedOut" }
+  /** v0.12.1 (Stream B LE6): `restoreError` is set when a session-restore
+   *  was blocked by the pilot-status gate — the login form surfaces it. */
+  | { kind: "loggedOut"; restoreError?: UiError }
   | { kind: "loggedIn"; session: LoginResult };
 
 type Tab = "cockpit" | "briefing" | "landing" | "log" | "settings" | "about" | "devpreview";
@@ -241,10 +243,24 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Sync localStorage + Backend bei jeder Änderung. Backend persistiert
-  // selbst (siehe write_auto_start_persisted), localStorage ist nur
-  // schneller Frontend-Cache fürs nächste Mount.
+  // Sync den Backend-Wert bei jeder echten Toggle-Änderung. Backend
+  // persistiert selbst (siehe write_auto_start_persisted), localStorage
+  // ist nur schneller Frontend-Cache fürs nächste Mount.
+  //
+  // v0.12.1 (Stream D): den ERSTEN Mount überspringen. Die Backend-Datei
+  // `auto_start.json` ist die Source of Truth — Effect A oben liest sie.
+  // Würde dieser Effect den (evtl. aus leerem localStorage stammenden)
+  // Frontend-Wert beim Mount nach unten pushen, überschriebe er den
+  // korrekt persistierten Backend-Stand. Genau das brach Auto-Start nach
+  // macOS-Auto-Updates: das WebView-localStorage war zurückgesetzt →
+  // `false` wurde gepusht und der gespeicherte `true`-Stand zerstört.
+  // Nur bei einer echten Nutzer-Änderung syncen.
+  const autoStartSyncDidMount = useRef(false);
   useEffect(() => {
+    if (!autoStartSyncDidMount.current) {
+      autoStartSyncDidMount.current = true;
+      return;
+    }
     void invoke("auto_start_set_enabled", { enabled: autoStart }).catch(() => {});
   }, [autoStart]);
   const simState = simStatus?.state ?? "disconnected";
@@ -270,8 +286,20 @@ function App() {
         setStatus(
           result ? { kind: "loggedIn", session: result } : { kind: "loggedOut" },
         );
-      } catch {
-        if (!cancelled) setStatus({ kind: "loggedOut" });
+      } catch (e) {
+        if (cancelled) return;
+        // v0.12.1 (Stream B LE6): a session-restore blocked by the
+        // pilot-status gate comes back as a UiError with a `pilot_*`
+        // code — surface it on the login form. Other errors (network
+        // etc.) stay silent, as before.
+        const code =
+          e && typeof e === "object" && "code" in e
+            ? String((e as { code: unknown }).code)
+            : "";
+        const restoreError = code.startsWith("pilot_")
+          ? (e as UiError)
+          : undefined;
+        setStatus({ kind: "loggedOut", restoreError });
       }
     })();
     return () => {
@@ -545,6 +573,7 @@ function App() {
 
       {status.kind === "loggedOut" && (
         <LoginPage
+          initialError={status.restoreError}
           onSuccess={(s) => setStatus({ kind: "loggedIn", session: s })}
         />
       )}

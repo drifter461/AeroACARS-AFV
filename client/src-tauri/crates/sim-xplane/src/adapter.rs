@@ -34,9 +34,16 @@ use sim_core::{SimKind, SimSnapshot, Simulator};
 
 use crate::dataref::{XPlaneState, CATALOG};
 use crate::premium::{PremiumListener, PremiumStatus, PremiumTouchdown};
+use crate::profile::{build_active_catalog, profile_index_for_title, ActiveEntry, PROFILES};
 use crate::rref::{decode_response, encode_request};
 use crate::web_api::{AircraftInfo, DrefIdCache, WebApiClient};
 use crate::{SUBSCRIPTION_HZ, XPLANE_LISTEN_PORT};
+
+/// v0.12.2 (LE1): RREF index base for the aircraft-profile probes.
+/// Probe subscriptions get one index each starting here — far above any
+/// `CATALOG` index, so a probe packet is unambiguously identifiable and
+/// never collides with a real catalog entry.
+const DISCOVERY_INDEX_BASE: i32 = 10_000;
 
 /// How often the Web API poller asks X-Plane for the aircraft info.
 /// Aircraft identity rarely changes mid-flight (load a new plane =
@@ -77,6 +84,12 @@ struct AdapterShared {
     seen: Mutex<Vec<bool>>,
     /// Per-index last raw float value (for debug panel display).
     last_values: Mutex<Vec<f32>>,
+    /// v0.12.2 (LE6): the **active catalog** the listener is currently
+    /// subscribed to — the static `CATALOG` with the detected aircraft
+    /// profile's dataref overrides applied. Same length/indices as
+    /// `CATALOG`. The listener owns the working copy and publishes it
+    /// here so the debug panel shows the dataref names actually in use.
+    active_catalog: Mutex<Vec<ActiveEntry>>,
     /// Aircraft identity from the X-Plane 12.1+ Web API. Empty
     /// `AircraftInfo` (all fields None) until the poller's first
     /// successful response, OR forever if the Web API is unreachable
@@ -120,6 +133,7 @@ impl XPlaneAdapter {
             parsed: Mutex::new(XPlaneState::default()),
             seen: Mutex::new(vec![false; CATALOG.len()]),
             last_values: Mutex::new(vec![0.0; CATALOG.len()]),
+            active_catalog: Mutex::new(build_active_catalog(None)),
             aircraft: Mutex::new(AircraftInfo::default()),
             stop: AtomicBool::new(false),
         });
@@ -147,6 +161,9 @@ impl XPlaneAdapter {
         *self.shared.last_error.lock().unwrap() = None;
         *self.shared.parsed.lock().unwrap() = XPlaneState::default();
         *self.shared.aircraft.lock().unwrap() = AircraftInfo::default();
+        // v0.12.2: a fresh run starts on the base catalog — profile
+        // detection re-runs from scratch against the new sim session.
+        *self.shared.active_catalog.lock().unwrap() = build_active_catalog(None);
         for v in self.shared.seen.lock().unwrap().iter_mut() {
             *v = false;
         }
@@ -276,12 +293,16 @@ impl XPlaneAdapter {
 
     /// Return the catalog with each DataRef's most recent received
     /// value. Used by the Settings → Debug panel — analogous to the
-    /// MSFS Inspector but auto-populated (no add-watch UI needed
-    /// because the X-Plane catalog is fixed at compile time).
+    /// MSFS Inspector but auto-populated.
+    ///
+    /// v0.12.2: reads the **active catalog** so the panel shows the
+    /// dataref names actually in use — including a detected aircraft
+    /// profile's overrides (e.g. the CL650 flaps dataref).
     pub fn subscribed_datarefs(&self) -> Vec<DatarefSample> {
         let seen = self.shared.seen.lock().unwrap();
         let last = self.shared.last_values.lock().unwrap();
-        CATALOG
+        let active = self.shared.active_catalog.lock().unwrap();
+        active
             .iter()
             .enumerate()
             .map(|(i, e)| DatarefSample {
@@ -300,10 +321,45 @@ impl Drop for XPlaneAdapter {
     }
 }
 
-/// The blocking listener thread. Binds a UDP socket on an
-/// ephemeral local port, sends one RREF subscription per CATALOG
-/// entry to 127.0.0.1:49000, then loops decoding responses until
+/// v0.12.2 (LE1): decide which aircraft profile should be active from
+/// the two detection signals. Pure so the runtime aircraft-swap logic
+/// can be unit-tested without a UDP socket (QS-R4/P3).
+///
+/// * `title` — the Web API aircraft title, or `None` (Web API off / XP11).
+/// * `probe_fresh` — per-profile (index = position in `PROFILES`): did
+///   that profile's probe DataRef answer within `PROBE_STALE_AFTER`.
+/// * `probe_seen` — per-profile: has that probe DataRef *ever* answered.
+///
+/// The probe is the **live ground truth**: a profile whose signature
+/// DataRef answered recently IS the loaded aircraft, so a fresh probe
+/// always wins. A title match only counts during the initial discovery
+/// window — before that profile's probe has answered even once. Once a
+/// probe has been heard and then fallen silent, the aircraft is gone;
+/// the laggy Web API title (polled every 30 s, so up to 30 s stale)
+/// must NOT revive a profile the probe already retired (QS-R2/P2).
+/// When nothing points at a profile the result is `None` → base catalog.
+fn desired_profile(
+    title: Option<&str>,
+    probe_fresh: &[bool],
+    probe_seen: &[bool],
+) -> Option<usize> {
+    if let Some(pi) = probe_fresh.iter().position(|&fresh| fresh) {
+        return Some(pi);
+    }
+    title
+        .and_then(profile_index_for_title)
+        .filter(|&pi| !probe_seen.get(pi).copied().unwrap_or(false))
+}
+
+/// The blocking listener thread. Binds a UDP socket on an ephemeral
+/// local port, subscribes the active catalog (+ aircraft-profile
+/// probes) to 127.0.0.1:49000, then loops decoding responses until
 /// `shared.stop` flips to `true`.
+///
+/// v0.12.2: the listener also runs aircraft-profile detection (LE1) —
+/// title-match via the Web API overlay plus an RREF probe — and on a
+/// match rebuilds the active catalog with the profile's dataref
+/// overrides and re-subscribes (LE6).
 fn run_listener(shared: Arc<AdapterShared>) {
     use std::net::UdpSocket;
 
@@ -329,21 +385,29 @@ fn run_listener(shared: Arc<AdapterShared>) {
 
     let xplane_addr = format!("127.0.0.1:{XPLANE_LISTEN_PORT}");
 
+    // ---- v0.12.2: active catalog + aircraft-profile state ----
+    // `active` is the static CATALOG with the detected profile's
+    // dataref overrides applied (LE6) — same length/indices as CATALOG.
+    let mut active: Vec<ActiveEntry> = build_active_catalog(None);
+    // Index into PROFILES of the active profile, None until detected.
+    let mut active_profile: Option<usize> = None;
+    // v0.12.2 (QS-R4/P1): per-profile timestamp of the last probe
+    // response. The probes stay subscribed for the whole session, so a
+    // profile counts as "the loaded aircraft" only while its probe
+    // answered within `PROBE_STALE_AFTER`. Once it falls silent the
+    // aircraft is gone and the profile drops back to the base catalog —
+    // this is what makes the runtime aircraft-swap reset (LE6) work even
+    // when there is no Web API title (XP11 / Web API off), the case the
+    // old `last_title`-diff logic missed.
+    let mut probe_last_seen: Vec<Option<Instant>> = vec![None; PROFILES.len()];
+
     // ---- Hard-armoured re-subscribe (v0.3.0) ----
-    // Send the full RREF subscription set. Called both at startup AND
-    // periodically from the worker loop whenever we're not Connected,
-    // so we recover from:
-    //   * AeroACARS started before X-Plane (initial subscribe lands on
-    //     a closed port, no-one to receive it)
-    //   * Pilot quits X-Plane and starts a fresh instance — the new
-    //     X-Plane has no record of our subscription
-    //   * X-Plane crashed and was restarted by the pilot
-    //   * Pilot loads a different aircraft (RREF state is preserved
-    //     usually but on some hot-reload paths gets lost)
-    // The subscribe is idempotent on X-Plane's side — duplicate
-    // RREF requests at the same index just refresh the rate.
-    let send_all_subscriptions = |sock: &UdpSocket| {
-        for (i, entry) in CATALOG.iter().enumerate() {
+    // Send the full RREF subscription set for the given catalog. Called
+    // at startup, on profile activation, and periodically while not
+    // Connected. Idempotent on X-Plane's side — a duplicate RREF at the
+    // same index just refreshes the rate / re-binds the dataref.
+    let subscribe_catalog = |sock: &UdpSocket, cat: &[ActiveEntry]| {
+        for (i, entry) in cat.iter().enumerate() {
             let req = encode_request(SUBSCRIPTION_HZ as i32, i as i32, entry.name);
             if let Err(e) = sock.send_to(&req, &xplane_addr) {
                 tracing::trace!(
@@ -354,10 +418,29 @@ fn run_listener(shared: Arc<AdapterShared>) {
             }
         }
     };
+    // v0.12.2 (LE1 stage 2): one probe subscription per profile, at a
+    // reserved discovery index. Low rate — we only need to learn the
+    // dataref exists, not stream it.
+    let subscribe_probes = |sock: &UdpSocket| {
+        for (pi, prof) in PROFILES.iter().enumerate() {
+            let req = encode_request(1, DISCOVERY_INDEX_BASE + pi as i32, prof.probe_dataref);
+            let _ = sock.send_to(&req, &xplane_addr);
+        }
+    };
+    // Cancel all probe subscriptions (freq = 0) — best-effort cleanup
+    // on listener shutdown. The probes otherwise stay subscribed for the
+    // whole session (QS-R4/P1) so an aircraft swap is always detected.
+    let unsubscribe_probes = |sock: &UdpSocket| {
+        for (pi, prof) in PROFILES.iter().enumerate() {
+            let stop = encode_request(0, DISCOVERY_INDEX_BASE + pi as i32, prof.probe_dataref);
+            let _ = sock.send_to(&stop, &xplane_addr);
+        }
+    };
 
-    // Initial subscribe — most of the time X-Plane is already running
-    // and this is the only call needed.
-    send_all_subscriptions(&socket);
+    // Initial subscribe — base catalog + profile probes.
+    subscribe_catalog(&socket, &active);
+    subscribe_probes(&socket);
+    *shared.active_catalog.lock().unwrap() = active.clone();
 
     // Listen.
     let mut buf = vec![0u8; 8192];
@@ -365,10 +448,14 @@ fn run_listener(shared: Arc<AdapterShared>) {
     let mut last_resubscribe_at = Instant::now();
     /// How often to re-send the full subscription set while we're
     /// not yet Connected. 5 seconds matches `STALE_TIMEOUT` so the
-    /// recovery feels coherent. Faster would spam X-Plane on cold-
-    /// start; slower would feel laggy after the pilot restarts the
-    /// sim.
+    /// recovery feels coherent.
     const RESUBSCRIBE_INTERVAL: Duration = Duration::from_secs(5);
+    /// v0.12.2 (QS-R4): a profile's probe DataRef must answer at least
+    /// this often for the profile to stay active. The probe runs at
+    /// 1 Hz; 8 s tolerates a few dropped packets and a brief reconnect
+    /// blip without flapping the profile, while still catching a real
+    /// aircraft swap — the old aircraft's probe DataRef simply vanishes.
+    const PROBE_STALE_AFTER: Duration = Duration::from_secs(8);
 
     while !shared.stop.load(Ordering::SeqCst) {
         match socket.recv_from(&mut buf) {
@@ -382,12 +469,30 @@ fn run_listener(shared: Arc<AdapterShared>) {
                 let mut seen = shared.seen.lock().unwrap();
                 let mut last = shared.last_values.lock().unwrap();
                 for p in pairs {
-                    parsed.apply(p.index, p.value);
-                    if let Some(slot) = seen.get_mut(p.index as usize) {
-                        *slot = true;
+                    // v0.12.2 (LE1): discovery-index packets are PROBE
+                    // responses — they only prove a profile's dataref
+                    // exists. Intercepted BEFORE `apply_field`; they
+                    // never mutate a snapshot value.
+                    if p.index >= DISCOVERY_INDEX_BASE {
+                        let pi = (p.index - DISCOVERY_INDEX_BASE) as usize;
+                        if let Some(slot) = probe_last_seen.get_mut(pi) {
+                            *slot = Some(Instant::now());
+                        }
+                        continue;
                     }
-                    if let Some(slot) = last.get_mut(p.index as usize) {
-                        *slot = p.value;
+                    // Normal catalog packet: index → active entry →
+                    // FieldId, with the profile's ValueMapping applied.
+                    if let Some(entry) = active.get(p.index as usize) {
+                        if let Some(mapped) = entry.mapping.map(p.value) {
+                            parsed.apply_field(entry.field, mapped);
+                        }
+                        // seen/last reflect the RAW value X-Plane sent.
+                        if let Some(slot) = seen.get_mut(p.index as usize) {
+                            *slot = true;
+                        }
+                        if let Some(slot) = last.get_mut(p.index as usize) {
+                            *slot = p.value;
+                        }
                     }
                 }
                 if parsed.got_first_packet {
@@ -408,15 +513,57 @@ fn run_listener(shared: Arc<AdapterShared>) {
             }
         }
 
+        // ---- v0.12.2 (LE1/LE6): aircraft-profile detection ----
+        // Re-evaluated every tick from the two LE1 signals:
+        //   * title — case-insensitive substring match on the Web API
+        //             aircraft title (None when the Web API is off / XP11)
+        //   * probe — the profile's signature DataRef answered within
+        //             `PROBE_STALE_AFTER` (works without the Web API)
+        // Title wins when it points at a profile; otherwise the probe
+        // decides. When neither signal points at a profile — e.g. the
+        // pilot swapped from the CL650 to a non-profile aircraft, so the
+        // CL650 probe DataRef vanished and its `probe_last_seen` went
+        // stale — `desired` is None and the adapter falls back to the
+        // base catalog. This is the runtime aircraft-swap path (LE6) and
+        // (QS-R4/P1) now works even with no Web API title.
+        let current_title = shared.aircraft.lock().unwrap().descrip.clone();
+        let probe_fresh: Vec<bool> = probe_last_seen
+            .iter()
+            .map(|t| t.is_some_and(|seen| seen.elapsed() < PROBE_STALE_AFTER))
+            .collect();
+        let probe_seen: Vec<bool> = probe_last_seen.iter().map(|t| t.is_some()).collect();
+        let desired = desired_profile(current_title.as_deref(), &probe_fresh, &probe_seen);
+
+        if desired != active_profile {
+            match desired {
+                Some(pi) => tracing::info!(
+                    profile = PROFILES[pi].name,
+                    via = if probe_fresh.get(pi).copied().unwrap_or(false) {
+                        "probe"
+                    } else {
+                        "title"
+                    },
+                    "X-Plane: aircraft DataRef profile activated"
+                ),
+                None => tracing::info!(
+                    "X-Plane: aircraft changed — resetting to base DataRef catalog"
+                ),
+            }
+            active_profile = desired;
+            // Rebuild the active catalog (LE6) and re-subscribe with
+            // fresh indices. The probes keep running regardless, so a
+            // later aircraft swap is always detected.
+            active = build_active_catalog(desired.map(|pi| &PROFILES[pi]));
+            *shared.active_catalog.lock().unwrap() = active.clone();
+            subscribe_catalog(&socket, &active);
+        }
+
         // Stale-snapshot guard: if we WERE connected but haven't
         // seen any packet for STALE_TIMEOUT, treat the connection
         // as dropped — clear the parsed state (so snapshot() returns
         // None until fresh data arrives) and downgrade the connection
-        // state. The next packet will repopulate parsed and snap us
-        // back to Connected without intervention. Without this, if
-        // the pilot quits X-Plane and re-loads at a different airport,
-        // our snapshot() would silently keep serving the old position
-        // until a new packet overwrites every relevant DataRef.
+        // state. The next packet repopulates parsed and snaps us back
+        // to Connected without intervention.
         if let Some(at) = last_packet_at {
             if at.elapsed() > STALE_TIMEOUT {
                 let mut parsed = shared.parsed.lock().unwrap();
@@ -443,28 +590,26 @@ fn run_listener(shared: Arc<AdapterShared>) {
 
         // ---- Hard-armoured re-subscribe poll (v0.3.0) ----
         // Whenever we're not Connected, periodically resend the full
-        // subscription set. This covers the "AeroACARS started before
-        // X-Plane" case (where last_packet_at is still None and the
-        // stale-timeout block above never fires) AND the "X-Plane was
-        // restarted" case (where the new X-Plane instance has no
-        // record of our subscription). Pilot does not need to touch
-        // any UI button — connection just comes back.
+        // subscription set (active catalog + probes) so the connection
+        // recovers from a cold start or an X-Plane restart on its own.
         let state_now = *shared.state.lock().unwrap();
         if state_now != ConnectionState::Connected
             && last_resubscribe_at.elapsed() >= RESUBSCRIBE_INTERVAL
         {
             tracing::debug!("X-Plane: not connected — re-sending RREF subscriptions");
-            send_all_subscriptions(&socket);
+            subscribe_catalog(&socket, &active);
+            subscribe_probes(&socket);
             last_resubscribe_at = Instant::now();
         }
     }
 
-    // Best-effort: send freq=0 RREF for every catalog entry so we
-    // don't leave X-Plane streaming into the void after we exit.
-    for (i, entry) in CATALOG.iter().enumerate() {
+    // Best-effort: send freq=0 RREF for every active catalog entry and
+    // every probe so we don't leave X-Plane streaming into the void.
+    for (i, entry) in active.iter().enumerate() {
         let req = encode_request(0, i as i32, entry.name);
         let _ = socket.send_to(&req, &xplane_addr);
     }
+    unsubscribe_probes(&socket);
     tracing::info!("X-Plane UDP listener stopped");
 }
 
@@ -547,4 +692,63 @@ fn run_web_api_poller(shared: Arc<AdapterShared>) {
         }
     }
     tracing::info!("X-Plane Web API poller stopped");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::desired_profile;
+
+    // The only profile shipped today (index 0) is the Hot-Start CL650.
+    const CL650_TITLE: &str = "Challenger 650 published by X-Aviation";
+
+    #[test]
+    fn title_match_activates_profile() {
+        // Initial discovery: title matches, probe has not answered yet.
+        assert_eq!(desired_profile(Some(CL650_TITLE), &[false], &[false]), Some(0));
+    }
+
+    #[test]
+    fn probe_activates_profile_without_title() {
+        // XP11 / Web API off: title is None but the probe answered.
+        assert_eq!(desired_profile(None, &[true], &[true]), Some(0));
+    }
+
+    #[test]
+    fn no_signal_yields_base_catalog() {
+        assert_eq!(desired_profile(None, &[false], &[false]), None);
+        assert_eq!(desired_profile(Some("Cessna 172"), &[false], &[false]), None);
+    }
+
+    #[test]
+    fn probe_wins_when_title_does_not_match() {
+        // A title that matches no profile must not veto a fresh probe.
+        assert_eq!(desired_profile(Some("Cessna 172"), &[true], &[true]), Some(0));
+    }
+
+    /// QS-R4/P1: the regression the old `last_title`-diff logic missed —
+    /// a profile activated purely by probe (title stays `None`), then the
+    /// pilot swaps to a non-profile aircraft so the probe falls silent.
+    /// With no title signal the swap must STILL reset to the base catalog.
+    #[test]
+    fn probe_activated_then_stale_resets_to_base() {
+        // CL650 loaded, probe fresh, no title → profile active.
+        assert_eq!(desired_profile(None, &[true], &[true]), Some(0));
+        // Pilot swaps to a non-profile aircraft: probe DataRef vanishes,
+        // `probe_last_seen` goes stale → probe_fresh = false, title still
+        // None. desired_profile must drop back to the base catalog.
+        assert_eq!(desired_profile(None, &[false], &[true]), None);
+    }
+
+    /// QS-R2/P2: the laggy Web API title (polled every 30 s) must not
+    /// revive a profile the probe already retired. CL650 → non-profile
+    /// swap: the probe goes stale within 8 s, but `aircraft.descrip` can
+    /// still name the CL650 for up to 30 s. Because the CL650 probe HAS
+    /// been seen and is now stale, the stale title must not win.
+    #[test]
+    fn stale_title_cannot_revive_retired_profile() {
+        // probe seen earlier, now stale; title still says CL650 → base.
+        assert_eq!(desired_profile(Some(CL650_TITLE), &[false], &[true]), None);
+        // sanity: same title, but probe fresh again (swapped back) → active.
+        assert_eq!(desired_profile(Some(CL650_TITLE), &[true], &[true]), Some(0));
+    }
 }

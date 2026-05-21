@@ -60,7 +60,7 @@
     "vs_curve": "Sinkraten-Kurve",
     "landing_rate": "Sinkrate",
     "g_force": "G-Kraft",
-    "peak_g": "Peak-G",
+    "peak_g": "Roh-Peak G",
     "pitch": "Pitch",
     "bank": "Bank",
     "speed": "IAS bei TD",
@@ -167,11 +167,11 @@
       "g_force": "Maximale G-Belastung im 1,5-Sekunden-Fenster um den Touchdown. 1,0 G = ruhig, ab 1,4 G deutlich spürbar, ab 1,7 G strukturkritisch (Boeing 737 FCOM Hard-Landing-Schwelle).",
       "bounces": "Wie oft das Flugzeug nach dem ersten Aufsetzen wieder über 35 ft AGL gestiegen und erneut gelandet ist (BeatMyLanding-Algorithmus). 0 = sauber gesetzt; jeder Bounce drückt den Score.",
       "stability": "Stabilitäts-Auswertung über das Stable-Approach-Gate (0–1000 ft HAT, Flare-Cutoff letzte 3 s vor TD). Backend rechnet sieben Faktoren: V/S-Jerk, Bank σ (vector-filtered), IAS σ, Sink-Rate-Verletzung, Landing-Config, V/S vs. 3°-ILS, Max V/S-Dev <500 ft. Details + Schwellwerte stehen in der Approach-Stability-Card weiter unten.",
-      "rollout": "Bahn-Auslastung in Prozent: (TD-Distanz hinter Schwelle + Rollout) ÷ LDA × 100. Fünf Bänder: <30 % excellent, 30–50 % gut, 50–70 % ok, 70–90 % lang, 90–100 % knapp, >100 % Overrun-Risiko. Heavy-Bonus −5 pp für Wide-Bodies. Klick „🛬 Wie wird das berechnet?\" für volle Erklärung.",
+      "rollout": "Anteil der nutzbaren Bahnlänge (LDA), den deine gesamte Landung gebraucht hat — gemessen ab der Schwelle: erst die Float-Strecke bis zum Aufsetzen, dann die Ausrollstrecke bis zum Abrollen von der Bahn (~40 kt). Float innerhalb der ersten 15 % der LDA gilt als normal und kostet keine Punkte; darüber zählt es. < 50 % ist gut, > 90 % wird knapp — bei nasser Bahn riskant. Klick „🛬 Wie wird das berechnet?\" für die volle Erklärung.",
       "fuel": "Treue zum SimBrief-OFP-Trip-Burn. Vergleicht den tatsächlichen Verbrauch (Block − Landing-Fuel) gegen den geplanten Trip-Burn. Mehrverbrauch zählt (Cost-Index, Höhe oder Wind nicht passend); Minderverbrauch wird NICHT bestraft. Bei >15 % unter Plan: Hinweis auf möglichen OFP-/Mess-/Routenfehler.",
       "loadsheet": "Vorhandensein von Loadsheet-Daten (ZFW + TOW im Plan). Im VFR-/Manual-Mode ohne Dispatch-Daten wird dieser Sub-Score übersprungen — kein 0-Penalty. Die detaillierte Plan-vs-Real-Bewertung (Block-Fuel, TOW, LDW, ZFW) siehst du im Treibstoff-Bereich als „Plan-Treue\"-Score.",
       "score_section": "Sieben Sub-Scores à 0–100 Punkte (Sinkrate, G-Kraft, Bounces, Anflug-Stabilität, Bahn-Auslastung, OFP-Treue, Loadsheet). Jede Kachel zeigt Wert, Punktzahl und farbigen Balken (grün/gelb/rot). Die schwächste Kategorie wird als nächstes Verbesserungs-Ziel im Coach-Tipp aufgegriffen.",
-      "runway_section": "Visualisierung deines Touchdowns auf der Bahn. Das blaue Symbol markiert den Aufsetzpunkt, das grüne Band zeigt die Ausrollstrecke bis zum Verlassen der Bahn (Highspeed-Exit < 40 kt oder Stopp). Werte unten: Gesamtlänge, Centerline-Abweichung, Distanz hinter der Schwelle, Bahn-Auslastung in Prozent.",
+      "runway_section": "Visualisierung deines Touchdowns auf der Bahn. Das blaue Symbol markiert den Aufsetzpunkt, das grüne Band zeigt die Ausrollstrecke bis zum Abrollen von der Bahn (Highspeed-Exit bei ~40 kt). Werte unten: Gesamtlänge, Centerline-Abweichung, Distanz hinter der Schwelle, Bahn-Auslastung in Prozent.",
       "fuel_section": "Block = Spritmenge beim Abblock; TO Fuel = nach dem Rollen am Startpunkt; LDG Fuel = bei Touchdown; TOW = Takeoff Weight (Leergewicht + Last + TO Fuel); LDW = Landing Weight; ZFW = Zero Fuel Weight. Plan-Werte stammen aus dem SimBrief-OFP, falls vorhanden. Der „Plan-Treue\"-Score unten bewertet die Abweichungen Block/TOW/LDW/ZFW (Penalty ab >5 %, schwerer ab >10 %)."
     },
     "rat": {
@@ -205,6 +205,7 @@
       "marginal_runway": "⚠ Knapp — fast Overrun",
       "overrun_risk": "⚠ Über Bahnende — Overrun-Risiko",
       "pre_displaced_capped": "Bremsweg ok, aber zu früh aufgesetzt",
+      "long_float": "Bremsweg top — aber spät aufgesetzt",
       "on_plan": "Auf Plan",
       "near_plan": "Nahe am Plan",
       "off_plan": "Vom Plan abgewichen",
@@ -245,6 +246,7 @@
       "marginal_runway": "Bahnreserve war knapp — bei nasser Bahn kritisch. Höheres Auto-Brake-Setting wählen.",
       "overrun_risk": "Berechnete Brems-Distanz ÜBER der Bahnlänge — auf trockener Bahn mit max. Reverse/Brake gerade so. Anflugprofil + Aim-Point komplett prüfen.",
       "pre_displaced_capped": "Bremsweg ist OK, aber Aufsetzen lag vor der Displaced-Threshold-Markierung. Score gedeckelt — Anflugprofil und Aim-Point überprüfen.",
+      "long_float": "Dein Bremsen war top — der Punktverlust kommt vom späten Aufsetzen. Ziel den Aim-Point an (Markierung ~400 m hinter der Schwelle), Schwellen-Crossing mit Vref+5, Flare nicht zu früh.",
       "on_plan": "Sprit exakt auf Plan — saubere Performance-Kalkulation.",
       "near_plan": "Sehr nah am Plan, alles im grünen Bereich.",
       "off_plan": "Mehrverbrauch gegenüber OFP. Cruise-Speed-Mach und Höhe gegen Plan prüfen.",
@@ -366,9 +368,9 @@
     "gforce_forensik": {
       "title": "💪 G-Kraft-Forensik",
       "intro_header": "Welche G-Kraft ist die richtige?",
-      "intro_body": "AeroACARS misst die G-Belastung beim Touchdown im 50-Hz-Sampling. Volanta und Cockpit-G-Meter zeigen einen geglätteten Mittelwert über ~250 ms — das was der Pilot fühlt. Hohe G-Spikes durch Fahrwerks-Federkompression (= Strut-Compression) sind im Sim physikalisch korrekt simuliert, aber bei kleinen GA-Aircraft im Sim oft härter als in der Realität. Wenn deine vertikale Sinkrate butterweich war, dominiert sie den Master-Score — der G-Peak ist dann ein Sim-Strut-Artefakt, kein Pilotenfehler.",
+      "intro_body": "AeroACARS bewertet die Aufsetz-G-Kraft wie eine echte Flugdaten-Überwachung (FOQA): das G-Signal wird leicht geglättet (EMA, ~100 ms), dann der Spitzenwert genommen. Das entfernt die überscharfen 50-Hz-Einzelbild-Spikes — der bewertete Wert entspricht dem, was ein echter Flugschreiber aufzeichnen würde. Der rohe 50-Hz-Peak bleibt unten als Forensik-Detail sichtbar.",
       "tool_section_title": "G-Verlauf um den Touchdown",
-      "tool_section_subtitle": "Edge = Frame des Aufsetzens, danach Strut-Compression. Vergleiche mit den robusten Statistiken unten.",
+      "tool_section_subtitle": "Rohwerte (50 Hz) — Forensik-Detail, nicht der bewertete Wert.",
       "robust_section_title": "Robuste Statistiken (Spike-resistent)",
       "robust_section_subtitle": "Median und 95-Percentile filtern einzelne Sim-Frame-Spikes raus. Wenn diese deutlich kleiner sind als der Peak, war der Peak ein Spike — kein echter Impact.",
       "score_section_title": "Was AeroACARS scort",
@@ -380,11 +382,12 @@
       "tile_median": "Median 500 ms",
       "tile_p95": "95-Percentile",
       "tile_volanta_hint": "Volanta-Default-Glättung",
-      "tile_peak_hint": "Max-Wert",
+      "tile_peak_hint": "Roh 50 Hz",
       "tile_na_tooltip": "Wert nicht erfasst — Sampler-Buffer war beim Touchdown nicht voll",
       "spike_detected": "Peak ({{peak}} G) liegt deutlich über 95-Percentile ({{p95}} G) — sieht aus wie ein einzelner Sim-Frame-Spike, nicht wie eine echte Strut-Compression.",
-      "score_basis_label": "Bewertete G-Peak",
-      "score_basis_sublabel": "Peak G (500 ms post-Edge)",
+      "score_basis_label": "Bewertete G-Kraft",
+      "score_basis_sublabel": "EMA-geglätteter Peak · FOQA-Methode",
+      "raw_peak_detail": "Roh-Peak 50 Hz: {{g}} G · Sim-Einzelbild, nicht bewertet",
       "score_strut_force": "Fahrwerks-Normalkraft: {{force}} N",
       "score_vs_leads": "Sinkrate war smooth (< 200 fpm) — Master-Score wird nicht durch G heruntergezogen. Pilotenfehler unwahrscheinlich.",
       "tip": {
@@ -498,19 +501,21 @@
       "title": "Bahn-Auslastung — wie der Score entsteht",
       "close_label": "Schließen ✕",
       "close_aria": "Bahn-Auslastung-Hilfe schließen",
-      "intro": "Der Sub-Score „Bahn-Auslastung\" misst, wie viel Prozent der nutzbaren Landebahn (LDA) du vom Schwellenüberflug bis zum Stillstand verbraucht hast — flugzeug- und bahnlängen-fair.",
+      "intro": "Der Sub-Score „Bahn-Auslastung\" misst, wie viel Prozent der nutzbaren Landebahn (LDA) deine Landung gebraucht hat — gemessen ab der Schwelle: erst die Float-Strecke bis zum Aufsetzen, dann die Ausrollstrecke bis zum Abrollen von der Bahn (~40 kt). Flugzeug- und bahnlängen-fair. Float innerhalb der ersten 15 % der LDA gilt als normal und kostet keine Punkte.",
       "formula_heading": "Die Formel",
-      "formula": "Auslastung % = (TD-Distanz zur Schwelle + Rollout-Distanz) ÷ LDA × 100",
+      "formula": "Banding % = (Ausrollstrecke + Float-Überschuss über 15 % LDA) ÷ LDA × 100\nOverrun-Check separat: (Float + Ausrollstrecke) ÷ LDA — auf der echten, ungekürzten Distanz",
+      "float_tolerance_heading": "Float-Toleranz (die ersten 15 % der LDA)",
+      "float_tolerance_body": "Float ist die Schwebestrecke zwischen Schwellen-Crossing und Aufsetzpunkt. Float innerhalb der ersten 15 % der LDA gilt als normal und kostet keine Punkte — nur der Float-Überschuss darüber fließt ins Banding ein. Die Ausrollstrecke (das eigentliche Bremsen) zählt immer voll. So trennt der Score faire Aufsetz-Toleranz von echter Brems-Disziplin. Wichtig: das Overrun-Risiko wird weiterhin auf der echten, ungekürzten Gesamtdistanz geprüft — die Toleranz versteckt kein echtes Overrun.",
       "terms_heading": "Was die Begriffe bedeuten",
       "terms": {
-        "td_distance": "TD-Distanz zur Schwelle — wie viele Meter NACH der Schwelle deine Räder den Belag berühren.",
-        "rollout": "Rollout — vom Aufsetzen bis Stillstand (oder bis du auf High-Speed-Exit-Speed < 40 kt abbremst).",
+        "td_distance": "Float-Strecke — wie viele Meter NACH der Schwelle deine Räder den Belag berühren (Schwebestrecke nach dem Schwellen-Crossing).",
+        "rollout": "Ausrollstrecke — vom Aufsetzen bis zum Abrollen von der Bahn (Abrollgeschwindigkeit ~40 kt oder Abbiegen in den Taxiway). Auf der Bahn wird nicht bis zum Stillstand gebremst.",
         "lda": "LDA (Landing Distance Available) = physische Bahnlänge − Displaced Threshold."
       },
-      "example_heading": "Beispiel EK406 (A388 in YMML)",
-      "example": "517 m hinter Schwelle aufgesetzt + 584 m Rollout = 1 100 m verbraucht von 3 657 m LDA = 30 % → 100 PTS (excellent).",
+      "example_heading": "Beispiel BTX8815 (A319 in LOWS)",
+      "example": "541 m Float bis zum Aufsetzen, dann 442 m Ausrollstrecke.\nFloat-Toleranz = 15 % der LDA = 427 m.\nScore-relevant: 541 − 427 = 114 m Float-Überschuss.\nScore-Distanz = 442 m Ausrollen + 114 m Überschuss = 556 m = 20 % der LDA.\n20 % < 30 % → 100 PTS „Viel Bahn-Reserve\".\nEchte Auslastung in der Card-Zeile: 983 m / 35 % — Float zählt da voll mit.\nBremsen war top — die Punkte-Schwelle lag am Float, nicht am Bremsweg.",
       "bands_heading": "Die fünf Punkte-Bänder",
-      "bands_intro": "Bewertet wird auf den effektiven Prozentwert (= Raw % minus Heavy-Bonus). Grenzen sind exklusiv-oben: 30,0 % gehört schon ins nächste Band.",
+      "bands_intro": "Bewertet wird auf der toleranzbereinigten Auslastung (Ausrollstrecke + Float-Überschuss über 15 % LDA, dann minus Heavy-Bonus). Grenzen sind exklusiv-oben: 30,0 % gehört schon ins nächste Band.",
       "bands_header": {
         "pct": "Effektiv %",
         "pts": "Punkte",
@@ -552,6 +557,8 @@
       "heavy_body": "Wide-Bodies brauchen mehr Bahn — das ist erwartet. Deshalb wird bei Heavy-Mustern (Wide-Bodies, B747, MD11, IL96, Antonov) der Effektiv-Wert um 5 pp reduziert. Light/Medium kriegen nichts. Wichtig: der Overrun-Check (> 100 %) läuft auf dem Raw-Wert VOR Allowance — der Heavy-Bonus rettet dich nicht über die Bahnkante.",
       "pre_displaced_heading": "Sonderfall: vor dem Displaced Threshold aufgesetzt",
       "pre_displaced_body": "Wenn der Recorder erkennt, dass du VOR der nutzbaren Schwelle aufgesetzt hast (regelwidrig — Wirbelschleppen-/Lärmschutz-Verletzung), wird der Score auf maximal 55 PTS gekappt, die Begründung wechselt auf „Bremsweg ok, aber zu früh aufgesetzt\" und du siehst eine Warning-Pill „⚠ Vor Displaced-Threshold aufgesetzt — Anflugprofil prüfen\". Der Score zeigt also bewusst nicht „Viel Reserve\" mit 55 PTS — sonst wäre es unehrlich.",
+      "long_float_heading": "Sonderfall: spät aufgesetzt, aber top gebremst",
+      "long_float_body": "Das Gegenstück zum Pre-Displaced-Cap. Wenn dein Float die 15 %-Toleranz überschreitet, deine Ausrollstrecke für sich allein aber excellent gewesen wäre (unter 30 % der LDA) und der Gesamt-Score im grünen Bereich liegt, wechselt die Begründung auf „Bremsweg top — aber spät aufgesetzt\". Die Botschaft: am Bremsen lag es nicht — übe einen früheren, präziseren Aufsetzpunkt (Aim-Point), kein härteres Bremsen.",
       "skip_heading": "Wann wird NICHT bewertet?",
       "skip_intro": "Sechs Skip-Reasons. Die Card zeigt dann „nicht bewertet\" + Grund. Kein Fallback, keine geschätzten Meter — lieber kein Score als irreführend.",
       "skip_items": {
@@ -563,7 +570,14 @@
         "invalid_lda": "LDA ≤ 0 m (z.B. Displaced Threshold > Bahnlänge — Datenfehler)."
       },
       "card_heading": "Was die Card zeigt",
-      "card_body": "Wert-Zeile „1100 m / 3657 m · 30 %\" = verbraucht / LDA / Prozent. Darunter die Bewertung („Solider Bremsweg\" etc.) und kleine Info-Zeilen mit Float-Distanz (Strecke zwischen Threshold-Überflug und tatsächlichem TD, NICHT im Score — TD-Distanz enthält sie implizit) und der Bahn-Info (z.B. „Bahn: YMML 16, LDA 3657 m\")."
+      "card_body": "Die Wert-Zeile „35 % der Bahn · 983 m von 2850 m LDA\" zeigt die echte Gesamt-Auslastung (Float voll mitgezählt). Darunter die Bewertung („Bremsweg top — aber spät aufgesetzt\" etc.) und kleine Info-Zeilen: Aufsetzpunkt hinter der Schwelle, Ausrollstrecke ab Aufsetzen und die Bahn-Info (z.B. „Bahn: LOWS 15 · LDA 2850 m\")."
+    },
+    "rollout_extra": {
+      "value_label": "{{pct}} % der Bahn · {{used}} m von {{lda}} m LDA",
+      "touchdown_point": "Aufsetzpunkt: {{m}} m hinter der Schwelle",
+      "touchdown_point_before": "Aufsetzpunkt: {{m}} m vor der Schwelle",
+      "rollout_distance": "Ausrollstrecke ab Aufsetzen: {{m}} m",
+      "runway": "Bahn: {{icao}} {{ident}} · LDA {{lda}} m"
     },
     "approach_stability_card": {
       "title": "🛬 Approach-Stability",
@@ -853,7 +867,12 @@
     "status_not_found": "Discord nicht gefunden — läuft die App?",
     "status_disabled": "Deaktiviert",
     "status_error": "Fehler: {{msg}}",
-    "status_unknown": "Status unbekannt"
+    "status_unknown": "Status unbekannt",
+    "diag_last_push": "Letzter Discord-Push: {{when}}",
+    "diag_push_never": "noch keiner gesendet",
+    "diag_ago_seconds": "vor {{n}} s",
+    "diag_ago_minutes": "vor {{n}} min",
+    "diag_push_error": "Letzter Push-Fehler: {{msg}}"
   },
   "error_reporting": {
     "section_title": "Fehler-Telemetrie (anonym)",
@@ -1001,6 +1020,11 @@
       "config_read": "Gespeicherte Konfiguration konnte nicht gelesen werden.",
       "config_write": "Konfiguration konnte nicht gespeichert werden.",
       "config_parse": "Die gespeicherte Konfiguration ist beschädigt.",
+      "pilot_pending": "Dein GSG-Account wartet noch auf Freigabe durch die VA-Leitung. Sobald er aktiv ist, kannst du AeroACARS nutzen.",
+      "pilot_rejected": "Dieser GSG-Account wurde nicht freigegeben. Bitte wende dich an die VA-Leitung.",
+      "pilot_on_leave": "Dein GSG-Account ist als „im Urlaub\" markiert. Melde dich im Crew-Center zurück, um wieder zu fliegen.",
+      "pilot_suspended": "Dein GSG-Account ist gesperrt. Bitte wende dich an die VA-Leitung.",
+      "pilot_state_unknown": "Dein GSG-Account-Status konnte nicht bestätigt werden. Bitte versuche es später erneut oder wende dich an die VA-Leitung.",
       "unknown": "Ein unerwarteter Fehler ist aufgetreten."
     }
   },
@@ -1147,6 +1171,7 @@
   "resume": {
     "title": "Aktiver Flug erkannt",
     "countdown": "In {{seconds}}s wird der Flug fortgesetzt — solange läuft kein Position-Stream",
+    "position_suspect": "⚠ Die aktuelle Sim-Position weicht stark vom gespeicherten Flug ab — der Sim ist evtl. nach einem Crash neu geladen worden. Kein automatisches Fortsetzen: bitte erst prüfen, dass der Sim sauber geladen ist, dann „Jetzt fortsetzen\" drücken.",
     "adopt_now": "Jetzt fortsetzen",
     "adopting": "Setze fort…",
     "cancel_flight": "Flug abbrechen",
@@ -1492,7 +1517,7 @@
     "flugzeug_weight": "Gewicht",
     "flugzeug_iast": "TD-IAS",
     "flugzeug_pb": "P / B",
-    "flugzeug_peakg": "Peak-G",
+    "flugzeug_peakg": "G-Kraft",
     "flugzeug_wind": "Wind",
     "pill_bahn": "Bahn",
     "pill_laenge": "Länge",

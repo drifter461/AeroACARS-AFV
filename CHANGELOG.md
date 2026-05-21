@@ -4,6 +4,56 @@ Alle nennenswerten Änderungen an AeroACARS. Format: lose an [Keep a Changelog](
 
 ---
 
+## [v0.12.3] — 2026-05-21 · Landing-G FOQA-konforme Messung
+
+Spec: `docs/spec/v0.12.3-landing-g-foqa-measurement.md` (SPEC ACCEPTED, QS R0→R5).
+
+Die Aufsetz-G-Kraft wurde bisher als **roher 50-Hz-Einzelframe-Peak** gescort — schärfer, als ihn ein echter Flugschreiber je aufzeichnen würde (Befund TAP533: 1.95 g für eine an sich saubere Landung). Ab v0.12.3 wird die G-Kraft wie eine echte Flugdaten-Überwachung (FOQA/FDM) gemessen: ein framerate-unabhängiger EMA-Filter (τ ≈ 100 ms) glättet das G-Signal leicht, dann wird der Spitzenwert über das Touchdown-Fenster genommen. Der so gescorte Wert (`scored_g`) speist konsistent **alle** Konsumenten — `sub_g_force`-Score, Touchdown-Klassifikation, G-Force-Forensik-Card, Activity-/ACARS-Text, das phpVMS-PIREP-Feld „Landing G-Force", QuickFlags, das RunwayDiagram, das `LandingScored`-Event und die VPS-Webapp. Der rohe 50-Hz-Peak (`peak_g_load`) bleibt überall als Forensik-Detail erhalten — backward-kompatibel, alte PIREPs/JSONL-Logs deserialisieren unverändert. Die Accident-/Crash-Erkennung nutzt bewusst weiter den rohen Extremwert (Extremwert-Detektion, kein faires Scoring). Methode ist sim-agnostisch — identisch für MSFS und X-Plane. Begleitend: die G-Force-Forensik-Card (Pilot-Client + VPS-Webapp) wurde inhaltlich überarbeitet (gescorter Wert als Headline, Roh-Werte als Forensik-Detail), das `aeroacars-live`-Repo zog parallel nach.
+
+## [v0.12.2] — 2026-05-20 · X-Plane Aircraft-DataRef-Profile (CL650) · Discord-Push-Diagnose
+
+Zwei Streams. Spec: `docs/spec/v0.12.2-xplane-aircraft-dataref-profiles.md`.
+
+**Stream 1 — X-Plane Aircraft-DataRef-Profile (echte Lösung für Study-Level-Add-ons).** Study-Level-X-Plane-Add-ons wie die Hot-Start Challenger 650 fahren Cockpit-/Systemfunktionen über eigene DataRefs und bedienen die Standard-`sim/...`-DataRefs nicht — AeroACARS sah die CL650-Flaps nie (GSG225-Befund). v0.12.1 hat das fail-soft abgefangen; v0.12.2 liefert die echte Lösung. Ein Profil-System erkennt ein bekanntes Study-Level-Flugzeug über den Web-API-Flugzeugtitel **oder** eine RREF-Probe auf einen Signatur-DataRef und abonniert dann dessen add-on-eigene DataRefs. Erstes Profil: die Hot-Start Challenger 650 — Flaps (Hebel 0/20/30/45, gegen die Hersteller-Doku `Wires.txt` verifiziert), Battery-Master, Beacon- und Taxi-Light. LANDING-CONFIG-Prüfung und Approach-Stability-Scoring funktionieren damit für die CL650 wieder voll. Bei einem Flugzeugwechsel zur Laufzeit fällt der Adapter automatisch auf den Standard-Katalog zurück; Flugzeuge ohne Profil bleiben unverändert. Code-QS-Findings R4 (P1: Reset ohne Web-API-Titel) + R5 (P2: stale Titel überstimmt retirete Probe nicht) eingearbeitet.
+
+**Stream 2 — Discord-Push-Diagnose.** Piloten meldeten, die Discord-Live-Presence verschwand nach den Updates, während der Test-Button weiter funktioniert (= Verbindung ok, aber der Flug-Push landet nicht). Der Push-Pfad verschluckte jede Fehlermeldung still. Das Discord-Panel (Einstellungen → Discord) zeigt jetzt „Letzter Discord-Push: vor X s" plus die letzte Fehlermeldung — bleibt die Zeit während eines Flugs stehen, kommt der Push nicht durch. Reine Anzeige/Logging-Erweiterung, kein Wire-Format-Wechsel.
+
+## [v0.12.1] — 2026-05-20 · Pilot-Befunde · Phase-FSM, VA-Härtung, Approach-Stability, Autostart, Resume
+
+Fünf unabhängige Befunde aus dem Piloten-Feedback eines Tages, in einer Release zusammengefasst. Spec: `docs/spec/v0.12.1-phase-fsm-fix-and-va-hardening.md`.
+
+**Stream A — Phasenwechsel Boarding→Pushback gegen Sim-Reload-Glitches gehärtet.** Am Flug BTX8815 sprang die Phase 65 s nach Flugstart auf „Pushback" — ausgelöst von einem einzelnen Telemetrie-Glitch direkt nach einem Sim-Reload (kurzer Geschwindigkeits-Spike, obwohl das Flugzeug mit gesetzter Parkbremse stillstand). Der Übergang verlangt jetzt **echte Bewegung**: Geschwindigkeit über zwei aufeinanderfolgende Messungen plus eine echte Positionsverschiebung von mindestens 5 m. Zusätzlich erkennt der Recorder eine Reload-Lücke (> 10 s ohne Telemetrie) und verwirft das erste, glitch-anfällige Sample danach. Folgefehler behoben: die Off-Block-Zeit (und damit die Blockzeit im PIREP) stimmt wieder.
+
+**Stream B — VA-Härtung: nur aktive GSG-Piloten.** Login, Live-Tracking und PIREP-Provisioning prüfen jetzt den Piloten-Status aus phpVMS. Nur ein **aktiver** Account kommt durch — wartende, abgelehnte, beurlaubte, gesperrte oder gelöschte Accounts werden mit einer status-spezifischen Meldung abgewiesen. Die Durchsetzung läuft client- **und** server-seitig (Recorder). Hintergrund: GitHub-Issue #16.
+
+**Stream C — Approach-Stability fairer bei Study-Level-Add-ons.** Auf Flug GSG225 (Hot-Start Challenger 650, X-Plane) zeigte die Approach-Stability-Card „LANDING CONFIG: INCOMPLETE", obwohl Gear und Flaps gesetzt waren — das Study-Add-on bedient die Standard-Flaps-DataRef nicht. Lässt sich die Flaps-Stellung nicht zuverlässig lesen, wird die Landing-Config jetzt als „nicht bewertbar" angezeigt statt fälschlich rot — und fließt nicht als Strafe in den Score. Außerdem: der Kennwert „max. V/S-Abweichung < 500 ft" ignoriert jetzt Werte unter 50 ft AGL — ein kurzer Ballon im Flare ist kein Anflug-Stabilitätsproblem mehr.
+
+**Stream D — Auto-Start nach Update repariert (macOS).** Nach einem App-Update griff der Auto-Start nicht mehr, bis man ihn einmal aus- und wieder einschaltete. Ursache: ein Frontend-Timing-Fehler überschrieb den gespeicherten Auto-Start-Status beim Start. Behoben — der gespeicherte Stand bleibt jetzt erhalten.
+
+**Stream E — Resume nach Crash sicherer.** Nach einem Sim-Crash lädt das Flugzeug oft an einer beliebigen Boden-Position neu. Bisher übernahm der Resume diese Glitch-Position nach einem 10-Sekunden-Countdown automatisch in den laufenden Flug. Jetzt: passt die Sim-Position nicht zum gespeicherten Flug (Flug war in der Luft, Sim meldet Boden — oder große Distanz-Abweichung), wird **nicht automatisch** fortgesetzt — der Pilot muss aktiv „Flug fortsetzen" bestätigen.
+
+Webapp-Mirror (`aeroacars-live`) zieht die Stream-B-Recorder-Härtung nach.
+
+---
+
+## [v0.12.0] — 2026-05-20 · Bahn-Auslastung · Float-Toleranz fürs faire Brems-Scoring
+
+**Pilot-Beschwerde (BTX8815, Fenix A319, EDVE→LOWS):** exzellent gebremst — kurze Ausrollstrecke (442 m) — und trotzdem nur 80 PT „Bahn-Auslastung". Nachgerechnet: der Score war nach der v0.10.0-Formel korrekt, ABER die Formel gewichtete die Float-Strecke (zu spätes Aufsetzen) 1:1 wie die Ausrollstrecke (das eigentliche Bremsen). Bei diesem Flug waren 55 % der „Bahn-Auslastung" Float — die fehlenden 20 PT kamen vom späten Aufsetzen, nicht vom Bremsen.
+
+**Float-Toleranz (15 % der LDA):** Float innerhalb der ersten 15 % der nutzbaren Bahnlänge gilt jetzt als normal und kostet keine Punkte — nur der Float-Überschuss darüber fließt ins Punkte-Banding ein. Die Ausrollstrecke zählt weiterhin voll. Damit trennt der Score faire Aufsetz-Toleranz von echter Brems-Disziplin. Der genannte Flug springt von 80 auf 100 PT.
+
+**Neue Begründung „long_float":** wenn der Punktverlust ausschließlich vom späten Aufsetzen kam (die Ausrollstrecke allein wäre exzellent gewesen), zeigt die Card jetzt „Bremsweg top — aber spät aufgesetzt" statt einer brems-kritischen Begründung — mit Coach-Tipp Richtung Aim-Point.
+
+**UI:** die Bahn-Auslastungs-Card rendert ihre Info-Zeilen (Aufsetzpunkt, Ausrollstrecke, Bahn) jetzt sprach-lokalisiert (DE/EN/IT). Das „🛬 Wie wird das berechnet?"-Modal erklärt die Float-Toleranz mit einer konkreten Beispiel-Rechnung. Terminologie bereinigt: die Ausrollstrecke endet beim Abrollen von der Bahn (~40 kt), nicht beim Stillstand.
+
+**Sicherheit unverändert:** das Overrun-Risiko (zu nah am Bahnende) wird weiterhin auf der echten, ungekürzten Gesamtdistanz geprüft — die Float-Toleranz versteckt kein echtes Overrun.
+
+**Score-Versionierung:** `score_algorithm_version` 2 → 3. Forward-only — alte PIREPs behalten ihren gespeicherten Score, es wird nichts rückwirkend neu gerechnet. In der „Meine Flüge"-Historie kann dadurch zwischen v2- und v3-Flügen ein kleiner Knick bei der Bahn-Auslastung sichtbar werden; das ist erwartet.
+
+Spec: `docs/spec/v0.12.0-runway-utilization-refinement.md`. Webapp-Mirror (`aeroacars-live`) zieht die identische Score-Logik nach.
+
+---
+
 ## [v0.11.2] — 2026-05-18 · Pilotenwunsch · Touchdown-Chart auch 3 s nach TD
 
 **Pilotenwunsch (ViolonC im Discord):** das Sinkrate-Chart im Landing-Detail soll nicht hart am TD-Punkt enden, sondern auch die ersten 3 Sekunden nach dem Aufsetzen zeigen (Strut-Compression + Rebound + Stabilisierung).

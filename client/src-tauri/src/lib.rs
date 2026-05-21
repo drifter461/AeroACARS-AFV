@@ -186,6 +186,94 @@ fn position_interval(phase: FlightPhase) -> Duration {
 /// add it to the running total. Filters out GPS jitter while parked.
 const DISTANCE_EPSILON_M: f64 = 5.0;
 
+/// v0.12.1 (Stream A LE1): minimum real position displacement (metres)
+/// from the Boarding reference point before the Boarding→Pushback/TaxiOut
+/// transition may fire. A sim-reload velocity glitch can spike
+/// `groundspeed_kt` but cannot move `lat`/`lon` — so genuine displacement
+/// is the trustworthy signal. 5 m is small enough not to delay a real
+/// pushback, large enough to clear GPS jitter (< 1 m parked).
+const MIN_BOARDING_MOVEMENT_M: f64 = 5.0;
+
+/// v0.12.1 (Stream A LE2): a gap between two processed `step_flight`
+/// snapshots longer than `RELOAD_GAP_FACTOR × position_interval(phase)`
+/// is treated as a sim reload/reposition — the first snapshot after the
+/// gap carries glitch-prone velocity values and must not drive a
+/// velocity-derived phase transition.
+const RELOAD_GAP_FACTOR: f64 = 2.5;
+
+/// v0.12.1 (Stream A LE2): true if `gap_secs` between two processed
+/// snapshots is long enough to count as a sim reload/reposition.
+fn is_reload_gap(gap_secs: f64, interval_secs: f64) -> bool {
+    gap_secs > RELOAD_GAP_FACTOR * interval_secs
+}
+
+/// v0.12.1 (Stream A LE2): the Pushback→TaxiOut "powered taxi" signal.
+/// Gated by `!reload_gap_suspect` so a sim-reload glitch tick (which can
+/// spike `groundspeed_kt`) cannot drive the velocity-derived TaxiOut
+/// transition — same rule the Boarding branch already applies.
+fn powered_taxi_move(
+    reload_gap_suspect: bool,
+    on_ground: bool,
+    engines_running: bool,
+    groundspeed_kt: f32,
+) -> bool {
+    !reload_gap_suspect && on_ground && engines_running && groundspeed_kt > 3.0
+}
+
+/// v0.12.1 (Stream A LE1): pure decision for the Boarding→Pushback/TaxiOut
+/// trigger. Real movement = on the surface, groundspeed over threshold
+/// for two consecutive ticks (de-bounce), AND genuine position
+/// displacement past `MIN_BOARDING_MOVEMENT_M`. A velocity glitch can
+/// satisfy the speed checks but never the displacement one.
+fn boarding_real_movement(
+    on_surface: bool,
+    gs_over_threshold: bool,
+    prev_gs_over_threshold: bool,
+    moved_m: f64,
+) -> bool {
+    on_surface
+        && gs_over_threshold
+        && prev_gs_over_threshold
+        && moved_m > MIN_BOARDING_MOVEMENT_M
+}
+
+/// v0.12.1 (Stream E LE14): does the first post-resume sim position look
+/// like a glitchy crash-reload rather than the flight we persisted?
+/// Suspicious when:
+///   1. the persisted phase was airborne but the sim now reports on-ground
+///      (classic sim-crash → reload-on-a-runway), OR
+///   2. the sim position is implausibly far from the last known position.
+/// A separate altitude-delta condition was deliberately dropped (QS-R5):
+/// a pilot legitimately restarting the app mid-climb/descent would almost
+/// always show an altitude delta — too restrictive.
+fn is_resume_position_suspect(
+    persisted_phase: FlightPhase,
+    persisted_pos: Option<(f64, f64)>,
+    snap_on_ground: bool,
+    snap_lat: f64,
+    snap_lon: f64,
+) -> bool {
+    let persisted_airborne = matches!(
+        persisted_phase,
+        FlightPhase::Climb
+            | FlightPhase::Cruise
+            | FlightPhase::Holding
+            | FlightPhase::Descent
+            | FlightPhase::Approach
+            | FlightPhase::Final
+    );
+    if persisted_airborne && snap_on_ground {
+        return true;
+    }
+    if let Some((plat, plon)) = persisted_pos {
+        let drift_nm = ::geo::distance_m(plat, plon, snap_lat, snap_lon) / 1852.0;
+        if drift_nm > RESUME_DRIFT_WARN_NM {
+            return true;
+        }
+    }
+    false
+}
+
 /// Kilograms → pounds. We collect fuel in kg internally because every
 /// SimConnect adapter normalises to SI, but phpVMS-Core's `acars` table
 /// and the PIREP `file` endpoint expect pounds — convert at the boundary.
@@ -1864,6 +1952,21 @@ struct FlightStats {
     was_on_ground: Option<bool>,
     was_parking_brake: Option<bool>,
 
+    // ---- v0.12.1 (Stream A) — Boarding→Pushback de-glitch state ----
+    /// Reference position captured on the first Boarding tick (or after a
+    /// reload gap). The Boarding→Pushback/TaxiOut trigger requires the
+    /// aircraft to have physically moved away from this point — a velocity
+    /// glitch can fake `groundspeed_kt` but not `lat`/`lon`. Runtime-only.
+    boarding_ref_pos: Option<(f64, f64)>,
+    /// True if the previous snapshot already had `groundspeed_kt > 0.5`.
+    /// The pushback trigger needs movement sustained across 2 ticks, not
+    /// a single spike. Runtime-only.
+    prev_gs_over_threshold: bool,
+    /// Wall-clock time of the previous processed `step_flight` snapshot.
+    /// A long gap = sim reload/reposition → the next snapshot is
+    /// glitch-suspect (LE2). Runtime-only.
+    last_step_at: Option<DateTime<Utc>>,
+
     // ---- Block / takeoff / landing timestamps (real-time UTC) ----
     block_off_at: Option<DateTime<Utc>>,
     takeoff_at: Option<DateTime<Utc>>,
@@ -3007,6 +3110,11 @@ pub struct ActiveFlightInfo {
     /// status after an automatic resume (disk or remote). Lets the dashboard
     /// surface a one-time banner with a 10-second cancel window.
     was_just_resumed: bool,
+    /// v0.12.1 (Stream E): true when, on a resume, the current sim position
+    /// looks like a glitchy crash-reload (persisted phase airborne but sim
+    /// on-ground, or implausibly large drift). The resume banner then
+    /// disables its 10-second auto-confirm and requires an explicit click.
+    resume_position_suspect: bool,
     /// Departure stand from MSFS `ATC PARKING NAME` (snapshotted at
     /// the start of the flight). Empty until captured.
     dep_gate: Option<String>,
@@ -3680,6 +3788,23 @@ fn estimate_xplane_touchdown_vs_lua_style(
 const APPROACH_STABILITY_AGL_CAP_FT: f32 = 1500.0;
 const APPROACH_FLARE_CUTOFF_MS: i64 = 3000;
 
+/// v0.12.1 (Stream C LE12): the `max V/S deviation < 500 ft` metric
+/// ignores samples below this height. A V/S excursion at < 50 ft is the
+/// flare / ground-effect, not approach instability — counting it produced
+/// a spurious 826 fpm "deviation" on GSG225 from a small flare balloon.
+/// The 3-second time-based flare cutoff doesn't reach far enough back
+/// when the pilot flares early/long; this height floor is the backstop.
+const MAX_VS_DEV_FLOOR_FT: f32 = 50.0;
+
+/// v0.12.1 (Stream C LE11): if flaps read 0 across the whole approach
+/// gate while the gear is down AND the gate-entry speed is below this
+/// IAS, the flaps dataref is untrustworthy (study-level X-Plane add-ons
+/// such as the Hot-Start CL650 don't drive the standard flap dataref) —
+/// a genuine flapless landing would be considerably faster. The
+/// LANDING-CONFIG check then reports "not assessable" instead of a
+/// false "INCOMPLETE".
+const FLAPS_UNREADABLE_MAX_IAS_KT: f32 = 160.0;
+
 fn compute_approach_stddev(
     buf: &std::collections::VecDeque<ApproachBufferSample>,
     td_ts: Option<DateTime<Utc>>,
@@ -3918,8 +4043,24 @@ fn compute_approach_stability_v2(
         .max_by(|a, b| height_for(a).partial_cmp(&height_for(b)).unwrap())
     {
         let gear_ok = gate_entry.gear_position >= 0.99;
-        let flaps_ok = gate_entry.flaps_position >= 0.70;
-        out.stable_config = Some(gear_ok && flaps_ok);
+        // v0.12.1 (Stream C LE11): detect an unreadable flaps dataref.
+        // Study-level X-Plane add-ons (Hot-Start CL650 etc.) don't drive
+        // the standard flap dataref → flaps_position stays 0 the whole
+        // approach. If gear is down and the gate-entry speed is in the
+        // landing range, flaps-0 is a broken reading, not "pilot forgot
+        // flaps" — report the config as not-assessable (None) rather than
+        // a false "INCOMPLETE" fail. A genuine flapless approach would be
+        // far faster than FLAPS_UNREADABLE_MAX_IAS_KT.
+        let flaps_all_zero = gate_samples.iter().all(|s| s.flaps_position < 0.01);
+        let flaps_unreadable = flaps_all_zero
+            && gear_ok
+            && gate_entry.ias_kt < FLAPS_UNREADABLE_MAX_IAS_KT;
+        if flaps_unreadable {
+            out.stable_config = None;
+        } else {
+            let flaps_ok = gate_entry.flaps_position >= 0.70;
+            out.stable_config = Some(gear_ok && flaps_ok);
+        }
     }
 
     // 7) V/S-Deviation vs 3° ILS-Profil (sekundaer, nur informativ).
@@ -3929,7 +4070,11 @@ fn compute_approach_stability_v2(
         let target_vs = -(s.gs_kt as f64) * 5.31;
         let dev = (s.vs_fpm as f64 - target_vs).abs();
         sum_dev += dev;
-        if height_for(s) <= 500.0 {
+        // v0.12.1 (Stream C LE12): the "< 500 ft" band excludes the
+        // flare / ground-effect regime — a V/S excursion below
+        // MAX_VS_DEV_FLOOR_FT is the flare, not approach instability.
+        let h = height_for(s);
+        if h <= 500.0 && h >= MAX_VS_DEV_FLOOR_FT {
             let dev_f32 = dev as f32;
             if dev_f32 > max_dev_below_500 {
                 max_dev_below_500 = dev_f32;
@@ -4633,6 +4778,34 @@ fn app_info() -> AppInfo {
 /// continuity but the value is overwritten before validation.
 const ALLOWED_PHPVMS_HOST: &str = "africanava.ddns.net";
 
+/// v0.12.1 (Stream B) — phpVMS 7 `UserState::ACTIVE`. Verified against
+/// the official phpVMS source (`app/Enums/UserState.php`): the enum is
+/// `PENDING=0, ACTIVE=1, REJECTED=2, ON_LEAVE=3, SUSPENDED=4, DELETED=5`.
+/// Every state except ACTIVE blocks login.
+const USER_STATE_ACTIVE: i32 = 1;
+
+/// v0.12.1 (Stream B LE6): map a pilot profile's `state` to a login
+/// block reason, or `None` if the pilot may use AeroACARS (ACTIVE).
+///
+/// **Fail-closed:** a missing or unexpected `state` value blocks with
+/// `pilot_state_unknown` — we do not let an unverifiable account through.
+/// The returned `&str` is both the `UiError` code and the i18n key stem
+/// (`login.error.<code>`); `LoginPage.tsx` maps it.
+fn pilot_state_block_reason(profile: &api_client::Profile) -> Option<&'static str> {
+    match profile.state {
+        Some(USER_STATE_ACTIVE) => None,
+        Some(0) => Some("pilot_pending"),
+        Some(2) => Some("pilot_rejected"),
+        Some(3) => Some("pilot_on_leave"),
+        // 4 SUSPENDED + 5 DELETED — both are a hard, definitive block.
+        // The "suspended" message ("account blocked, contact the VA")
+        // fits a deleted account too, so no separate i18n string.
+        Some(4) | Some(5) => Some("pilot_suspended"),
+        // None (field absent) or any unexpected integer → fail-closed.
+        _ => Some("pilot_state_unknown"),
+    }
+}
+
 /// Authenticate against a phpVMS site. On success: stores key in OS keyring,
 /// writes URL to site config, and caches the live `Client` in `AppState`.
 ///
@@ -4655,6 +4828,19 @@ async fn phpvms_login(
     let conn = Connection::new(&locked_url, api_key.trim())?;
     let client = Client::new(conn)?;
     let profile = client.get_profile().await?;
+
+    // v0.12.1 (Stream B LE6): pilot-status gate. Only ACTIVE GSG pilots
+    // may use AeroACARS — a pending / rejected / on-leave / suspended
+    // account is rejected with a status-specific message. The MQTT
+    // credential cache is wiped so a previously-active pilot who is now
+    // blocked does not keep live-tracking from a stale cache (LE7).
+    if let Some(reason) = pilot_state_block_reason(&profile) {
+        clear_mqtt_credentials_cache();
+        return Err(UiError::new(
+            reason,
+            format!("pilot state gate: {reason}"),
+        ));
+    }
 
     secrets::store_api_key(KEYRING_ACCOUNT, api_key.trim())
         .map_err(|e| UiError::new("keyring", e.to_string()))?;
@@ -4891,6 +5077,36 @@ async fn phpvms_load_session(
     let client = Client::new(conn)?;
     match client.get_profile().await {
         Ok(profile) => {
+            // v0.12.1 (Stream B LE6): pilot-status gate on session
+            // restore. A pilot whose GSG account became pending /
+            // suspended / on-leave between sessions must not silently
+            // get their session (and live-tracking) back. Drop the
+            // stored key + MQTT cache and land on the login form — the
+            // explicit re-login then shows the status-specific message.
+            if let Some(reason) = pilot_state_block_reason(&profile) {
+                let _ = secrets::delete_api_key(KEYRING_ACCOUNT);
+                let _ = clear_site_config(&app);
+                clear_mqtt_credentials_cache();
+                log_activity_handle(
+                    &app,
+                    ActivityLevel::Warn,
+                    "AeroACARS-Sitzung beendet — GSG-Account nicht aktiv"
+                        .to_string(),
+                    Some(format!(
+                        "Status-Gate: {reason}. Bitte neu einloggen oder \
+                         die VA-Leitung kontaktieren."
+                    )),
+                );
+                // v0.12.1 (Stream B LE6, QS-P2): return the block reason as
+                // a UiError (not a silent `Ok(None)`) so the login form can
+                // surface the status-specific message. The pilot still
+                // lands on the login form — App.tsx maps this to
+                // `loggedOut` + an initial error.
+                return Err(UiError::new(
+                    reason,
+                    format!("pilot state gate (restore): {reason}"),
+                ));
+            }
             let base_url = client.connection().base_url().to_string();
             *state.client.lock().expect("client mutex") = Some(client.clone());
             cache_pilot(&state, &profile);
@@ -6341,7 +6557,7 @@ async fn airport_get(
 
 // ---- Flight workflow ----
 
-fn flight_info(flight: &ActiveFlight) -> ActiveFlightInfo {
+fn flight_info(flight: &ActiveFlight, resume_position_suspect: bool) -> ActiveFlightInfo {
     let stats = flight.stats.lock().expect("flight stats");
     // Don't consume here — the flag stays true until the resume banner has
     // run its course (flight_resume_confirm or flight_cancel clears it).
@@ -6371,6 +6587,7 @@ fn flight_info(flight: &ActiveFlight) -> ActiveFlightInfo {
         landing_rate_fpm: stats.canonical_landing_rate_fpm(),
         landing_g_force: stats.landing_g_force,
         was_just_resumed,
+        resume_position_suspect,
         dep_gate: stats.dep_gate.clone(),
         arr_gate: stats.arr_gate.clone(),
         approach_runway: stats.approach_runway.clone(),
@@ -6447,9 +6664,41 @@ fn phase_to_snake(phase: FlightPhase) -> &'static str {
 }
 
 #[tauri::command]
-fn flight_status(state: tauri::State<'_, AppState>) -> Option<ActiveFlightInfo> {
+fn flight_status(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Option<ActiveFlightInfo> {
     let guard = state.active_flight.lock().expect("active_flight lock");
-    guard.as_ref().map(|f| flight_info(f.as_ref()))
+    let flight = guard.as_ref()?;
+    // v0.12.1 (Stream E): while the resume banner is up, check on every
+    // poll whether the current sim position matches the persisted flight.
+    // If the sim crashed and reloaded the aircraft on the ground (or far
+    // away), the banner must NOT auto-confirm — the pilot has to click.
+    let resume_position_suspect = if flight.was_just_resumed.load(Ordering::Relaxed) {
+        match current_snapshot(&app) {
+            Some(snap) => {
+                let (phase, pos) = {
+                    let stats = flight.stats.lock().expect("flight stats");
+                    let pos = match (stats.last_lat, stats.last_lon) {
+                        (Some(la), Some(lo)) => Some((la, lo)),
+                        _ => None,
+                    };
+                    (stats.phase, pos)
+                };
+                is_resume_position_suspect(
+                    phase,
+                    pos,
+                    snap.on_ground,
+                    snap.lat,
+                    snap.lon,
+                )
+            }
+            None => false,
+        }
+    } else {
+        false
+    };
+    Some(flight_info(flight.as_ref(), resume_position_suspect))
 }
 
 #[derive(Serialize)]
@@ -6757,7 +7006,7 @@ async fn flight_adopt(
     // and the user can still cancel. `flight_resume_confirm` spawns it.
     let _ = client;
 
-    let info = flight_info(flight.as_ref());
+    let info = flight_info(flight.as_ref(), false);
     log_activity(
         &state,
         ActivityLevel::Info,
@@ -7517,7 +7766,7 @@ async fn flight_start(
     // continuation history we want to keep.
     clear_activity_log_for_new_flight(&app);
 
-    let info = flight_info(flight.as_ref());
+    let info = flight_info(flight.as_ref(), false);
     log_activity(
         &state,
         ActivityLevel::Info,
@@ -8045,7 +8294,7 @@ async fn flight_start_manual(
     spawn_touchdown_sampler(app.clone(), Arc::clone(&flight));
     clear_activity_log_for_new_flight(&app);
 
-    let info = flight_info(flight.as_ref());
+    let info = flight_info(flight.as_ref(), false);
     log_activity(
         &state,
         ActivityLevel::Info,
@@ -9085,6 +9334,9 @@ fn compute_aggregate_master_score(
         // `score_basis_vs_fpm()` Doc.
         vs_fpm: score_basis_vs_fpm(stats),
         peak_g_load: stats.landing_peak_g_force,
+        // v0.12.3 (LE8): zentraler Scored-G-Helper — EMA-Wert aus der
+        // Forensik, sonst raw_fallback. Nie `None` an den Score (QS-P2).
+        scored_g_load: Some(score_g_for_stats(stats).scored_g),
         // v0.7.6 P2-B: zentraler Helper statt direkten Read.
         bounce_count: Some(scored_bounce_count_for_score(stats)),
         approach_vs_stddev_fpm: stats.approach_vs_stddev_fpm,
@@ -9270,6 +9522,9 @@ where
         // `score_basis_vs_fpm()` Doc.
         vs_fpm: score_basis_vs_fpm(stats),
         peak_g_load: stats.landing_peak_g_force,
+        // v0.12.3 (LE8): zentraler Scored-G-Helper — EMA-Wert aus der
+        // Forensik, sonst raw_fallback. Nie `None` an den Score (QS-P2).
+        scored_g_load: Some(score_g_for_stats(stats).scored_g),
         // v0.7.6 P2-B: zentraler Helper statt direkten Read.
         bounce_count: Some(scored_bounce_count_for_score(stats)),
         approach_vs_stddev_fpm: stats.approach_vs_stddev_fpm,
@@ -9521,6 +9776,10 @@ where
         vs_smoothed_1500ms_fpm: ana_f32(&stats.landing_analysis, "vs_smoothed_1500ms_fpm"),
         peak_g_post_500ms: ana_f32(&stats.landing_analysis, "peak_g_post_500ms"),
         peak_g_post_1000ms: ana_f32(&stats.landing_analysis, "peak_g_post_1000ms"),
+        // v0.12.3 (LE4/LE7): gescorter G (EMA, sonst raw_fallback) + Methode
+        // — die G-Force-Card headlinet diesen Wert.
+        landing_scored_g_force: Some(score_g_for_stats(stats).scored_g),
+        scored_g_method: Some(score_g_for_stats(stats).method.as_str().to_string()),
         // v0.7.17 (B-009): G-Force-Forensik
         g_at_edge: ana_f32(&stats.landing_analysis, "g_at_edge"),
         g_smoothed_250ms_post: ana_f32(&stats.landing_analysis, "g_smoothed_250ms_post"),
@@ -9644,7 +9903,7 @@ where
         // Record mit dem LDA-basierten Bahn-Auslastungs-Score gebaut
         // wurde. UI (LandingPanel.tsx) gated darauf das Rendering der
         // neuen `extra`-Lines + erweiterten Rationale-/Warning-Keys.
-        score_algorithm_version: Some(2),
+        score_algorithm_version: Some(3),
     })
 }
 
@@ -10845,6 +11104,9 @@ async fn flight_end(
                             // v0.7.17 (B-015a QS-Fix): Edge-Wert hat Vorrang.
                             vs_fpm: score_basis_vs_fpm(&stats),
                             peak_g_load: stats.landing_peak_g_force,
+                            // v0.12.3 (LE8): zentraler Scored-G-Helper —
+                            // EMA-Wert, sonst raw_fallback; nie None (QS-P2).
+                            scored_g_load: Some(score_g_for_stats(&stats).scored_g),
                             // v0.7.6 P2-B: zentraler Helper statt direkten Read.
                             bounce_count: Some(scored_bounce_count_for_score(&stats)),
                             approach_vs_stddev_fpm: stats.approach_vs_stddev_fpm,
@@ -10862,7 +11124,8 @@ async fn flight_end(
                         };
                         // v0.10.0 (#runway-utilization-score): LDA-basierter
                         // Bahn-Auslastungs-Score. Markiert weiter unten am
-                        // PirepPayload via score_algorithm_version: Some(2).
+                        // PirepPayload via score_algorithm_version: Some(3)
+                        // (v0.12.0: Float-Toleranz-Refinement).
                         fill_v2_rollout_fields(&mut scoring_input, &stats, &flight.arr_airport);
                         let payload_sub_scores =
                             landing_scoring::compute_sub_scores(&scoring_input);
@@ -11030,7 +11293,7 @@ async fn flight_end(
                             // Bahn-Auslastungs-Algorithmus stammen. Webapp
                             // (LandingAnalysis.tsx) gated darauf das
                             // Rendering der neuen extra-Lines.
-                            score_algorithm_version: Some(2),
+                            score_algorithm_version: Some(3),
                         }
                     };
                     // v0.5.34: PIREP-Forensik ins JSONL — Block/Flight-Time,
@@ -12683,6 +12946,34 @@ fn ana_u32(v: &Option<serde_json::Value>, key: &str) -> Option<u32> {
 fn ana_bool(v: &Option<serde_json::Value>, key: &str) -> Option<bool> {
     v.as_ref()?.get(key)?.as_bool()
 }
+/// v0.12.3: String aus der Forensik-Analyse-Map (z. B. `scored_g_method`).
+fn ana_str(v: &Option<serde_json::Value>, key: &str) -> Option<String> {
+    Some(v.as_ref()?.get(key)?.as_str()?.to_string())
+}
+
+/// v0.12.3 (LE8): **der eine** Scored-G-Wert, den jeder Pfad eines
+/// `FlightStats` nutzt — Touchdown-Klassifikation, Activity-/ACARS-Text,
+/// MQTT-Touchdown-Payload und das `LandingScored`-Event.
+///
+/// Liest den EMA-geglätteten `scored_g` aus der Forensik-Analyse. Gibt es
+/// kein Touchdown-Fenster (`landing_analysis` ist `None`), fällt der Wert
+/// definiert auf den rohen Peak zurück (`raw_fallback`, LE8) — **kein**
+/// Pfad bekommt je `None`/`0` an den Score.
+fn score_g_for_stats(stats: &FlightStats) -> recorder::ScoredG {
+    if let Some(scored) = ana_f32(&stats.landing_analysis, "scored_g") {
+        let method = match ana_str(&stats.landing_analysis, "scored_g_method").as_deref() {
+            Some("raw_fallback") => recorder::ScoredGMethod::RawFallback,
+            _ => recorder::ScoredGMethod::EmaMax,
+        };
+        recorder::ScoredG {
+            scored_g: scored,
+            raw_peak: stats.landing_peak_g_force.unwrap_or(scored),
+            method,
+        }
+    } else {
+        recorder::scored_g_raw_fallback(stats.landing_peak_g_force.unwrap_or(0.0))
+    }
+}
 
 /// v0.5.39: Forensik-Bewertung der Landung aus dem 50-Hz-Sample-Buffer
 /// um den TD-Edge. Gibt JSON-Map zurück, die im LandingAnalysis-Event in
@@ -13001,6 +13292,12 @@ fn compute_landing_analysis(
     let pre_count = samples.iter().filter(|s| s.at.timestamp_millis() < edge_ms).count();
     let post_count = samples.len() - pre_count;
 
+    // v0.12.3 (LE1–LE3): FOQA-konformer gescorter G-Wert — EMA-geglätteter
+    // Fenster-Peak statt rohem 50-Hz-Einzelframe-Peak. Einzige
+    // Berechnungsstelle (LE8); alle Consumer lesen `scored_g` aus dieser
+    // Analyse-Map.
+    let scored = recorder::compute_scored_g(samples, edge_at);
+
     json!({
         "vs_at_edge_fpm": vs_at_edge,
         "vs_smoothed_250ms_fpm": vs_250,
@@ -13009,6 +13306,11 @@ fn compute_landing_analysis(
         "vs_smoothed_1500ms_fpm": vs_1500,
         "peak_g_post_500ms": pg_500,
         "peak_g_post_1000ms": pg_1000,
+        // v0.12.3 (LE1): EMA-geglätteter Scored-G (FOQA-Methode) — der
+        // Wert, auf dem die Landung gescort wird. `peak_g_post_*` bleibt
+        // der rohe Forensik-Peak.
+        "scored_g": scored.scored_g,
+        "scored_g_method": scored.method.as_str(),
         // v0.7.17 (B-009): G-Force-Forensik
         "g_at_edge": g_at_edge,
         "g_smoothed_250ms_post": g_smoothed_250ms_post,
@@ -13834,8 +14136,11 @@ fn spawn_touchdown_sampler(app: AppHandle, flight: Arc<ActiveFlight>) {
                         .unwrap_or(s.bounce_count);
                     s.bounce_count = scored_bounce;
                     let peak_vs = s.landing_peak_vs_fpm.unwrap_or(0.0);
-                    let peak_g = s.landing_peak_g_force.unwrap_or(0.0);
-                    let new_score = LandingScore::classify(peak_vs, peak_g, scored_bounce);
+                    // v0.12.3 (LE8/QS-P1): classify on the EMA-scored G, not
+                    // the raw 50 Hz peak — a single raw spike must not push
+                    // the landing to Hard/Severe on its own.
+                    let scored_g = score_g_for_stats(&s).scored_g;
+                    let new_score = LandingScore::classify(peak_vs, scored_g, scored_bounce);
                     s.landing_score = Some(new_score);
                     s.landing_score_finalized = true;
                     // Reset announcement-flag damit announce_landing_score den
@@ -14427,6 +14732,13 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                             bank_deg: stats.landing_bank_deg,
                             g_load: stats.landing_g_force,
                             peak_g_load: stats.landing_peak_g_force,
+                            // v0.12.3 (LE7/LE8): zentraler Scored-G-Helper —
+                            // EMA-Wert, sonst raw_fallback; nie None (QS-P2).
+                            // peak_g_load (oben) bleibt der rohe Wert.
+                            scored_g_load: Some(score_g_for_stats(&stats).scored_g),
+                            scored_g_method: Some(
+                                score_g_for_stats(&stats).method.as_str().to_string(),
+                            ),
                             sideslip_deg: stats.touchdown_sideslip_deg,
                             headwind_kt: stats.landing_headwind_kt,
                             crosswind_kt: stats.landing_crosswind_kt,
@@ -14721,7 +15033,7 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                             // dass das nachgelagert berechnete sub_scores-
                             // Array via sub_rollout_v2 (LDA-basiert)
                             // entstanden ist.
-                            score_algorithm_version: Some(2),
+                            score_algorithm_version: Some(3),
                         }
                     })
                 };
@@ -15241,6 +15553,12 @@ fn extract_icao_code(raw: &str) -> Option<String> {
 fn apply_accident_heuristic(stats: &mut FlightStats, analysis: &serde_json::Value) {
     let input = accident::AccidentHeuristicInput {
         vs_at_edge_fpm: ana_f32(&Some(analysis.clone()), "vs_at_edge_fpm"),
+        // v0.12.3 (LE10): Accident-/Crash-Erkennung nutzt BEWUSST den
+        // rohen `peak_g_load`, NICHT den EMA-geglätteten `scored_g`.
+        // Crash-Detektion ist Extremwert-Detektion — der schärfste Wert
+        // ist der relevante; die EMA-Glättung (faire Pilot-Bewertung)
+        // würde einen Grenzfall-Crash unter die Schwelle drücken. Nicht
+        // versehentlich auf `scored_g` umstellen.
         peak_g_load: stats.landing_peak_g_force,
         sideslip_deg: stats.touchdown_sideslip_deg,
         landing_wing_strike_severity_pct: stats.landing_wing_strike_severity_pct,
@@ -15525,6 +15843,25 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
         return None;
     }
 
+    // v0.12.1 (Stream A LE2): reload-gap detection. A gap between two
+    // processed snapshots well above the expected tick interval means the
+    // sim was reloading / repositioning — the first snapshot after the gap
+    // carries glitch-prone velocity values (verified: BTX8815 EDVE, an
+    // 11 s gap produced a spurious gs 2.6 kt tick with zero actual
+    // displacement). The Boarding branch uses this to skip velocity-
+    // derived transitions on that one suspect tick.
+    let interval_secs = position_interval(prev_phase).as_secs_f64();
+    let reload_gap_suspect = stats
+        .last_step_at
+        .map(|prev| {
+            is_reload_gap(
+                (now - prev).num_milliseconds() as f64 / 1000.0,
+                interval_secs,
+            )
+        })
+        .unwrap_or(false);
+    stats.last_step_at = Some(now);
+
     // Match on a local Copy so the rest of the body is free to mutate `stats`.
     match prev_phase {
         FlightPhase::Boarding => {
@@ -15557,7 +15894,41 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
             let on_surface = snap.on_ground
                 || (snap.altitude_agl_ft < 5.0
                     && snap.vertical_speed_fpm.abs() < 50.0);
-            if on_surface && snap.groundspeed_kt > 0.5 {
+            // v0.12.1 (Stream A LE1+LE2): de-glitch the Boarding→Pushback
+            // / TaxiOut trigger. A single `groundspeed_kt > 0.5` sample is
+            // NOT enough — a sim-reload glitch can spike groundspeed while
+            // the aircraft sits still (verified BTX8815: post-reload tick
+            // gs 2.6 kt, bit-identical lat/lon, parking brake set). We now
+            // require BOTH: gs sustained across 2 ticks AND real position
+            // displacement (> MIN_BOARDING_MOVEMENT_M) from a reference
+            // point. lat/lon can't be faked by a velocity glitch. A
+            // reload-suspect tick (LE2) re-baselines the reference and
+            // triggers nothing.
+            let gs_over_threshold = snap.groundspeed_kt > 0.5;
+            let real_movement = if reload_gap_suspect {
+                stats.boarding_ref_pos = Some((snap.lat, snap.lon));
+                stats.prev_gs_over_threshold = false;
+                false
+            } else {
+                if stats.boarding_ref_pos.is_none() {
+                    stats.boarding_ref_pos = Some((snap.lat, snap.lon));
+                }
+                let moved_m = stats
+                    .boarding_ref_pos
+                    .map(|(rlat, rlon)| {
+                        ::geo::distance_m(rlat, rlon, snap.lat, snap.lon)
+                    })
+                    .unwrap_or(0.0);
+                let moved = boarding_real_movement(
+                    on_surface,
+                    gs_over_threshold,
+                    stats.prev_gs_over_threshold,
+                    moved_m,
+                );
+                stats.prev_gs_over_threshold = gs_over_threshold;
+                moved
+            };
+            if real_movement {
                 stats.block_off_at = Some(now);
                 // Note: block_fuel_kg is tracked as a running peak
                 // (see top of step_flight), not captured here. APU
@@ -15631,7 +16002,10 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
             // glider winch launches fire correctly. AGL > 3 ft +
             // VS > 100 fpm remain as the safety net against sim-
             // glitch on_ground-flicker during boarding.
-            else if was_on_ground
+            // v0.12.1 (Stream A LE2): a reload-suspect tick must not drive
+            // the velocity-derived vertical-takeoff hatch either.
+            else if !reload_gap_suspect
+                && was_on_ground
                 && !snap.on_ground
                 && snap.altitude_agl_ft > 3.0
                 && snap.vertical_speed_fpm > 100.0
@@ -15696,9 +16070,16 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
             // 9 h hängen geblieben weil pushback_state konstant 3 war).
             const PUSHBACK_DWELL_SECS: i64 = 10;
             let engines_running = engines_effectively_running(&stats, snap, now);
-            let powered_taxi = snap.on_ground
-                && engines_running
-                && snap.groundspeed_kt > 3.0;
+            // v0.12.1 (Stream A LE2): gate the velocity-derived TaxiOut
+            // signal on `!reload_gap_suspect` — a reload glitch tick must
+            // not flip Pushback→TaxiOut any more than it may flip
+            // Boarding→Pushback.
+            let powered_taxi = powered_taxi_move(
+                reload_gap_suspect,
+                snap.on_ground,
+                engines_running,
+                snap.groundspeed_kt,
+            );
             // tug_done greift nur wenn der State MAL aktiv (≠3) war
             let tug_done = snap.pushback_state == Some(3)
                 && stats.saw_pushback_state_active;
@@ -17013,8 +17394,10 @@ fn step_flight(flight: &ActiveFlight, snap: &SimSnapshot) -> Option<FlightPhase>
                     // Touchdown-Event wird im PIREP als „score not
                     // captured" markiert.
                     if let Some(peak_vs) = stats.landing_peak_vs_fpm {
-                        let peak_g = stats.landing_peak_g_force.unwrap_or(0.0);
-                        let score = LandingScore::classify(peak_vs, peak_g, stats.bounce_count);
+                        // v0.12.3 (LE8/QS-P1): classify on the scored G
+                        // (raw_fallback here — no forensics window).
+                        let scored_g = score_g_for_stats(&stats).scored_g;
+                        let score = LandingScore::classify(peak_vs, scored_g, stats.bounce_count);
                         stats.landing_score = Some(score);
                     } else {
                         tracing::warn!(
@@ -17771,9 +18154,16 @@ fn build_pirep_fields(
         let value = stats.landing_peak_vs_fpm.unwrap_or(rate);
         f.insert("Landing Rate".into(), format!("{:.0}", value));
     }
-    if let Some(g) = stats.landing_peak_g_force.or(stats.landing_g_force) {
+    if stats.landing_peak_g_force.or(stats.landing_g_force).is_some() {
         // v0.5.16: pure numeric (no " G" suffix). Some maintenance
         // plugins also read this; same is_numeric() reasoning.
+        //
+        // v0.12.3: das phpVMS-/Wartungs-Feld trägt denselben **gescorten**
+        // (EMA, FOQA-Methode) G-Wert wie die Pilot-Anzeige — nicht den
+        // rohen 50-Hz-Einzelframe-Peak. Pilot-Anzeige und Maintenance-
+        // Penalty-Basis müssen konsistent sein (sonst sieht der Pilot
+        // 1.78, das Plugin straft auf 1.95).
+        let g = score_g_for_stats(stats).scored_g;
         f.insert("Landing G-Force".into(), format!("{:.2}", g));
     }
     if let Some(p) = stats.landing_pitch_deg {
@@ -18406,6 +18796,9 @@ fn build_pirep_notes(flight: &ActiveFlight, stats: &FlightStats) -> String {
         // `score_basis_vs_fpm()` Doc.
         vs_fpm: score_basis_vs_fpm(stats),
         peak_g_load: stats.landing_peak_g_force,
+        // v0.12.3 (LE8): zentraler Scored-G-Helper — EMA-Wert aus der
+        // Forensik, sonst raw_fallback. Nie `None` an den Score (QS-P2).
+        scored_g_load: Some(score_g_for_stats(stats).scored_g),
         // v0.7.6 P2-B: zentraler Helper statt direkten Read.
         bounce_count: Some(scored_bounce_count_for_score(stats)),
         approach_vs_stddev_fpm: stats.approach_vs_stddev_fpm,
@@ -18623,6 +19016,10 @@ fn announce_landing_score(app: &AppHandle, flight: &ActiveFlight) -> Option<Stri
     let peak_vs = stats.landing_peak_vs_fpm.unwrap_or(0.0);
     let peak_g = stats.landing_peak_g_force.unwrap_or(0.0);
     let bounces = stats.bounce_count;
+    // v0.12.3 (LE7/LE8): der gescorte G-Wert (EMA, sonst raw_fallback) —
+    // für den Activity-/ACARS-Text UND das persistierte LandingScored-
+    // Event. `peak_g` (oben) bleibt der rohe Wert für `peak_g_force`.
+    let sg = score_g_for_stats(&stats);
     let level = match score {
         LandingScore::Smooth | LandingScore::Acceptable => ActivityLevel::Info,
         LandingScore::Firm => ActivityLevel::Info,
@@ -18696,7 +19093,7 @@ fn announce_landing_score(app: &AppHandle, flight: &ActiveFlight) -> Option<Stri
         Some(format!(
             "V/S {:.0} fpm, G {:.2}{} — {}",
             peak_vs, // signed: negative = descent, matches the PIREP
-            peak_g,
+            sg.scored_g, // v0.12.3 (LE7): scored (EMA) G, not the raw peak
             bounce_part,
             master_text,
         )),
@@ -18719,6 +19116,9 @@ fn announce_landing_score(app: &AppHandle, flight: &ActiveFlight) -> Option<Stri
             peak_vs_fpm: peak_vs,
             peak_g_force: peak_g,
             bounce_count: bounces,
+            // v0.12.3 (LE7): EMA-Scored-G additiv; peak_g_force bleibt roh.
+            scored_g_force: Some(sg.scored_g),
+            scored_g_method: Some(sg.method.as_str().to_string()),
         },
     );
     // Re-acquire to flag it as announced.
@@ -18729,7 +19129,7 @@ fn announce_landing_score(app: &AppHandle, flight: &ActiveFlight) -> Option<Stri
         touchdown_grade,
         score.label(),
         peak_vs,
-        peak_g,
+        sg.scored_g, // v0.12.3 (LE7): scored (EMA) G, not the raw peak
         bounce_part,
         master_text,
     ))
@@ -23716,6 +24116,297 @@ mod sim_pause_tests {
         let decoded: PersistedFlightStats =
             serde_json::from_str(legacy_json).expect("legacy json must load");
         assert_eq!(decoded.current_pause_reason, None);
+    }
+
+    // ---- v0.12.1 Stream A — Boarding→Pushback de-glitch (LE1 + LE2) ----
+
+    #[test]
+    fn boarding_glitch_sample_is_not_real_movement() {
+        // BTX8815: a post-reload tick spiked gs to 2.6 kt but the aircraft
+        // had not moved (bit-identical lat/lon → 0 m displacement). That
+        // must NOT count as real movement → no Boarding→Pushback.
+        assert!(!boarding_real_movement(true, true, true, 0.0));
+    }
+
+    #[test]
+    fn boarding_single_gs_spike_is_not_real_movement() {
+        // gs over threshold this tick but not the previous one — not
+        // sustained (no de-bounce) → no transition, even with displacement.
+        assert!(!boarding_real_movement(true, true, false, 12.0));
+    }
+
+    #[test]
+    fn boarding_sustained_movement_with_displacement_triggers() {
+        // gs over threshold across two ticks + real displacement
+        // > MIN_BOARDING_MOVEMENT_M → genuine movement.
+        assert!(boarding_real_movement(true, true, true, 6.0));
+    }
+
+    #[test]
+    fn boarding_movement_below_threshold_does_not_trigger() {
+        // 4 m sits inside the GPS-jitter band (< MIN_BOARDING_MOVEMENT_M).
+        assert!(!boarding_real_movement(true, true, true, 4.0));
+    }
+
+    #[test]
+    fn boarding_airborne_sample_is_not_surface_movement() {
+        // not on the surface → the Boarding pushback trigger never fires.
+        assert!(!boarding_real_movement(false, true, true, 50.0));
+    }
+
+    #[test]
+    fn reload_gap_detects_btx8815_eleven_second_gap() {
+        // BTX8815 EDVE: an 11 s gap in Boarding (position_interval = 4 s).
+        // 11 > 2.5 × 4 = 10 → reload-suspect, the glitch tick is ignored.
+        assert!(is_reload_gap(11.0, 4.0));
+    }
+
+    #[test]
+    fn reload_gap_ignores_normal_tick_cadence() {
+        // A normal ~4-5 s Boarding tick is not a reload gap. The threshold
+        // is exclusive: exactly 2.5× the interval does not count.
+        assert!(!is_reload_gap(5.0, 4.0));
+        assert!(!is_reload_gap(10.0, 4.0));
+    }
+
+    #[test]
+    fn pushback_reload_gap_does_not_taxiout() {
+        // QS-P2: a reload-suspect tick must not drive Pushback→TaxiOut
+        // either — even with engines on and groundspeed over threshold.
+        assert!(!powered_taxi_move(true, true, true, 12.0));
+        // Without the reload gap, the same inputs DO mean powered taxi.
+        assert!(powered_taxi_move(false, true, true, 12.0));
+        // Below the 3 kt threshold it is never powered taxi.
+        assert!(!powered_taxi_move(false, true, true, 2.0));
+    }
+
+    // ---- v0.12.1 Stream E — resume position check (LE14) ----
+
+    #[test]
+    fn resume_suspect_when_airborne_phase_but_on_ground() {
+        // Sim crash in the cruise → reload spawns the aircraft on a runway.
+        assert!(is_resume_position_suspect(
+            FlightPhase::Cruise,
+            Some((52.0, 10.0)),
+            true,  // on_ground
+            52.0,
+            10.0,
+        ));
+    }
+
+    #[test]
+    fn resume_suspect_on_large_drift() {
+        // Persisted near (52,10), sim now ~60 NM away (1° latitude).
+        assert!(is_resume_position_suspect(
+            FlightPhase::Cruise,
+            Some((52.0, 10.0)),
+            false,
+            53.0,
+            10.0,
+        ));
+    }
+
+    #[test]
+    fn resume_not_suspect_on_altitude_delta_while_airborne() {
+        // Airborne → still airborne, position matches. A pure altitude
+        // delta is NOT flagged (the altitude condition was dropped, QS-R5).
+        assert!(!is_resume_position_suspect(
+            FlightPhase::Descent,
+            Some((52.0, 10.0)),
+            false, // still airborne
+            52.0,
+            10.0,
+        ));
+    }
+
+    #[test]
+    fn resume_not_suspect_when_position_matches() {
+        // App restart, sim kept running — ground phase, on ground, no drift.
+        assert!(!is_resume_position_suspect(
+            FlightPhase::Boarding,
+            Some((52.0, 10.0)),
+            true,
+            52.0,
+            10.0,
+        ));
+    }
+
+    // ---- v0.12.1 Stream C — approach-stability fixes (LE11 + LE12) ----
+
+    fn approach_sample(
+        agl: f32,
+        gs: f32,
+        ias: f32,
+        vs: f32,
+        gear: f32,
+        flaps: f32,
+    ) -> ApproachBufferSample {
+        ApproachBufferSample {
+            at: Utc::now(),
+            agl_ft: agl,
+            msl_ft: agl,
+            gs_kt: gs,
+            ias_kt: ias,
+            vs_fpm: vs,
+            bank_deg: 0.0,
+            heading_true_deg: 0.0,
+            gear_position: gear,
+            flaps_position: flaps,
+            selected_runway: None,
+            stall_warning: false,
+        }
+    }
+
+    #[test]
+    fn landing_config_softfails_when_flaps_unreadable() {
+        // GSG225 / Hot-Start CL650: flaps dataref reads 0 the whole
+        // approach, gear is down, speed is in the landing range. The
+        // LANDING-CONFIG check must report not-assessable (None), not a
+        // false "INCOMPLETE".
+        let buf: std::collections::VecDeque<ApproachBufferSample> = [
+            approach_sample(900.0, 130.0, 132.0, -650.0, 1.0, 0.0),
+            approach_sample(600.0, 128.0, 130.0, -620.0, 1.0, 0.0),
+            approach_sample(300.0, 125.0, 128.0, -600.0, 1.0, 0.0),
+        ]
+        .into_iter()
+        .collect();
+        let out = compute_approach_stability_v2(&buf, None, None);
+        assert_eq!(out.stable_config, None, "flaps unreadable → not assessable");
+    }
+
+    #[test]
+    fn landing_config_still_fails_genuine_no_flaps() {
+        // Flaps 0 but the approach speed is far too high for a flapped
+        // landing — this is a genuine no-flaps approach, keep the fail.
+        let buf: std::collections::VecDeque<ApproachBufferSample> = [
+            approach_sample(900.0, 200.0, 200.0, -650.0, 1.0, 0.0),
+            approach_sample(600.0, 195.0, 195.0, -620.0, 1.0, 0.0),
+            approach_sample(300.0, 190.0, 190.0, -600.0, 1.0, 0.0),
+        ]
+        .into_iter()
+        .collect();
+        let out = compute_approach_stability_v2(&buf, None, None);
+        assert_eq!(out.stable_config, Some(false), "genuine no-flaps → fail");
+    }
+
+    #[test]
+    fn landing_config_ok_with_flaps_extended() {
+        let buf: std::collections::VecDeque<ApproachBufferSample> = [
+            approach_sample(900.0, 130.0, 132.0, -650.0, 1.0, 0.85),
+            approach_sample(600.0, 128.0, 130.0, -620.0, 1.0, 0.85),
+            approach_sample(300.0, 125.0, 128.0, -600.0, 1.0, 0.85),
+        ]
+        .into_iter()
+        .collect();
+        let out = compute_approach_stability_v2(&buf, None, None);
+        assert_eq!(out.stable_config, Some(true));
+    }
+
+    #[test]
+    fn max_vs_dev_excludes_flare_balloon_below_50ft() {
+        // GSG225: a +200 fpm flare balloon at 9 ft AGL must NOT show up
+        // as an approach-stability deviation; a real -300 fpm excursion
+        // at 200 ft must. Without the height floor the 9 ft sample
+        // produced a spurious ~840 fpm "deviation".
+        let buf: std::collections::VecDeque<ApproachBufferSample> = [
+            approach_sample(800.0, 120.0, 130.0, -640.0, 1.0, 0.85),
+            approach_sample(200.0, 120.0, 128.0, -300.0, 1.0, 0.85),
+            approach_sample(9.0, 120.0, 120.0, 200.0, 1.0, 0.85),
+        ]
+        .into_iter()
+        .collect();
+        let out = compute_approach_stability_v2(&buf, None, None);
+        let max_dev = out
+            .max_vs_deviation_below_500_fpm
+            .expect("a sub-500 ft sample exists");
+        // target at 120 kt ≈ -637 fpm; 200 ft sample dev ≈ 337,
+        // 9 ft balloon dev ≈ 837 — the balloon must be excluded.
+        assert!(max_dev < 500.0, "flare balloon excluded, got {max_dev}");
+        assert!(max_dev > 200.0, "real 200 ft excursion kept, got {max_dev}");
+    }
+
+    // ---- v0.12.1 Stream B — pilot-status gate (LE6) ----
+
+    fn profile_with_state(state: Option<i32>) -> api_client::Profile {
+        api_client::Profile {
+            id: 1,
+            pilot_id: 1,
+            ident: None,
+            name: "Test Pilot".to_string(),
+            email: None,
+            airline_id: None,
+            curr_airport: None,
+            home_airport: None,
+            airline: None,
+            rank: None,
+            callsign: None,
+            state,
+        }
+    }
+
+    #[test]
+    fn pilot_state_active_is_allowed() {
+        assert_eq!(pilot_state_block_reason(&profile_with_state(Some(1))), None);
+    }
+
+    #[test]
+    fn pilot_state_pending_blocks() {
+        assert_eq!(
+            pilot_state_block_reason(&profile_with_state(Some(0))),
+            Some("pilot_pending"),
+        );
+    }
+
+    #[test]
+    fn pilot_state_rejected_blocks() {
+        assert_eq!(
+            pilot_state_block_reason(&profile_with_state(Some(2))),
+            Some("pilot_rejected"),
+        );
+    }
+
+    #[test]
+    fn pilot_state_on_leave_blocks() {
+        assert_eq!(
+            pilot_state_block_reason(&profile_with_state(Some(3))),
+            Some("pilot_on_leave"),
+        );
+    }
+
+    #[test]
+    fn pilot_state_suspended_blocks() {
+        assert_eq!(
+            pilot_state_block_reason(&profile_with_state(Some(4))),
+            Some("pilot_suspended"),
+        );
+    }
+
+    #[test]
+    fn pilot_state_deleted_blocks() {
+        // phpVMS UserState::DELETED = 5 — verified against the official
+        // enum. A deleted account is a hard block (uses the suspended
+        // message: "account blocked, contact the VA").
+        assert_eq!(
+            pilot_state_block_reason(&profile_with_state(Some(5))),
+            Some("pilot_suspended"),
+        );
+    }
+
+    #[test]
+    fn pilot_state_missing_fails_closed() {
+        // No `state` field on the profile → fail-closed, not allowed.
+        assert_eq!(
+            pilot_state_block_reason(&profile_with_state(None)),
+            Some("pilot_state_unknown"),
+        );
+    }
+
+    #[test]
+    fn pilot_state_unexpected_value_fails_closed() {
+        assert_eq!(
+            pilot_state_block_reason(&profile_with_state(Some(99))),
+            Some("pilot_state_unknown"),
+        );
     }
 }
 

@@ -130,6 +130,12 @@ export interface LandingRecord {
   vs_smoothed_1500ms_fpm?: number | null;
   peak_g_post_500ms?: number | null;
   peak_g_post_1000ms?: number | null;
+  /** v0.12.3 (LE4/LE7): EMA-geglätteter gescorter G-Wert (FOQA-Methode).
+   *  Der Wert, auf dem die Landung gescort wird + den die G-Force-Card
+   *  als Headline zeigt. `peak_g_post_*` bleibt der rohe Forensik-Peak. */
+  landing_scored_g_force?: number | null;
+  /** v0.12.3 (LE8): "ema_max" | "raw_fallback". */
+  scored_g_method?: string | null;
   // v0.7.17 (B-009): G-Force-Forensik (analog vs_smoothed_*)
   g_at_edge?: number | null;
   g_smoothed_250ms_post?: number | null;
@@ -401,6 +407,9 @@ function getSubScores(r: LandingRecord): SubScore[] {
   const subs: LibSubScore[] = libComputeSubScores({
     vs_fpm: peakVs,
     peak_g_load: r.landing_peak_g_force,
+    // v0.12.3 (LE8): EMA-Scored-G → sub_g_force scort diesen Wert,
+    // sonst Fallback auf den rohen peak_g_load.
+    scored_g_load: r.landing_scored_g_force,
     bounce_count: r.bounce_count,
     approach_vs_stddev_fpm: r.approach_vs_stddev_fpm,
     approach_bank_stddev_deg: r.approach_bank_stddev_deg,
@@ -413,6 +422,114 @@ function getSubScores(r: LandingRecord): SubScore[] {
 // Alias fuer Backward-Compat mit bestehenden Aufruf-Stellen
 function computeSubScores(r: LandingRecord): SubScore[] {
   return getSubScores(r);
+}
+
+// ─── v0.12.0 (#runway-utilization-refinement) — TS-gerenderte Extra-Zeilen ──
+//
+// Spec docs/spec/v0.12.0-runway-utilization-refinement.md LE5: ab
+// `score_algorithm_version >= 3` lässt das Rust-Crate das `extra`-Feld
+// LEER. Die drei Bahn-Auslastungs-Extra-Zeilen (Aufsetzpunkt, Ausroll-
+// strecke, Bahn) baut stattdessen der TS-Renderer aus den ohnehin
+// vorhandenen Record-Feldern + i18n — damit sie sprach-fähig sind statt
+// hardcoded-Deutsch. Alt-v2-Records (`< 3`) behalten ihre gespeicherten
+// `extra`-Strings (Legacy).
+
+/** Minimaler t-Typ — reicht für die Extra-Zeilen-Interpolation. */
+type RolloutTFn = (key: string, opts?: Record<string, string | number>) => string;
+
+/** Erste score_algorithm_version mit TS-gerenderten Extra-Zeilen. */
+const ROLLOUT_ALGO_V3 = 3;
+
+/** True wenn der Record v3-Scoring nutzt (TS rendert die Extra-Zeilen). */
+export function isRolloutV3(r: LandingRecord): boolean {
+  return (r.score_algorithm_version ?? 0) >= ROLLOUT_ALGO_V3;
+}
+
+/**
+ * LDA in Metern aus dem (nested) Pilot-Client `runway_match`.
+ * Spec LE5: `LDA_m = (length_ft − displaced_threshold_ft) × 0.3048`.
+ * Liefert null wenn die Geometrie unbrauchbar ist (length ≤ 0, LDA ≤ 0).
+ */
+export function rolloutLdaMeters(rm: LandingRunwayMatch): number | null {
+  if (!Number.isFinite(rm.length_ft) || rm.length_ft <= 0) return null;
+  const displacedFt = rm.displaced_threshold_ft ?? 0;
+  const lda = (rm.length_ft - displacedFt) * 0.3048;
+  return lda > 0 ? lda : null;
+}
+
+/**
+ * v0.12.0 LE4 — sprach-lokalisiertes Value-Label für die rollout-Card.
+ * Zeigt die ECHTE Auslastung (raw, nicht toleranzbereinigt). Liefert null
+ * wenn Felder fehlen — der Caller fällt dann auf den sprachneutralen
+ * `value`-String des Rust-Crates zurück.
+ */
+export function buildRolloutValueLabel(
+  r: LandingRecord,
+  t: RolloutTFn,
+): string | null {
+  const rm = r.runway_match;
+  if (!rm) return null;
+  const lda = rolloutLdaMeters(rm);
+  if (lda == null) return null;
+  const td = r.td_distance_from_threshold_m;
+  const rollout = r.rollout_distance_m;
+  if (td == null || rollout == null) return null;
+  const used = Math.max(td + rollout, rollout);
+  return t("landing.rollout_extra.value_label", {
+    pct: Math.round((used / lda) * 100),
+    used: Math.round(used),
+    lda: Math.round(lda),
+  });
+}
+
+/**
+ * v0.12.0 LE5 — die drei TS-gerenderten Extra-Zeilen der rollout-Card.
+ * Reihenfolge: Aufsetzpunkt → Ausrollstrecke → Bahn. Jede Zeile entfällt
+ * einzeln wenn ihr Quell-Feld fehlt (z.B. kein `runway_match` → keine
+ * Bahn-Zeile, die anderen zwei bleiben).
+ *
+ * R2-P2-Fix: negatives `td_distance` (Aufsetzen VOR der Schwelle) wählt
+ * den `_before`-Key und übergibt den BETRAG — nie „−50 m hinter …".
+ */
+export function buildRolloutExtraLines(
+  r: LandingRecord,
+  t: RolloutTFn,
+): string[] {
+  const lines: string[] = [];
+
+  const td = r.td_distance_from_threshold_m;
+  if (td != null) {
+    const m = Math.round(Math.abs(td));
+    const key =
+      td < 0
+        ? "landing.rollout_extra.touchdown_point_before"
+        : "landing.rollout_extra.touchdown_point";
+    lines.push(t(key, { m }));
+  }
+
+  if (r.rollout_distance_m != null) {
+    lines.push(
+      t("landing.rollout_extra.rollout_distance", {
+        m: Math.round(r.rollout_distance_m),
+      }),
+    );
+  }
+
+  const rm = r.runway_match;
+  if (rm) {
+    const lda = rolloutLdaMeters(rm);
+    if (lda != null) {
+      lines.push(
+        t("landing.rollout_extra.runway", {
+          icao: rm.airport_ident,
+          ident: rm.runway_ident,
+          lda: Math.round(lda),
+        }),
+      );
+    }
+  }
+
+  return lines;
 }
 
 /** Rationale → i18n key for the coach tip. We point straight at the
@@ -1260,7 +1377,13 @@ function InfoBadge({ explanation }: { explanation: string }) {
 
 // ---- Score breakdown card grid -----------------------------------------
 
-function ScoreBreakdown({ subs }: { subs: SubScore[] }) {
+function ScoreBreakdown({
+  subs,
+  record,
+}: {
+  subs: SubScore[];
+  record: LandingRecord;
+}) {
   const { t } = useTranslation();
   // v0.11.0-dev: Pilot-Hilfe-Modal für den "Bahn-Auslastung"-Sub-Score.
   // Wird über den "🛬 Wie wird das berechnet?"-Button am Boden der
@@ -1324,7 +1447,18 @@ function ScoreBreakdown({ subs }: { subs: SubScore[] }) {
         // Felder durch (undefined) und das Rendering ist No-op.
         const hasWarning =
           typeof s.warning === "string" && s.warning.length > 0;
-        const extraLines = s.extra ?? [];
+        // v0.12.0 (#runway-utilization-refinement, LE4/LE5): die rollout-
+        // Card rendert ab score_algorithm_version >= 3 ihr Value-Label
+        // und ihre Extra-Zeilen sprach-lokalisiert aus den Record-Feldern.
+        // Alt-v2-Records (< 3) zeigen den sprachneutralen Rust-`value`
+        // bzw. die gespeicherten `extra`-Strings unverändert (Legacy).
+        const isV3Rollout = s.key === "rollout" && isRolloutV3(record);
+        const extraLines = isV3Rollout
+          ? buildRolloutExtraLines(record, t)
+          : (s.extra ?? []);
+        const valueText = isV3Rollout
+          ? (buildRolloutValueLabel(record, t) ?? s.value)
+          : s.value;
         return (
           <div
             key={s.key}
@@ -1342,7 +1476,7 @@ function ScoreBreakdown({ subs }: { subs: SubScore[] }) {
               </span>
               <span className="landing-subscore__points">{s.points} PTS</span>
             </div>
-            <div className="landing-subscore__value">{s.value}</div>
+            <div className="landing-subscore__value">{valueText}</div>
             <div className="landing-subscore__bar">
               <div
                 className="landing-subscore__fill"
@@ -1642,6 +1776,15 @@ function OffAirportBanner({ record }: { record: LandingRecord }) {
 // (B:124-133) — Pilot sieht im Client und im Live-Monitor exakt dieselben
 // Flags. Nur die wirklichen Auffälligkeiten anzeigen — keine "OK"-Chips.
 
+/** v0.12.3 (LE9): the G value the client scores / flags / colours on —
+ *  the EMA-smoothed scored G when present, else the raw 50 Hz peak.
+ *  The raw `landing_peak_g_force` is forensic-only after v0.12.3. */
+export function scoreG(
+  r: Pick<LandingRecord, "landing_scored_g_force" | "landing_peak_g_force">,
+): number | null {
+  return r.landing_scored_g_force ?? r.landing_peak_g_force ?? null;
+}
+
 function QuickFlags({ record }: { record: LandingRecord }) {
   const { t } = useTranslation();
   const flags: { label: string; tone: "warn" | "err" }[] = [];
@@ -1649,16 +1792,18 @@ function QuickFlags({ record }: { record: LandingRecord }) {
   // HARD LANDING — V/S oder Peak-G erreichen Hard/Severe-Schwellen
   // (gespiegelt aus landingScoring.ts T_VS_HARD_FPM / T_G_HARD).
   // v0.7.17 (B-015): vs_at_edge_fpm bevorzugen — siehe scoreBasisVs Doc.
+  // v0.12.3 (LE9): G-Flag auf dem gescorten (EMA) Wert, nicht dem Roh-Peak.
   const peakVs =
     (record.vs_at_edge_fpm != null && record.vs_at_edge_fpm < 0
       ? record.vs_at_edge_fpm
       : null) ??
     record.landing_peak_vs_fpm ??
     record.landing_rate_fpm;
+  const gForFlag = scoreG(record) ?? 0;
   const isHardVs = Math.abs(peakVs) >= 600;
-  const isHardG = (record.landing_peak_g_force ?? 0) >= 1.7;
+  const isHardG = gForFlag >= 1.7;
   if (isHardVs || isHardG) {
-    const severe = Math.abs(peakVs) >= 1000 || (record.landing_peak_g_force ?? 0) >= 2.1;
+    const severe = Math.abs(peakVs) >= 1000 || gForFlag >= 2.1;
     flags.push({
       label: severe ? t("landing.flag.severe") : t("landing.flag.hard"),
       tone: "err",
@@ -2003,7 +2148,7 @@ function LandingDetail({
           {t("landing.score_breakdown")}
           <InfoBadge explanation={t("landing.info.score_section")} />
         </h3>
-        <ScoreBreakdown subs={subs} />
+        <ScoreBreakdown subs={subs} record={record} />
         <CoachTip subs={subs} />
       </section>
 

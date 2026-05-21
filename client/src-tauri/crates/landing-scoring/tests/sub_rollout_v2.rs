@@ -122,14 +122,20 @@ fn negative_td_distance_clamped_to_rollout_only() {
     );
 }
 
-// ── Band-Grenzen / Float-Banding (R2-P2-1 Fix) ─────────────────────────
+// ── Band-Grenzen / Banding (v0.12.0: effective_distance) ───────────────
+// HINWEIS v0.12.0: das Banding läuft auf der toleranzbereinigten
+// effective_distance. Damit kein Float die Band-Grenze verfälscht,
+// halten diese Tests td_dist INNERHALB der 15 %-Toleranz (effective_
+// float = 0 → effective_distance = rollout).
 
 #[test]
 fn no_pre_rounding_at_band_boundary() {
-    // 29.5 % raw, Light (keine Allowance), Float-Banding:
+    // 29.5 % effective, Light (keine Allowance):
     //   Wenn vorher gerundet wuerde: 30 → good_stop (80 PTS)
     //   Mit Float-Banding: 29.5 < 30.0 → excellent_margin (100 PTS)
-    let input = ok_input(295.0, 0.0, 1000.0, 0, "C172");
+    // td 100 m liegt unter Toleranz (0.15*1000 = 150 m) → effective_float=0,
+    // effective_distance = rollout 295 m → 29.5 %.
+    let input = ok_input(100.0, 295.0, 1000.0, 0, "C172");
     let r = sub_rollout_v2(&input);
     assert_eq!(r.points, 100);
     assert_eq!(r.rationale_key.as_deref(), Some("landing.rat.excellent_margin"));
@@ -137,27 +143,28 @@ fn no_pre_rounding_at_band_boundary() {
 
 #[test]
 fn heavy_allowance_5pp_at_band_boundary() {
-    // 35 % Raw + Heavy-Allowance → 30 % effective → boundary
-    //   Light bei 35 % → good_stop (80 PTS)
-    //   Heavy bei 35 % → effective 30 — `30 < 30` false → faellt in
-    //     `e if e < 50` → good_stop (80 PTS)
-    //   Heavy bei 34 % → effective 29 < 30 → excellent_margin (100 PTS)
-    let r_heavy_35 = sub_rollout_v2(&ok_input(350.0, 0.0, 1000.0, 0, "A388"));
+    // Heavy-Allowance an der 30 %-Bandgrenze. td 100 m < Toleranz 150 m
+    // → effective_float=0 → effective_distance = rollout.
+    //   Heavy, rollout 350 m / 1000 m LDA → 35 % − 5 pp = 30 %
+    //     → `30 < 30` false → `e if e < 50` → good_stop (80 PTS)
+    //   Heavy, rollout 340 m → 34 % − 5 pp = 29 % < 30 → excellent (100)
+    let r_heavy_35 = sub_rollout_v2(&ok_input(100.0, 350.0, 1000.0, 0, "A388"));
     assert_eq!(
         r_heavy_35.points, 80,
-        "Heavy bei 35% raw → 30% effective → good_stop"
+        "Heavy 35% effective → 30% nach Allowance → good_stop"
     );
-    let r_heavy_34 = sub_rollout_v2(&ok_input(340.0, 0.0, 1000.0, 0, "A388"));
+    let r_heavy_34 = sub_rollout_v2(&ok_input(100.0, 340.0, 1000.0, 0, "A388"));
     assert_eq!(
         r_heavy_34.points, 100,
-        "Heavy bei 34% raw → 29% effective → excellent"
+        "Heavy 34% effective → 29% nach Allowance → excellent"
     );
 }
 
 #[test]
 fn medium_no_allowance() {
-    // A320 50 % raw → 50 % effective → ok_stop (55 PTS)
-    let r = sub_rollout_v2(&ok_input(500.0, 0.0, 1000.0, 0, "A320"));
+    // A320 (Medium, keine Allowance): rollout 500 m / 1000 m LDA = 50 %
+    // effective → ok_stop (55 PTS). td 100 m < Toleranz → kein Float-Anteil.
+    let r = sub_rollout_v2(&ok_input(100.0, 500.0, 1000.0, 0, "A320"));
     assert_eq!(r.points, 55);
 }
 
@@ -294,20 +301,118 @@ fn skip_invalid_lda() {
     assert_eq!(r.reason.as_deref(), Some("invalid_lda"));
 }
 
-// ── Extra-Lines + Display-Format (LE9) ─────────────────────────────────
+// ── v0.12.0 (#runway-utilization-refinement) — Float-Toleranz Tests ────
 
 #[test]
-fn extra_lines_rendered_when_float_and_match_present() {
-    let mut input = ok_input(516.93, 583.55, 3657.0, 0, "A388");
-    input.landing_float_distance_m = Some(516.93);
-    input.runway_match_icao = Some("YMML");
-    input.runway_match_ident = Some("16");
+fn btx8815_real_case_long_float() {
+    // Pilot-Beschwerde BTX8815 (Fenix A319, LOWS 15). Echte Flight-Log-
+    // Werte. Exzellent gebremst (442 m), aber 540 m hinter der Schwelle
+    // aufgesetzt.
+    //   tolerance      = 0.15 * 2849.88 = 427.5 m
+    //   effective_float= max(540.85 - 427.5, 0) = 113.4 m
+    //   effective_dist = 442.50 + 113.4 = 555.9 m
+    //   effective_ratio= 555.9 / 2849.88 = 19.5 %  → < 30 → excellent (100)
+    //   long_float: Float 540.85 > 427.5 ✓ · rollout/LDA 15.5 % < 30 ✓ ·
+    //               Band Good ✓  → Rationale-Override → long_float
+    let r = sub_rollout_v2(&ok_input(540.85, 442.50, 2849.88, 0, "A319"));
+    assert_eq!(r.points, 100, "BTX8815: Float-Toleranz → 100 PT");
+    assert_eq!(r.rationale_key.as_deref(), Some("landing.rat.long_float"));
+    assert!(!r.skipped);
+    assert!(r.warning.is_none());
+    // value zeigt die ECHTE Auslastung (raw 983/2850 = 34.5 % → 35 %)
+    assert!(r.value.as_deref().unwrap_or("").contains("35 %"));
+}
+
+#[test]
+fn float_within_tolerance_no_override() {
+    // Float UNTER der 15 %-Toleranz → kein long_float, normale Rationale.
+    // td 100 m < tolerance 0.15*1000 = 150 m. rollout 250 m → eff_dist 250
+    // → 25 % → excellent_margin, KEIN long_float (Float nicht über Tol.).
+    let r = sub_rollout_v2(&ok_input(100.0, 250.0, 1000.0, 0, "A320"));
+    assert_eq!(r.points, 100);
+    assert_eq!(
+        r.rationale_key.as_deref(),
+        Some("landing.rat.excellent_margin"),
+        "Float in Toleranz → normale Rationale, NICHT long_float"
+    );
+}
+
+#[test]
+fn long_float_needs_excellent_rollout() {
+    // R1-P1-1: long_float NUR wenn der reine Bremsweg excellent waere
+    // (rollout/LDA < 30 %). Hier: Float über Toleranz, aber rollout 400 m
+    // / 1000 m LDA = 40 % ≥ 30 % → KEIN long_float.
+    //   tolerance 150, effective_float = 300-150 = 150, eff_dist = 550,
+    //   eff_ratio 55 % → ok_stop (55). Band Ok (nicht Good) → eh kein
+    //   Override, plus rollout_alone 40 % ≥ 30 %.
+    let r = sub_rollout_v2(&ok_input(300.0, 400.0, 1000.0, 0, "A320"));
+    assert_eq!(r.points, 55);
+    assert_eq!(
+        r.rationale_key.as_deref(),
+        Some("landing.rat.ok_stop"),
+        "Bremsweg nicht excellent → normale Rationale, kein long_float"
+    );
+}
+
+#[test]
+fn overrun_still_on_raw_distance() {
+    // v0.12.0 LE3: Overrun-Gate bleibt auf der ECHTEN Distanz. Die
+    // Float-Toleranz darf ein echtes Overrun NICHT verstecken.
+    //   td 1500 + rollout 1100 = 2600 m auf 2500 m LDA → raw 104 % > 100
+    //   → overrun_risk, OBWOHL effective (mit Toleranz) < 100 % wäre.
+    let r = sub_rollout_v2(&ok_input(1500.0, 1100.0, 2500.0, 0, "A320"));
+    assert_eq!(r.points, 0);
+    assert_eq!(r.rationale_key.as_deref(), Some("landing.rat.overrun_risk"));
+}
+
+#[test]
+fn tolerance_scales_with_lda() {
+    // Toleranz ist 15 % der LDA — skaliert mit der Bahnlänge.
+    // Kurze Bahn 1500 m → Toleranz 225 m · lange Bahn 3500 m → 525 m.
+    // Gleicher Float 400 m: auf kurzer Bahn über Toleranz, auf langer drunter.
+    let short = sub_rollout_v2(&ok_input(400.0, 300.0, 1500.0, 0, "A320"));
+    // tolerance 225, eff_float = 400-225 = 175, eff_dist = 475, ratio 31.7%
+    // → good_stop. Float 400 > 225 ✓, rollout/LDA 300/1500 = 20 % < 30 ✓,
+    // Band Good ✓ → long_float.
+    assert_eq!(short.rationale_key.as_deref(), Some("landing.rat.long_float"));
+    let long = sub_rollout_v2(&ok_input(400.0, 300.0, 3500.0, 0, "A320"));
+    // tolerance 525, eff_float = max(400-525,0) = 0, eff_dist = 300,
+    // ratio 8.6 % → excellent_margin, Float 400 < 525 → kein long_float.
+    assert_eq!(long.rationale_key.as_deref(), Some("landing.rat.excellent_margin"));
+}
+
+#[test]
+fn pre_displaced_has_priority_over_long_float() {
+    // pre_displaced + langer Float: pre_displaced_capped gewinnt,
+    // NICHT long_float (pre_displaced hat Vorrang, eigener Cap).
+    let mut input = ok_input(540.0, 300.0, 2850.0, 0, "A320");
+    input.pre_displaced_threshold = Some(true);
     let r = sub_rollout_v2(&input);
-    assert_eq!(r.extra.len(), 2, "Float + Bahn-Info → 2 extra lines");
-    assert!(r.extra[0].contains("Float"));
-    assert!(r.extra[1].contains("YMML"));
-    assert!(r.extra[1].contains("16"));
-    assert!(r.extra[1].contains("LDA"));
+    assert_eq!(
+        r.rationale_key.as_deref(),
+        Some("landing.rat.pre_displaced_capped"),
+        "pre_displaced hat Vorrang vor long_float"
+    );
+    assert!(r.points <= 55, "pre_displaced cappt auf 55");
+}
+
+#[test]
+fn extra_is_empty_for_v3() {
+    // v0.12.0 LE5: das Crate baut KEINE extra-Zeilen mehr — der
+    // TS-Renderer macht das aus den Record-Feldern. extra ist leer.
+    let r = sub_rollout_v2(&ok_input(540.85, 442.50, 2849.88, 0, "A319"));
+    assert!(r.extra.is_empty(), "v3-Score liefert extra = []");
+}
+
+#[test]
+fn effective_vs_raw_ratio_in_value() {
+    // v0.12.0 LE4: value zeigt die RAW-Auslastung (echte Distanz), NICHT
+    // die toleranzbereinigte effective. Sprachneutrales Format.
+    let r = sub_rollout_v2(&ok_input(540.85, 442.50, 2849.88, 0, "A319"));
+    let v = r.value.as_deref().unwrap_or("");
+    assert!(v.contains("983 m"), "value zeigt echte distance_used 983 m");
+    assert!(v.contains("2850 m"), "value zeigt LDA");
+    assert!(v.contains("35 %"), "value zeigt raw-% (34.5 → 35), nicht 20 %");
 }
 
 // ── Wire-Schema-Snapshot (LE8 — Mini-Golden-JSON-Datei) ────────────────
