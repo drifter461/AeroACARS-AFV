@@ -1,6 +1,11 @@
 # Spec — Auto-Start-Log-Spam dämpfen
 
-**Status:** Bug, eingeplant · **Aufwand:** klein · **Priorität:** mittel
+**Status:** ✅ behoben in v0.12.11 · **Aufwand:** klein · **Priorität:** mittel
+
+> Umgesetzt: der unbedingte `*g = None`-Reset bei erfüllten Auto-Start-
+> Voraussetzungen ist entfernt (er löschte den Throttle-State vor dem
+> „no_bids"-Check), und der „keine Bids"-Hinweis nutzt jetzt reine
+> Edge-Detektion (loggt nur beim Wechsel auf `no_bids`).
 
 ## Problem
 

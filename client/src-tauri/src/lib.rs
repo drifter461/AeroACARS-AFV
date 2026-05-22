@@ -21784,12 +21784,14 @@ fn spawn_auto_start_watcher(app: AppHandle) {
                 }
                 continue;
             }
-            // Voraussetzungen erfüllt — Reason-State löschen damit beim
-            // nächsten skip wieder ein frischer Hint kommt.
-            {
-                let mut g = state.auto_start_skip_reason.lock().unwrap();
-                *g = None;
-            }
+            // v0.12.11: KEIN unbedingtes `*g = None` mehr hier. Der Reset
+            // bei erfüllten Voraussetzungen löschte den Throttle-State
+            // direkt VOR dem „no_bids"-Check — ein geparktes Flugzeug
+            // ohne gebuchten Bid loggte die „keine Bids"-Zeile dadurch
+            // bei JEDEM Poll (alle paar Sekunden, siehe Live-Log Sven M /
+            // FDX1636: 150+ identische Einträge). Die Code-Wechsel-
+            // Erkennung im skip_reason-Zweig liefert ohnehin einen
+            // frischen Hint, sobald sich der Grund tatsächlich ändert.
             // Fetch the user's bids to find a match.
             let client = match {
                 let g = state.client.lock().expect("client lock");
@@ -21806,14 +21808,17 @@ fn spawn_auto_start_watcher(app: AppHandle) {
             // es dem Piloten — vorher Silent-Skip.
             if bids.is_empty() {
                 let now = Utc::now();
+                // v0.12.11: reine Edge-Detektion. „Keine Bids" ist ein
+                // Dauerzustand, kein Ereignis — nur loggen, wenn der
+                // Grund NEU auf „no_bids" wechselt, nicht bei jedem Poll.
+                // (Vorher: `matches!(.., None | Some((_,_)))` war immer
+                // true und die 60-s-Drossel wurde vom Reset oben außer
+                // Kraft gesetzt → Sekundentakt-Spam.)
                 let should_log = {
                     let mut g = state.auto_start_skip_reason.lock().unwrap();
-                    let log_it = matches!(
-                        g.as_ref(),
-                        None | Some((_, _))
-                    ) && g.as_ref().map_or(true, |(at, code)| {
-                        code != "no_bids" || (now - *at).num_seconds() >= 60
-                    });
+                    let log_it = g
+                        .as_ref()
+                        .map_or(true, |(_, code)| code != "no_bids");
                     if log_it {
                         *g = Some((now, "no_bids".to_string()));
                     }
