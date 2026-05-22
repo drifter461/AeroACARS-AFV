@@ -1232,6 +1232,10 @@ function ApproachChart({ samples }: { samples: ApproachSample[] }) {
   lo = Math.floor((lo - padv) / 100) * 100;
   hi = Math.ceil((hi + padv) / 100) * 100;
   if (hi < 0) hi = 0;
+  // v0.12.8: Achse IMMER mindestens 0 … −1100 — sonst klebt bei einem
+  // ruhigen Anflug das Soll-Band unten und die −1000-Stabilitätslinie
+  // fällt raus. Auto-Zoom greift weiter für tiefere Ausschläge.
+  lo = Math.min(lo, -1100);
   const range = Math.max(1, hi - lo);
 
   const xStep = innerW / Math.max(1, samples.length - 1);
@@ -2235,6 +2239,70 @@ function LandingDetail({
         <CoachTip subs={subs} />
       </section>
 
+      {/* Runway */}
+      {record.runway_match && (() => {
+        // v0.7.6 P1-3: Runway-Geometry-Trust check.
+        // - trusted ?? true → alte v0.7.5-PIREPs werden wie trusted
+        //   behandelt (Backward-Compat).
+        // - Bei untrusted: Centerline-Offset, Past-Threshold, runway_used_pct
+        //   und das RunwayDiagram ausblenden. Rollout bleibt sichtbar
+        //   (kommt aus GPS-Track).
+        // - "no_runway_match" zeigt KEINEN Alarm-Pill (Privatplatz normal).
+        const geometryTrusted = record.runway_geometry_trusted ?? true;
+        const trustWarning = !geometryTrusted
+          ? runwayTrustReasonLabel(record.runway_geometry_reason)
+          : null;
+        return (
+          <section className="landing-section">
+            <h3>
+              {t("landing.runway")}
+              <InfoBadge explanation={t("landing.info.runway_section")} />
+            </h3>
+            {trustWarning && (
+              <div
+                style={{
+                  padding: "6px 10px",
+                  marginBottom: 10,
+                  borderRadius: 6,
+                  background: "#3f2b0e",
+                  border: "1px solid #b8842a",
+                  color: "#f5d68b",
+                  fontSize: "0.85rem",
+                }}
+              >
+                ⚠ {trustWarning}
+              </div>
+            )}
+            {(() => {
+              // v0.8.2: alte RunwayDiagram → RunwayDiagramV2.
+              //
+              // v0.8.3.1 (Hotfix): die legacy <dl>-Liste die hier vorher
+              // ZUSAETZLICH rendert wurde entfernt — V2 hat alle Felder
+              // (bahn/laenge/hinter-schwelle/mittellinie/rollout/bahn-
+              // auslastung/navdata/tdz/aim/tch/dds) als eigene Pills.
+              // Vorher liefen beide parallel und zeigten WIDERSPRECHENDE
+              // Werte: Bahn-Auslastung 52% (V2: (td_dist+rollout)/length)
+              // vs 38% (legacy: rollout/length). Reported von Thomas
+              // 2026-05-18 mit Fenix-A320 EVRA-Landung.
+              //
+              // Bei untrusted geometry NICHTS rendern — die trust-Warn-
+              // Box oberhalb erklaert dem Piloten warum (vorher zeigten
+              // einige legacy-Felder auch bei untrusted weiter, was
+              // inkonsistent zur V2-Logik war).
+              //
+              // Bei v2Props=null trotz trusted geometry → das ist ein
+              // Mapping-Bug, kein UI-Fallback. Tritt nicht auf weil
+              // mapLandingRecordToV2Props bei trusted records komplett
+              // ist (alle Pflichtfelder kommen aus record.runway_match,
+              // das bei trusted=true garantiert vollstaendig ist).
+              if (!geometryTrusted) return null;
+              const v2Props = mapLandingRecordToV2Props(record);
+              return v2Props ? <RunwayDiagramV2 {...v2Props} /> : null;
+            })()}
+          </section>
+        );
+      })()}
+
       {/* Touchdown: vitals + Wind compass. v0.12.8: die V/S-Nahaufnahme
           ist in die Anflug-Stabilität-Section gewandert (gestapelt unter
           dem Anflug-Profil, wie auf dem VPS). */}
@@ -2435,69 +2503,6 @@ function LandingDetail({
         </section>
       )}
 
-      {/* Runway */}
-      {record.runway_match && (() => {
-        // v0.7.6 P1-3: Runway-Geometry-Trust check.
-        // - trusted ?? true → alte v0.7.5-PIREPs werden wie trusted
-        //   behandelt (Backward-Compat).
-        // - Bei untrusted: Centerline-Offset, Past-Threshold, runway_used_pct
-        //   und das RunwayDiagram ausblenden. Rollout bleibt sichtbar
-        //   (kommt aus GPS-Track).
-        // - "no_runway_match" zeigt KEINEN Alarm-Pill (Privatplatz normal).
-        const geometryTrusted = record.runway_geometry_trusted ?? true;
-        const trustWarning = !geometryTrusted
-          ? runwayTrustReasonLabel(record.runway_geometry_reason)
-          : null;
-        return (
-          <section className="landing-section">
-            <h3>
-              {t("landing.runway")}
-              <InfoBadge explanation={t("landing.info.runway_section")} />
-            </h3>
-            {trustWarning && (
-              <div
-                style={{
-                  padding: "6px 10px",
-                  marginBottom: 10,
-                  borderRadius: 6,
-                  background: "#3f2b0e",
-                  border: "1px solid #b8842a",
-                  color: "#f5d68b",
-                  fontSize: "0.85rem",
-                }}
-              >
-                ⚠ {trustWarning}
-              </div>
-            )}
-            {(() => {
-              // v0.8.2: alte RunwayDiagram → RunwayDiagramV2.
-              //
-              // v0.8.3.1 (Hotfix): die legacy <dl>-Liste die hier vorher
-              // ZUSAETZLICH rendert wurde entfernt — V2 hat alle Felder
-              // (bahn/laenge/hinter-schwelle/mittellinie/rollout/bahn-
-              // auslastung/navdata/tdz/aim/tch/dds) als eigene Pills.
-              // Vorher liefen beide parallel und zeigten WIDERSPRECHENDE
-              // Werte: Bahn-Auslastung 52% (V2: (td_dist+rollout)/length)
-              // vs 38% (legacy: rollout/length). Reported von Thomas
-              // 2026-05-18 mit Fenix-A320 EVRA-Landung.
-              //
-              // Bei untrusted geometry NICHTS rendern — die trust-Warn-
-              // Box oberhalb erklaert dem Piloten warum (vorher zeigten
-              // einige legacy-Felder auch bei untrusted weiter, was
-              // inkonsistent zur V2-Logik war).
-              //
-              // Bei v2Props=null trotz trusted geometry → das ist ein
-              // Mapping-Bug, kein UI-Fallback. Tritt nicht auf weil
-              // mapLandingRecordToV2Props bei trusted records komplett
-              // ist (alle Pflichtfelder kommen aus record.runway_match,
-              // das bei trusted=true garantiert vollstaendig ist).
-              if (!geometryTrusted) return null;
-              const v2Props = mapLandingRecordToV2Props(record);
-              return v2Props ? <RunwayDiagramV2 {...v2Props} /> : null;
-            })()}
-          </section>
-        );
-      })()}
 
       {/* Fuel + Weight — Soll/Ist-Vergleich (v0.3.0).
           Render whenever ANY fuel/weight value is present. */}
