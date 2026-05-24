@@ -14,6 +14,7 @@ import RunwayDiagramPreview from "./dev/RunwayDiagramPreview";
 import { UpdateButton } from "./components/UpdateButton";
 import { UpdateBanner } from "./components/UpdateBanner";
 import { ErrorReportingFirstRunBanner } from "./components/ErrorReportingFirstRunBanner";
+import { IntegrityBanner } from "./components/IntegrityBanner";
 import { useDiscordRpcPush } from "./hooks/useDiscordRpcPush";
 import { LiveRecordingIndicator } from "./components/LiveRecordingIndicator";
 import { useSimSession } from "./hooks/useSimSession";
@@ -439,6 +440,12 @@ function App() {
           Selbst-versteckend nach der ersten Entscheidung. Zeigt sich
           NUR beim allerersten Start (= leerer localStorage-Key). */}
       <ErrorReportingFirstRunBanner />
+      {/* v0.13.0 Slice 6 — Mid-Session-Integrity-Banner. Self-hiding via
+          useIntegrityFlags-Hook: zeigt sich erst sobald der Recorder ein
+          anomaly/critical Flag via MQTT integrity_flag-Topic gepushed hat.
+          Critical-Banner kann nicht weggeklickt werden (Pilot soll
+          sim-state-reset nicht verstecken). */}
+      <IntegrityBanner />
       <header className="app__header">
         <div className="app__brand">
           <h1>{t("app.name")}</h1>
