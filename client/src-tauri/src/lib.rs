@@ -5023,6 +5023,32 @@ async fn init_mqtt_publisher_via_provisioning(app: AppHandle) {
         }
     };
 
+    // v0.13.0 Slice 6: Take the integrity-flag receiver and forward
+    // each event as a Tauri event "integrity-flag" to the React UI.
+    // Done once per Handle creation — Handle::take_integrity_rx is
+    // protected by Option-Take so subsequent calls return None.
+    if let Some(mut integrity_rx) = handle.take_integrity_rx().await {
+        let emit_app = app.clone();
+        tokio::spawn(async move {
+            while let Some(event) = integrity_rx.recv().await {
+                tracing::debug!(
+                    severity = %event.session_effective_severity,
+                    "integrity_flag received from recorder"
+                );
+                let _ = tauri::Emitter::emit(
+                    &emit_app,
+                    "integrity-flag",
+                    serde_json::json!({
+                        "session_id": event.session_id,
+                        "session_effective_severity": event.session_effective_severity,
+                        "flag": event.flag,
+                    }),
+                );
+            }
+            tracing::debug!("integrity_flag forwarder loop exiting");
+        });
+    }
+
     *state.mqtt.lock().await = Some(handle);
     tracing::info!("live-tracking publisher running");
 }
