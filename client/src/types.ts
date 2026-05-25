@@ -349,6 +349,12 @@ export interface ActiveFlightInfo {
    *  on-ground, or implausibly large drift). The resume banner then
    *  disables its 10-second auto-confirm and waits for an explicit click. */
   resume_position_suspect: boolean;
+  /** v0.13.0 Stream F: nur gesetzt wenn was_just_resumed=true. Die
+   *  letzte gespeicherte Position für die Banner-Anzeige damit der Pilot
+   *  weiß WOHIN er sich im Sim repositionieren muss. */
+  last_known_lat?: number;
+  last_known_lon?: number;
+  last_known_alt_ft?: number;
   /** Stand the aircraft pushed back from (MSFS ATC PARKING NAME). */
   dep_gate: string | null;
   /** Stand the pilot parked at after arrival. */

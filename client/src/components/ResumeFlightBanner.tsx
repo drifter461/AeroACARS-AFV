@@ -299,25 +299,19 @@ export function ResumeFlightBanner({
         )}
 
         {positionSuspect ? (
-          // v0.13.0 Stream F (LE22-LE26): Pilot-getriggerter Re-Check.
-          // Drei Optionen — Pilot MUSS aktiv entscheiden:
-          //   1. PRIMARY (grün): "Position prüfen + fortsetzen" — der Pilot
-          //      positioniert sich erst selbst im Sim zur gespeicherten
-          //      Position, klickt dann. Wenn drift < 5nm → clean resume.
-          //   2. SECONDARY (gelb, klein): "Trotzdem fortsetzen (untrusted)" —
-          //      force-resume mit Risiko dass PIREP in Review-Queue landet.
-          //   3. DANGER (rot): "Flug verwerfen + neu starten".
-          //
-          // Toleranz: bis ~10min Gap-Zeit kein Problem solange Position passt.
-          <RecheckActions
-            busy={mode.busy}
-            onConfirm={() => {
-              if (confirmingRef.current) return;
-              confirmingRef.current = true;
-              void doConfirm();
-            }}
-            onCancel={() => void doCancel()}
-          />
+          // v0.13.0 Stream F: Position-Info-Block + RecheckActions
+          <>
+            <PersistedPositionBlock activeFlight={activeFlight} />
+            <RecheckActions
+              busy={mode.busy}
+              onConfirm={() => {
+                if (confirmingRef.current) return;
+                confirmingRef.current = true;
+                void doConfirm();
+              }}
+              onCancel={() => void doCancel()}
+            />
+          </>
         ) : (
           <div className="resume-modal__actions">
             <button
@@ -377,6 +371,97 @@ interface RecheckResult {
   sim_on_ground_inconsistent: boolean;
   persisted_phase: string;
   detail: string;
+  current_sim_lat?: number;
+  current_sim_lon?: number;
+  current_sim_alt_ft?: number;
+  current_sim_on_ground: boolean;
+  persisted_lat?: number;
+  persisted_lon?: number;
+}
+
+/**
+ * v0.13.0 Stream F: zeigt die gespeicherte Position aus activeFlight.
+ * Macht klar WOHIN der Pilot sich im Sim repositionieren soll BEVOR er
+ * "Position prüfen" drückt. Format: Koordinaten in Grad/Minuten/Sekunden
+ * UND als Dezimalgrad (für SimBrief/SLEW-Direct-Input).
+ */
+function PersistedPositionBlock({
+  activeFlight,
+}: {
+  activeFlight: ActiveFlightInfo | null;
+}) {
+  const lat = activeFlight?.last_known_lat;
+  const lon = activeFlight?.last_known_lon;
+  if (lat === undefined || lon === undefined) {
+    return (
+      <div
+        role="status"
+        style={{
+          margin: "8px 0",
+          padding: "10px 12px",
+          borderRadius: 6,
+          background: "rgba(150,150,150,0.1)",
+          border: "1px solid rgba(150,150,150,0.3)",
+          fontSize: "0.85rem",
+        }}
+      >
+        ⚠ Keine gespeicherte Position verfügbar — Du musst entweder den Flug verwerfen oder „Erweitert: trotz Drift fortsetzen" wählen.
+      </div>
+    );
+  }
+  return (
+    <div
+      role="status"
+      style={{
+        margin: "10px 0",
+        padding: "12px 14px",
+        borderRadius: 6,
+        background: "rgba(59,130,246,0.10)",
+        border: "1px solid rgba(59,130,246,0.40)",
+        color: "#93c5fd",
+        fontSize: "0.9rem",
+        lineHeight: 1.6,
+      }}
+    >
+      <strong style={{ display: "block", marginBottom: 6, fontSize: "0.95rem", color: "#60a5fa" }}>
+        📍 Letzte gespeicherte Position
+      </strong>
+      <div style={{ fontFamily: "monospace", fontSize: "1.05rem", color: "#dbeafe" }}>
+        {fmtLat(lat)} &nbsp; {fmtLon(lon)}
+      </div>
+      <div style={{ fontFamily: "monospace", fontSize: "0.8rem", marginTop: 2, opacity: 0.8 }}>
+        Dezimal: <code>{lat.toFixed(5)}, {lon.toFixed(5)}</code>
+      </div>
+      {activeFlight && (
+        <div style={{ marginTop: 6, fontSize: "0.8rem", opacity: 0.85 }}>
+          Phase: <strong>{activeFlight.phase}</strong>
+          {typeof activeFlight.last_known_alt_ft === "number" && (
+            <> · ca. {activeFlight.last_known_alt_ft} ft</>
+          )}
+        </div>
+      )}
+      <div style={{ marginTop: 8, fontSize: "0.78rem", opacity: 0.85, fontStyle: "italic" }}>
+        Tipp: Im MSFS via Toolbar → World Map → diese Koordinaten eingeben.
+        In X-Plane via Map → "Set Aircraft Location".
+      </div>
+    </div>
+  );
+}
+
+// Lat/Lon Decimal → DM-Format ("49°31.32' N")
+function fmtLat(lat: number): string {
+  const dir = lat >= 0 ? "N" : "S";
+  const abs = Math.abs(lat);
+  const deg = Math.floor(abs);
+  const min = (abs - deg) * 60;
+  return `${deg}°${min.toFixed(2)}' ${dir}`;
+}
+function fmtLon(lon: number): string {
+  const dir = lon >= 0 ? "E" : "W";
+  const abs = Math.abs(lon);
+  const deg = Math.floor(abs);
+  const min = (abs - deg) * 60;
+  return `${deg}°${min.toFixed(2)}' ${dir}`;
 }
 
 function RecheckActions({
@@ -413,6 +498,7 @@ function RecheckActions({
         sim_on_ground_inconsistent: false,
         persisted_phase: "?",
         detail: errMsg(err),
+        current_sim_on_ground: false,
       });
     } finally {
       setChecking(false);
@@ -439,6 +525,26 @@ function RecheckActions({
             ⚠ Drift: {lastResult.drift_nm.toFixed(2)} nm
           </strong>
           {lastResult.detail}
+          {typeof lastResult.current_sim_lat === "number" &&
+            typeof lastResult.current_sim_lon === "number" && (
+              <div
+                style={{
+                  marginTop: 8,
+                  paddingTop: 8,
+                  borderTop: "1px solid rgba(239,68,68,0.25)",
+                  fontFamily: "monospace",
+                  fontSize: "0.78rem",
+                  opacity: 0.9,
+                }}
+              >
+                Aktuelle Sim-Position: {fmtLat(lastResult.current_sim_lat)}{" "}
+                {fmtLon(lastResult.current_sim_lon)}
+                {typeof lastResult.current_sim_alt_ft === "number" && (
+                  <> · {lastResult.current_sim_alt_ft} ft</>
+                )}
+                {lastResult.current_sim_on_ground && <> · am Boden</>}
+              </div>
+            )}
         </div>
       )}
 

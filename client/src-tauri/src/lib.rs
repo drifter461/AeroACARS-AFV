@@ -3131,6 +3131,15 @@ pub struct ActiveFlightInfo {
     /// on-ground, or implausibly large drift). The resume banner then
     /// disables its 10-second auto-confirm and requires an explicit click.
     resume_position_suspect: bool,
+    /// v0.13.0 Stream F (LE22-LE26): wenn `was_just_resumed=true`, hier die
+    /// letzte gespeicherte Position für die Banner-Anzeige damit der Pilot
+    /// weiß WOHIN er sich im Sim repositionieren muss.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_known_lat: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_known_lon: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_known_alt_ft: Option<i32>,
     /// Departure stand from MSFS `ATC PARKING NAME` (snapshotted at
     /// the start of the flight). Empty until captured.
     dep_gate: Option<String>,
@@ -6630,6 +6639,14 @@ fn flight_info(flight: &ActiveFlight, resume_position_suspect: bool) -> ActiveFl
         landing_g_force: stats.landing_g_force,
         was_just_resumed,
         resume_position_suspect,
+        // v0.13.0 Stream F: nur befüllen wenn was_just_resumed=true, sonst
+        // werden die Felder via skip_serializing_if weggelassen damit das
+        // Live-Active-Flight-Panel sie nicht sieht.
+        // alt_ft nicht in FlightStats (nur lat/lon) → wir lassen es leer,
+        // die Position allein reicht für die Repositionierung.
+        last_known_lat: if was_just_resumed { stats.last_lat } else { None },
+        last_known_lon: if was_just_resumed { stats.last_lon } else { None },
+        last_known_alt_ft: None,
         dep_gate: stats.dep_gate.clone(),
         arr_gate: stats.arr_gate.clone(),
         approach_runway: stats.approach_runway.clone(),
@@ -12129,6 +12146,19 @@ struct ResumeCheckPositionOutcome {
     sim_on_ground_inconsistent: bool,
     persisted_phase: &'static str,
     detail: String,
+    // v0.13.0 Stream F: aktuelle Sim-Position damit Frontend einen
+    // Vergleich anzeigen kann (persisted vs current).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    current_sim_lat: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    current_sim_lon: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    current_sim_alt_ft: Option<i32>,
+    current_sim_on_ground: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    persisted_lat: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    persisted_lon: Option<f64>,
 }
 
 #[tauri::command]
@@ -12149,6 +12179,12 @@ async fn flight_resume_check_position(
             sim_on_ground_inconsistent: false,
             persisted_phase: "Live",
             detail: "Flight already live, no recheck needed".to_string(),
+            current_sim_lat: None,
+            current_sim_lon: None,
+            current_sim_alt_ft: None,
+            current_sim_on_ground: false,
+            persisted_lat: None,
+            persisted_lon: None,
         });
     }
 
@@ -12227,6 +12263,12 @@ async fn flight_resume_check_position(
         sim_on_ground_inconsistent,
         persisted_phase: phase_to_str(persisted_phase),
         detail,
+        current_sim_lat: Some(snap.lat),
+        current_sim_lon: Some(snap.lon),
+        current_sim_alt_ft: Some(snap.altitude_msl_ft.round() as i32),
+        current_sim_on_ground: snap.on_ground,
+        persisted_lat: persisted_pos.map(|(la, _)| la),
+        persisted_lon: persisted_pos.map(|(_, lo)| lo),
     })
 }
 
