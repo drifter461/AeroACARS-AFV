@@ -299,41 +299,25 @@ export function ResumeFlightBanner({
         )}
 
         {positionSuspect ? (
-          // v0.13.0 Stream F (LE22-LE26 minimum-viable): Hard-Stop bei
-          // position_suspect. Pilot MUSS explizit entscheiden. Primary-Button
-          // ist jetzt "Verwerfen" (danger), Resume ist secondary mit Warnung.
-          <div className="resume-modal__actions" style={{ flexDirection: "column", gap: 8 }}>
-            <button
-              type="button"
-              className="resume-modal__danger"
-              style={{ width: "100%", padding: "12px", fontWeight: 600 }}
-              onClick={() => void doCancel()}
-              disabled={mode.busy}
-            >
-              🔴 {t("resume.hard_stop_discard")}
-            </button>
-            <button
-              type="button"
-              className="button"
-              style={{
-                width: "100%",
-                padding: "8px",
-                fontSize: "0.85rem",
-                opacity: 0.7,
-                background: "rgba(251,191,36,0.12)",
-                border: "1px solid rgba(251,191,36,0.35)",
-                color: "#fbbf24",
-              }}
-              onClick={() => {
-                if (confirmingRef.current) return;
-                confirmingRef.current = true;
-                void doConfirm();
-              }}
-              disabled={mode.busy}
-            >
-              {mode.busy ? t("resume.adopting") : t("resume.hard_stop_force_resume")}
-            </button>
-          </div>
+          // v0.13.0 Stream F (LE22-LE26): Pilot-getriggerter Re-Check.
+          // Drei Optionen — Pilot MUSS aktiv entscheiden:
+          //   1. PRIMARY (grün): "Position prüfen + fortsetzen" — der Pilot
+          //      positioniert sich erst selbst im Sim zur gespeicherten
+          //      Position, klickt dann. Wenn drift < 5nm → clean resume.
+          //   2. SECONDARY (gelb, klein): "Trotzdem fortsetzen (untrusted)" —
+          //      force-resume mit Risiko dass PIREP in Review-Queue landet.
+          //   3. DANGER (rot): "Flug verwerfen + neu starten".
+          //
+          // Toleranz: bis ~10min Gap-Zeit kein Problem solange Position passt.
+          <RecheckActions
+            busy={mode.busy}
+            onConfirm={() => {
+              if (confirmingRef.current) return;
+              confirmingRef.current = true;
+              void doConfirm();
+            }}
+            onCancel={() => void doCancel()}
+          />
         ) : (
           <div className="resume-modal__actions">
             <button
@@ -367,4 +351,165 @@ function errMsg(err: unknown): string {
     return String((err as { message: string }).message);
   }
   return String(err);
+}
+
+// ─── v0.13.0 Stream F: RecheckActions ────────────────────────────────────
+//
+// Drei-Button-Workflow für position_suspect=true:
+//   1. "Position jetzt prüfen + fortsetzen" (primary, grün):
+//      Pilot positioniert sich erst manuell im Sim, klickt dann diesen
+//      Button. invoke("flight_resume_check_position") berechnet aktuelle
+//      Drift. Wenn ok=true → was_just_resumed wird Rust-seitig gecleared,
+//      Banner schließt sich beim nächsten flight_status-Poll automatisch
+//      (positionSuspect→false), normaler Flug läuft weiter ohne untrusted.
+//      Wenn ok=false → wir zeigen die aktuelle Drift, Pilot kann nochmal
+//      positionieren und nochmal prüfen.
+//   2. "Trotzdem fortsetzen (untrusted)" (secondary, klein):
+//      ruft doConfirm direkt → Force-Resume, was_just_resumed=true bleibt,
+//      Server flagged PIREP als untrusted.
+//   3. "Flug verwerfen" (danger, rot):
+//      ruft doCancel → flight_cancel auf phpVMS, Bid wird frei für neuen
+//      Versuch.
+
+interface RecheckResult {
+  ok: boolean;
+  drift_nm: number;
+  sim_on_ground_inconsistent: boolean;
+  persisted_phase: string;
+  detail: string;
+}
+
+function RecheckActions({
+  busy,
+  onConfirm,
+  onCancel,
+}: {
+  busy: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const { t } = useTranslation();
+  const [checking, setChecking] = useState(false);
+  const [lastResult, setLastResult] = useState<RecheckResult | null>(null);
+  const [showForce, setShowForce] = useState(false);
+
+  async function doRecheck() {
+    setChecking(true);
+    setLastResult(null);
+    try {
+      const r = await invoke<RecheckResult>("flight_resume_check_position");
+      setLastResult(r);
+      if (r.ok) {
+        // Server hat was_just_resumed gecleared. Banner schließt sich beim
+        // nächsten flight_status-Poll automatisch. Wir starten zur Sicherheit
+        // den normalen Resume-Pfad damit der Stream sofort startet ohne
+        // 500ms zu warten.
+        onConfirm();
+      }
+    } catch (err) {
+      setLastResult({
+        ok: false,
+        drift_nm: 0,
+        sim_on_ground_inconsistent: false,
+        persisted_phase: "?",
+        detail: errMsg(err),
+      });
+    } finally {
+      setChecking(false);
+    }
+  }
+
+  return (
+    <div className="resume-modal__actions" style={{ flexDirection: "column", gap: 10 }}>
+      {/* Result-Feedback nach Re-Check */}
+      {lastResult && !lastResult.ok && (
+        <div
+          role="alert"
+          style={{
+            padding: "10px 12px",
+            borderRadius: 6,
+            background: "rgba(239,68,68,0.12)",
+            border: "1px solid rgba(239,68,68,0.45)",
+            color: "#fca5a5",
+            fontSize: "0.85rem",
+            lineHeight: 1.5,
+          }}
+        >
+          <strong style={{ display: "block", marginBottom: 4 }}>
+            ⚠ Drift: {lastResult.drift_nm.toFixed(2)} nm
+          </strong>
+          {lastResult.detail}
+        </div>
+      )}
+
+      {/* PRIMARY: Position prüfen + fortsetzen */}
+      <button
+        type="button"
+        className="button button--primary"
+        style={{
+          width: "100%",
+          padding: "12px",
+          fontWeight: 600,
+          background: "#16a34a",
+          borderColor: "#15803d",
+        }}
+        onClick={() => void doRecheck()}
+        disabled={busy || checking}
+      >
+        {checking
+          ? t("resume.recheck_checking")
+          : "🟢 " + t("resume.recheck_check_now")}
+      </button>
+
+      {/* DANGER: Flug verwerfen */}
+      <button
+        type="button"
+        className="resume-modal__danger"
+        style={{ width: "100%", padding: "10px" }}
+        onClick={onCancel}
+        disabled={busy || checking}
+      >
+        🔴 {t("resume.hard_stop_discard")}
+      </button>
+
+      {/* Toggle für force-resume (versteckt damit Piloten es nicht aus
+          Versehen klicken — sie müssen erst auf "Erweitert" klicken) */}
+      {!showForce ? (
+        <button
+          type="button"
+          className="button"
+          style={{
+            width: "100%",
+            padding: "6px",
+            fontSize: "0.75rem",
+            opacity: 0.6,
+            background: "transparent",
+            border: "1px dashed rgba(150,150,150,0.4)",
+            color: "#888",
+          }}
+          onClick={() => setShowForce(true)}
+          disabled={busy || checking}
+        >
+          {t("resume.recheck_show_force")}
+        </button>
+      ) : (
+        <button
+          type="button"
+          className="button"
+          style={{
+            width: "100%",
+            padding: "8px",
+            fontSize: "0.85rem",
+            background: "rgba(251,191,36,0.12)",
+            border: "1px solid rgba(251,191,36,0.45)",
+            color: "#fbbf24",
+          }}
+          onClick={onConfirm}
+          disabled={busy || checking}
+        >
+          {busy ? t("resume.adopting") : "⚠ " + t("resume.hard_stop_force_resume")}
+        </button>
+      )}
+    </div>
+  );
 }

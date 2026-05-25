@@ -456,6 +456,15 @@ const RESUME_DRIFT_TOAST_NM: f64 = 1.0;
 const RESUME_DRIFT_WARN_NM: f64 = 50.0;
 const RESUME_DRIFT_EXTREME_NM: f64 = 200.0;
 
+/// v0.13.0 Stream F (LE22-LE26): Pilot-getriggerter Re-Check-Workflow.
+/// Wenn `resume_position_suspect=true`, kann der Pilot sich erst manuell im
+/// Sim wieder zur gespeicherten Position bringen und dann via
+/// `flight_resume_check_position`-Command einen Re-Check auslösen. Wenn
+/// die aktuelle Drift kleiner als diese Schwelle ist UND keine
+/// airborne↔on_ground-Inkonsistenz besteht, gilt der Resume als sauber
+/// (kein untrusted-Stempel) und der Flug läuft normal weiter.
+const RESUME_DRIFT_CLEAN_NM: f64 = 5.0;
+
 /// How close (in nautical miles) the aircraft must be to the departure airport
 /// to start the flight. Generous enough to cover taxi positions and remote
 /// stands; tight enough to reject "I'm at EDDF instead of EDDP".
@@ -12093,6 +12102,156 @@ async fn flight_end_manual(
     }
 }
 
+/// v0.13.0 Stream F (LE22-LE26): Pilot-getriggerter Position-Re-Check.
+///
+/// Workflow:
+///   1. AeroACARS-Client startet nach Sim-Crash neu, ActiveFlight wird
+///      vom Disk restored mit `was_just_resumed=true`.
+///   2. Sim-Position weicht stark ab → `resume_position_suspect=true`.
+///   3. ResumeFlightBanner zeigt drei Optionen, EINE davon ist
+///      "Position prüfen + fortsetzen". Pilot positioniert sich erst
+///      manuell im Sim wieder zur letzten gespeicherten Position, drückt
+///      DANN den Button.
+///   4. Dieser Command holt die aktuelle Sim-Snapshot, vergleicht die
+///      Drift mit `RESUME_DRIFT_CLEAN_NM` und prüft auf airborne↔
+///      on_ground-Inkonsistenz.
+///   5. Wenn alles OK → setzt `was_just_resumed=false` → Frontend ruft
+///      anschließend den normalen Resume-Pfad → kein untrusted-Stempel.
+///   6. Wenn nicht OK → returnt drift_nm + still_suspect=true, Pilot
+///      kann nochmal positionieren und nochmal prüfen.
+///
+/// Tolerant gegen Zeit-Gaps bis ~10min — wir prüfen NUR die Position,
+/// nicht wie lange der Pilot zum Reposition gebraucht hat.
+#[derive(Serialize)]
+struct ResumeCheckPositionOutcome {
+    ok: bool,
+    drift_nm: f64,
+    sim_on_ground_inconsistent: bool,
+    persisted_phase: &'static str,
+    detail: String,
+}
+
+#[tauri::command]
+async fn flight_resume_check_position(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<ResumeCheckPositionOutcome, UiError> {
+    let guard = state.active_flight.lock().expect("active_flight lock");
+    let flight = guard
+        .as_ref()
+        .ok_or_else(|| UiError::new("no_active_flight", "no flight is active"))?;
+
+    if !flight.was_just_resumed.load(Ordering::Relaxed) {
+        // Flight is already live — recheck not applicable
+        return Ok(ResumeCheckPositionOutcome {
+            ok: true,
+            drift_nm: 0.0,
+            sim_on_ground_inconsistent: false,
+            persisted_phase: "Live",
+            detail: "Flight already live, no recheck needed".to_string(),
+        });
+    }
+
+    let snap = current_snapshot(&app).ok_or_else(|| {
+        UiError::new("sim_disconnected", "Sim ist nicht verbunden — bitte erst den Sim wieder starten und positionieren")
+    })?;
+
+    let (persisted_phase, persisted_pos) = {
+        let stats = flight.stats.lock().expect("flight stats");
+        let pos = match (stats.last_lat, stats.last_lon) {
+            (Some(la), Some(lo)) => Some((la, lo)),
+            _ => None,
+        };
+        (stats.phase, pos)
+    };
+
+    let drift_nm = if let Some((plat, plon)) = persisted_pos {
+        ::geo::distance_m(plat, plon, snap.lat, snap.lon) / 1852.0
+    } else {
+        // No persisted position — can't compute drift, treat as clean
+        0.0
+    };
+
+    let persisted_airborne = matches!(
+        persisted_phase,
+        FlightPhase::Climb
+            | FlightPhase::Cruise
+            | FlightPhase::Holding
+            | FlightPhase::Descent
+            | FlightPhase::Approach
+            | FlightPhase::Final
+    );
+    let sim_on_ground_inconsistent = persisted_airborne && snap.on_ground;
+
+    let ok = drift_nm < RESUME_DRIFT_CLEAN_NM && !sim_on_ground_inconsistent;
+
+    let detail = if ok {
+        format!(
+            "Position OK — Drift {:.2} nm (Limit {:.1} nm). Flug läuft jetzt als sauber weiter.",
+            drift_nm, RESUME_DRIFT_CLEAN_NM
+        )
+    } else if sim_on_ground_inconsistent {
+        format!(
+            "Flugzeug ist im Sim am Boden, gespeicherter Flug war in der Luft (Phase {:?}). Bitte zurück in die Luft positionieren ODER Flug verwerfen.",
+            persisted_phase
+        )
+    } else {
+        format!(
+            "Drift {:.2} nm — zu weit weg von gespeicherter Position (Limit {:.1} nm). Bitte näher positionieren und nochmal prüfen.",
+            drift_nm, RESUME_DRIFT_CLEAN_NM
+        )
+    };
+
+    if ok {
+        // Pilot hat sich erfolgreich repositioniert — Resume gilt als sauber.
+        // was_just_resumed=false → resume_position_suspect wird ebenfalls
+        // false bei nächstem flight_status-Poll → Banner schließt sich.
+        flight.was_just_resumed.store(false, Ordering::Relaxed);
+        tracing::info!(
+            pirep_id = %flight.pirep_id,
+            drift_nm,
+            "flight_resume_check_position: clean — was_just_resumed cleared"
+        );
+    } else {
+        tracing::info!(
+            pirep_id = %flight.pirep_id,
+            drift_nm,
+            sim_on_ground_inconsistent,
+            "flight_resume_check_position: still suspect"
+        );
+    }
+
+    Ok(ResumeCheckPositionOutcome {
+        ok,
+        drift_nm,
+        sim_on_ground_inconsistent,
+        persisted_phase: phase_to_str(persisted_phase),
+        detail,
+    })
+}
+
+fn phase_to_str(phase: FlightPhase) -> &'static str {
+    match phase {
+        FlightPhase::Preflight => "Preflight",
+        FlightPhase::Boarding => "Boarding",
+        FlightPhase::Pushback => "Pushback",
+        FlightPhase::TaxiOut => "TaxiOut",
+        FlightPhase::TakeoffRoll => "TakeoffRoll",
+        FlightPhase::Takeoff => "Takeoff",
+        FlightPhase::Climb => "Climb",
+        FlightPhase::Cruise => "Cruise",
+        FlightPhase::Holding => "Holding",
+        FlightPhase::Descent => "Descent",
+        FlightPhase::Approach => "Approach",
+        FlightPhase::Final => "Final",
+        FlightPhase::Landing => "Landing",
+        FlightPhase::TaxiIn => "TaxiIn",
+        FlightPhase::BlocksOn => "BlocksOn",
+        FlightPhase::Arrived => "Arrived",
+        FlightPhase::PirepSubmitted => "PirepSubmitted",
+    }
+}
+
 /// Cancel the active PIREP without filing it.
 #[tauri::command]
 async fn flight_cancel(
@@ -22149,6 +22308,7 @@ pub fn run() {
             flight_end,
             flight_end_manual,
             flight_cancel,
+            flight_resume_check_position,
             activity_log_get,
             activity_log_clear,
             activity_log_add,
