@@ -1,6 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { invoke } from "@tauri-apps/api/core";
 import type { ActiveFlightInfo, LoginResult, SimSnapshot } from "../types";
 import { ResumeFlightBanner } from "./ResumeFlightBanner";
 import { ActiveFlightPanel } from "./ActiveFlightPanel";
@@ -19,10 +18,11 @@ interface Props {
   /** Called when there's no active flight and the user wants to pick
    *  one — UI nudges them to the briefing tab. */
   onSwitchToBriefing: () => void;
-  /** Auto-file the PIREP once the FSM reaches `Arrived`. Toggle in
-   *  Settings → Filing. When false the pilot has to click
-   *  "Flug beenden" themselves. */
-  autoFile: boolean;
+  /** v0.13.5: NICHT MEHR genutzt — Auto-File-Logik wurde tab-unabhängig
+   *  in AutoFilePirepWatcher (mounted in App.tsx) ausgelagert.
+   *  Prop bleibt nur damit der Caller (App.tsx) bei künftigen Refactors
+   *  noch sehen kann was er hier reingegeben hat — ist intern unused. */
+  autoFile?: boolean;
   /** v0.5.38: Stable-Approach-Banner anzeigen. Default ON. */
   approachAdvisoriesEnabled: boolean;
 }
@@ -42,7 +42,6 @@ export function CockpitView({
   setActiveFlight,
   simSnapshot,
   onSwitchToBriefing,
-  autoFile,
   approachAdvisoriesEnabled,
 }: Props) {
   const { t } = useTranslation();
@@ -62,63 +61,11 @@ export function CockpitView({
     return () => window.clearTimeout(id);
   }, [filedFlightInfo]);
 
-  // Auto-file the PIREP once the FSM marks the flight as Arrived
-  // (BlocksOn + 30 s + engines off + parking brake set). Most pilots
-  // wouldn't manually click "Flug beenden" if the app could just
-  // submit on its own — and with all the pre-flight validation in
-  // flight_end the worst case is a soft fail (the manual file dialog
-  // surfaces, same as today). We attempt it exactly once per flight
-  // via the ref, so a transient phase flutter back to TaxiIn doesn't
-  // re-trigger.
-  const autoFiledRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (!activeFlight) {
-      autoFiledRef.current = null;
-      return;
-    }
-    if (!autoFile) return;
-    if (activeFlight.phase !== "arrived") return;
-    // Suppress auto-file when we've detected a divert. The pilot must
-    // explicitly choose "submit as divert to X" / "submit as planned"
-    // / "override" via the DivertBanner — silently filing with the
-    // wrong arr_airport_id would defeat the whole point.
-    if (activeFlight.divert_hint) return;
-    if (autoFiledRef.current === activeFlight.pirep_id) return;
-    autoFiledRef.current = activeFlight.pirep_id;
-    void (async () => {
-      try {
-        await invoke("flight_end");
-        // Clear the active flight in the React tree *immediately*
-        // instead of waiting for the next 2 s status poll to notice.
-        // Without this, pilots reported the cockpit panel sticking
-        // around after the auto-file completed; the polling-only
-        // path had a race window where a stale poll could overwrite
-        // a "no flight" reading and bring it back briefly.
-        setActiveFlight(null);
-      } catch (err: unknown) {
-        // v0.7.17 (B-006): Auto-File-Failure war vorher KOMPLETT
-        // stumm — catch{} schluckte alles, Pilot dachte „auto-filed"
-        // aber tatsaechlich war der PIREP noch lokal nicht gefilt
-        // (z.B. „not_at_arrival" weil Pilot inzwischen vom Gate weg,
-        // oder „fuel" weil Block-Fuel fehlt). Pilot lief in den
-        // Stale-Stream-Zustand (B-004).
-        //
-        // Jetzt: Activity-Log-Warning + UI-Toast damit der Pilot weiss
-        // dass Auto-File scheiterte und er manuell „Flug beenden"
-        // klicken muss. activeFlight bleibt erhalten damit der
-        // manuelle Button weiter funktioniert. autoFiledRef bleibt
-        // gesetzt → kein Retry-Loop.
-        const errObj = err as { code?: string; message?: string } | undefined;
-        const errCode = errObj?.code ?? "unknown";
-        const errMsg = errObj?.message ?? String(err);
-        void invoke("activity_log_add", {
-          level: "warn",
-          message: 'Auto-File fehlgeschlagen — bitte manuell „Flug beenden" klicken',
-          detail: `${errCode}: ${errMsg}`,
-        }).catch(() => null);
-      }
-    })();
-  }, [activeFlight, autoFile]);
+  // v0.13.5 Torben-Fix: Auto-File-Logik wurde in AutoFilePirepWatcher
+  // ausgelagert (mounted in App.tsx, tab-unabhängig). Hier nicht mehr —
+  // sonst würde sie 2× feuern wenn Cockpit-Tab aktiv ist (Race-Window
+  // zwischen den beiden useEffect-Instanzen, beide könnten flight_end
+  // parallel invoken bevor `autoFiledRef` greift).
 
   if (!activeFlight) {
     return (

@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { applyTheme, getInitialTheme, type Theme } from "./theme";
 import { LoginPage } from "./components/LoginPage";
 import { CockpitView } from "./components/CockpitView";
+import { AutoFilePirepWatcher } from "./components/AutoFilePirepWatcher";
 import { BriefingView } from "./components/BriefingView";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { ReleaseNotesModal } from "./components/ReleaseNotesModal";
@@ -582,6 +583,18 @@ function App() {
         <LoginPage
           initialError={status.restoreError}
           onSuccess={(s) => setStatus({ kind: "loggedIn", session: s })}
+        />
+      )}
+
+      {/* v0.13.5 Torben-Fix: Auto-File-Watcher tab-unabhängig.
+          Hängt nicht mehr vom Cockpit-Tab ab — der Pilot kann beim
+          Touchdown zu „Landung" wechseln und der PIREP wird trotzdem
+          beim Phase-Wechsel auf "arrived" automatisch eingereicht. */}
+      {status.kind === "loggedIn" && (
+        <AutoFilePirepWatcher
+          activeFlight={activeFlight}
+          autoFile={autoFile}
+          setActiveFlight={setActiveFlight}
         />
       )}
 
