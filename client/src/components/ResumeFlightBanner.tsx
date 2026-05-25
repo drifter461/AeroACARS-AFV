@@ -310,6 +310,7 @@ export function ResumeFlightBanner({
                 void doConfirm();
               }}
               onCancel={() => void doCancel()}
+              activeFlight={activeFlight}
             />
           </>
         ) : (
@@ -377,6 +378,11 @@ interface RecheckResult {
   current_sim_on_ground: boolean;
   persisted_lat?: number;
   persisted_lon?: number;
+  // v0.13.0 Stream F: aktueller Sim-Loadsheet zur Vergleichsanzeige.
+  current_sim_fuel_kg?: number;
+  current_sim_zfw_kg?: number;
+  current_sim_total_weight_kg?: number;
+  current_sim_aircraft_icao?: string;
 }
 
 /**
@@ -440,9 +446,65 @@ function PersistedPositionBlock({
           )}
         </div>
       )}
+
+      {/* v0.13.0 Stream F: Aircraft + Loadsheet damit der Pilot weiß WAS
+          + WIE BELADEN er repositionieren soll. MSFS setzt Fuel beim Reload
+          oft auf Default — daran scheitert sonst der Sanity-Check. */}
+      {activeFlight &&
+        (activeFlight.last_known_aircraft_icao ||
+          typeof activeFlight.last_known_fuel_kg === "number" ||
+          typeof activeFlight.last_known_zfw_kg === "number" ||
+          typeof activeFlight.last_known_total_weight_kg === "number") && (
+          <div
+            style={{
+              marginTop: 10,
+              paddingTop: 8,
+              borderTop: "1px solid rgba(59,130,246,0.25)",
+              fontSize: "0.82rem",
+              fontFamily: "monospace",
+              lineHeight: 1.7,
+            }}
+          >
+            {activeFlight.last_known_aircraft_icao && (
+              <div>
+                ✈ Aircraft: <strong>{activeFlight.last_known_aircraft_icao}</strong>
+                {activeFlight.planned_registration && (
+                  <> · {activeFlight.planned_registration}</>
+                )}
+              </div>
+            )}
+            {typeof activeFlight.last_known_fuel_kg === "number" && (
+              <div>
+                ⛽ Fuel: <strong>{Math.round(activeFlight.last_known_fuel_kg).toLocaleString()} kg</strong>
+                <span style={{ marginLeft: 8, opacity: 0.75 }}>
+                  ({(activeFlight.last_known_fuel_kg / 1000).toFixed(1)} t)
+                </span>
+              </div>
+            )}
+            {typeof activeFlight.last_known_zfw_kg === "number" && (
+              <div>
+                📦 ZFW: <strong>{Math.round(activeFlight.last_known_zfw_kg).toLocaleString()} kg</strong>
+                <span style={{ marginLeft: 8, opacity: 0.75 }}>
+                  ({(activeFlight.last_known_zfw_kg / 1000).toFixed(1)} t)
+                </span>
+              </div>
+            )}
+            {typeof activeFlight.last_known_total_weight_kg === "number" && (
+              <div>
+                ⚖ Total Weight: <strong>{Math.round(activeFlight.last_known_total_weight_kg).toLocaleString()} kg</strong>
+                <span style={{ marginLeft: 8, opacity: 0.75 }}>
+                  ({(activeFlight.last_known_total_weight_kg / 1000).toFixed(1)} t)
+                </span>
+              </div>
+            )}
+          </div>
+        )}
+
       <div style={{ marginTop: 8, fontSize: "0.78rem", opacity: 0.85, fontStyle: "italic" }}>
         Tipp: Im MSFS via Toolbar → World Map → diese Koordinaten eingeben.
-        In X-Plane via Map → "Set Aircraft Location".
+        In X-Plane via Map → "Set Aircraft Location". Fuel + Loadsheet
+        musst Du im Aircraft-EFB/Fuel-Page selbst nachstellen — MSFS lädt
+        oft Default-Fuel beim Reload.
       </div>
     </div>
   );
@@ -464,14 +526,22 @@ function fmtLon(lon: number): string {
   return `${deg}°${min.toFixed(2)}' ${dir}`;
 }
 
+/** "+1240 kg" / "−530 kg" — Vorzeichen-Anzeige für Delta-Werte. */
+function fmtSignedKg(delta: number): string {
+  const sign = delta > 0 ? "+" : delta < 0 ? "−" : "±";
+  return `${sign}${Math.abs(Math.round(delta)).toLocaleString()} kg`;
+}
+
 function RecheckActions({
   busy,
   onConfirm,
   onCancel,
+  activeFlight,
 }: {
   busy: boolean;
   onConfirm: () => void;
   onCancel: () => void;
+  activeFlight: ActiveFlightInfo | null;
 }) {
   const { t } = useTranslation();
   const [checking, setChecking] = useState(false);
@@ -535,14 +605,59 @@ function RecheckActions({
                   fontFamily: "monospace",
                   fontSize: "0.78rem",
                   opacity: 0.9,
+                  lineHeight: 1.6,
                 }}
               >
-                Aktuelle Sim-Position: {fmtLat(lastResult.current_sim_lat)}{" "}
-                {fmtLon(lastResult.current_sim_lon)}
-                {typeof lastResult.current_sim_alt_ft === "number" && (
-                  <> · {lastResult.current_sim_alt_ft} ft</>
+                <div>
+                  Sim-Position: {fmtLat(lastResult.current_sim_lat)}{" "}
+                  {fmtLon(lastResult.current_sim_lon)}
+                  {typeof lastResult.current_sim_alt_ft === "number" && (
+                    <> · {lastResult.current_sim_alt_ft} ft</>
+                  )}
+                  {lastResult.current_sim_on_ground && <> · am Boden</>}
+                </div>
+                {/* v0.13.0 Stream F: Aircraft-Identity-Check. Wenn der Pilot
+                    nach Sim-Crash versehentlich ein anderes Flugzeug geladen
+                    hat, sehen wir es sofort. */}
+                {lastResult.current_sim_aircraft_icao &&
+                  activeFlight?.last_known_aircraft_icao &&
+                  lastResult.current_sim_aircraft_icao !==
+                    activeFlight.last_known_aircraft_icao && (
+                    <div style={{ marginTop: 4, color: "#fca5a5" }}>
+                      ⚠ Aircraft im Sim: <strong>{lastResult.current_sim_aircraft_icao}</strong>
+                      {" "}— gespeichert war{" "}
+                      <strong>{activeFlight.last_known_aircraft_icao}</strong>
+                    </div>
+                  )}
+                {/* Fuel-Delta */}
+                {typeof lastResult.current_sim_fuel_kg === "number" && (
+                  <div style={{ marginTop: 4 }}>
+                    ⛽ Sim-Fuel: {Math.round(lastResult.current_sim_fuel_kg).toLocaleString()} kg
+                    {typeof activeFlight?.last_known_fuel_kg === "number" && (
+                      <>
+                        {" "}(Δ{" "}
+                        {fmtSignedKg(
+                          lastResult.current_sim_fuel_kg -
+                            activeFlight.last_known_fuel_kg,
+                        )}{" "}
+                        vs gespeichert)
+                      </>
+                    )}
+                  </div>
                 )}
-                {lastResult.current_sim_on_ground && <> · am Boden</>}
+                {/* Total-Weight-Delta */}
+                {typeof lastResult.current_sim_total_weight_kg === "number" &&
+                  typeof activeFlight?.last_known_total_weight_kg === "number" && (
+                    <div>
+                      ⚖ Sim-Gewicht: {Math.round(lastResult.current_sim_total_weight_kg).toLocaleString()} kg
+                      {" "}(Δ{" "}
+                      {fmtSignedKg(
+                        lastResult.current_sim_total_weight_kg -
+                          activeFlight.last_known_total_weight_kg,
+                      )}{" "}
+                      vs gespeichert)
+                    </div>
+                  )}
               </div>
             )}
         </div>

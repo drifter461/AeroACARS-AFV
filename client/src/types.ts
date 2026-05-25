@@ -355,6 +355,14 @@ export interface ActiveFlightInfo {
   last_known_lat?: number;
   last_known_lon?: number;
   last_known_alt_ft?: number;
+  /** v0.13.0 Stream F: zusätzlich Fuel/Weight/Aircraft aus dem letzten
+   *  Sim-Snapshot vor dem Crash/Disconnect. MSFS setzt Fuel beim Reload
+   *  oft auf Default — der Pilot sieht den Soll-Wert + stellt ihn manuell
+   *  nach, BEVOR er auf "Position prüfen + fortsetzen" klickt. */
+  last_known_fuel_kg?: number;
+  last_known_zfw_kg?: number;
+  last_known_total_weight_kg?: number;
+  last_known_aircraft_icao?: string;
   /** Stand the aircraft pushed back from (MSFS ATC PARKING NAME). */
   dep_gate: string | null;
   /** Stand the pilot parked at after arrival. */

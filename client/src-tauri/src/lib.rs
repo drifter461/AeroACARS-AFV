@@ -3131,15 +3131,25 @@ pub struct ActiveFlightInfo {
     /// on-ground, or implausibly large drift). The resume banner then
     /// disables its 10-second auto-confirm and requires an explicit click.
     resume_position_suspect: bool,
-    /// v0.13.0 Stream F (LE22-LE26): wenn `was_just_resumed=true`, hier die
-    /// letzte gespeicherte Position für die Banner-Anzeige damit der Pilot
-    /// weiß WOHIN er sich im Sim repositionieren muss.
+    /// v0.13.0 Stream F (LE22-LE26): wenn `was_just_resumed=true`, hier alle
+    /// gespeicherten State-Werte für die Banner-Anzeige damit der Pilot weiß
+    /// WOHIN er sich im Sim repositionieren muss UND mit welchem Fuel/Weight.
+    /// Sehr wichtig: MSFS setzt Fuel beim Reload oft auf Default zurück —
+    /// der Pilot muss das manuell wieder einstellen.
     #[serde(skip_serializing_if = "Option::is_none")]
     last_known_lat: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_known_lon: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_known_alt_ft: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_known_fuel_kg: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_known_zfw_kg: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_known_total_weight_kg: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_known_aircraft_icao: Option<String>,
     /// Departure stand from MSFS `ATC PARKING NAME` (snapshotted at
     /// the start of the flight). Empty until captured.
     dep_gate: Option<String>,
@@ -6647,6 +6657,18 @@ fn flight_info(flight: &ActiveFlight, resume_position_suspect: bool) -> ActiveFl
         last_known_lat: if was_just_resumed { stats.last_lat } else { None },
         last_known_lon: if was_just_resumed { stats.last_lon } else { None },
         last_known_alt_ft: None,
+        // v0.13.0 Stream F: Fuel/Weight/Aircraft aus dem letzten Sim-Snapshot
+        // (vor dem Disconnect/Crash). MSFS setzt Fuel beim Reload oft auf
+        // Default — der Pilot sieht jetzt den Soll-Wert und kann ihn manuell
+        // nachstellen, BEVOR er auf "Position prüfen + fortsetzen" klickt.
+        last_known_fuel_kg: if was_just_resumed { stats.last_fuel_kg } else { None },
+        last_known_zfw_kg: if was_just_resumed { stats.last_zfw_kg } else { None },
+        last_known_total_weight_kg: if was_just_resumed { stats.last_total_weight_kg } else { None },
+        last_known_aircraft_icao: if was_just_resumed && !flight.aircraft_icao.is_empty() {
+            Some(flight.aircraft_icao.clone())
+        } else {
+            None
+        },
         dep_gate: stats.dep_gate.clone(),
         arr_gate: stats.arr_gate.clone(),
         approach_runway: stats.approach_runway.clone(),
@@ -12159,6 +12181,18 @@ struct ResumeCheckPositionOutcome {
     persisted_lat: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     persisted_lon: Option<f64>,
+    // v0.13.0 Stream F: Fuel/Weight/Aircraft-Vergleich. Frontend zeigt
+    // damit "Sim hat 5 t weniger Fuel als gespeichert" oder "anderes
+    // Aircraft im Sim geladen" an, sobald der Pilot auf "Position prüfen"
+    // drückt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    current_sim_fuel_kg: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    current_sim_zfw_kg: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    current_sim_total_weight_kg: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    current_sim_aircraft_icao: Option<String>,
 }
 
 #[tauri::command]
@@ -12185,6 +12219,10 @@ async fn flight_resume_check_position(
             current_sim_on_ground: false,
             persisted_lat: None,
             persisted_lon: None,
+            current_sim_fuel_kg: None,
+            current_sim_zfw_kg: None,
+            current_sim_total_weight_kg: None,
+            current_sim_aircraft_icao: None,
         });
     }
 
@@ -12269,6 +12307,10 @@ async fn flight_resume_check_position(
         current_sim_on_ground: snap.on_ground,
         persisted_lat: persisted_pos.map(|(la, _)| la),
         persisted_lon: persisted_pos.map(|(_, lo)| lo),
+        current_sim_fuel_kg: Some(snap.fuel_total_kg),
+        current_sim_zfw_kg: snap.zfw_kg,
+        current_sim_total_weight_kg: snap.total_weight_kg,
+        current_sim_aircraft_icao: snap.aircraft_icao.clone(),
     })
 }
 
