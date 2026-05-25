@@ -270,16 +270,19 @@ export function ResumeFlightBanner({
             role="alert"
             style={{
               margin: "10px 0",
-              padding: "8px 12px",
+              padding: "12px 14px",
               borderRadius: 6,
-              background: "rgba(251,191,36,0.12)",
-              border: "1px solid rgba(251,191,36,0.45)",
-              color: "#fbbf24",
-              fontSize: "0.85rem",
-              lineHeight: 1.45,
+              background: "rgba(239,68,68,0.15)",
+              border: "2px solid rgba(239,68,68,0.65)",
+              color: "#fca5a5",
+              fontSize: "0.9rem",
+              lineHeight: 1.5,
             }}
           >
-            {t("resume.position_suspect")}
+            <strong style={{ display: "block", marginBottom: 6, fontSize: "1rem", color: "#ef4444" }}>
+              ⚠ {t("resume.hard_stop_title")}
+            </strong>
+            {t("resume.hard_stop_body")}
           </div>
         ) : (
           <div className="resume-modal__countdown">
@@ -295,28 +298,66 @@ export function ResumeFlightBanner({
           </div>
         )}
 
-        <div className="resume-modal__actions">
-          <button
-            type="button"
-            className="button button--primary resume-modal__primary"
-            onClick={() => {
-              if (confirmingRef.current) return;
-              confirmingRef.current = true;
-              void doConfirm();
-            }}
-            disabled={mode.busy}
-          >
-            {mode.busy ? t("resume.adopting") : t("resume.adopt_now")}
-          </button>
-          <button
-            type="button"
-            className="resume-modal__danger"
-            onClick={() => void doCancel()}
-            disabled={mode.busy}
-          >
-            {t("resume.cancel_flight")}
-          </button>
-        </div>
+        {positionSuspect ? (
+          // v0.13.0 Stream F (LE22-LE26 minimum-viable): Hard-Stop bei
+          // position_suspect. Pilot MUSS explizit entscheiden. Primary-Button
+          // ist jetzt "Verwerfen" (danger), Resume ist secondary mit Warnung.
+          <div className="resume-modal__actions" style={{ flexDirection: "column", gap: 8 }}>
+            <button
+              type="button"
+              className="resume-modal__danger"
+              style={{ width: "100%", padding: "12px", fontWeight: 600 }}
+              onClick={() => void doCancel()}
+              disabled={mode.busy}
+            >
+              🔴 {t("resume.hard_stop_discard")}
+            </button>
+            <button
+              type="button"
+              className="button"
+              style={{
+                width: "100%",
+                padding: "8px",
+                fontSize: "0.85rem",
+                opacity: 0.7,
+                background: "rgba(251,191,36,0.12)",
+                border: "1px solid rgba(251,191,36,0.35)",
+                color: "#fbbf24",
+              }}
+              onClick={() => {
+                if (confirmingRef.current) return;
+                confirmingRef.current = true;
+                void doConfirm();
+              }}
+              disabled={mode.busy}
+            >
+              {mode.busy ? t("resume.adopting") : t("resume.hard_stop_force_resume")}
+            </button>
+          </div>
+        ) : (
+          <div className="resume-modal__actions">
+            <button
+              type="button"
+              className="button button--primary resume-modal__primary"
+              onClick={() => {
+                if (confirmingRef.current) return;
+                confirmingRef.current = true;
+                void doConfirm();
+              }}
+              disabled={mode.busy}
+            >
+              {mode.busy ? t("resume.adopting") : t("resume.adopt_now")}
+            </button>
+            <button
+              type="button"
+              className="resume-modal__danger"
+              onClick={() => void doCancel()}
+              disabled={mode.busy}
+            >
+              {t("resume.cancel_flight")}
+            </button>
+          </div>
+        )}
     </section>
   );
 }
