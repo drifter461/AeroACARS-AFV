@@ -1278,7 +1278,7 @@
     "hard_stop_title": "Sim crash o reload rilevato",
     "hard_stop_body": "La posizione attuale del sim non corrisponde al volo salvato. Riposiziona prima nel sim alla posizione precedente (slew mode o ricarica), poi premi \"Verifica posizione ora + riprendi\". Se la posizione è entro 5 nm dal punto salvato, il volo riprende normalmente senza marchio untrusted.",
     "hard_stop_discard": "Scarta volo + ricomincia",
-    "hard_stop_force_resume": "Continua comunque (PIREP sarà marcato untrusted)",
+    "hard_stop_force_resume": "Continua comunque (salto registrato nel log attività)",
     "recheck_check_now": "Verifica posizione ora + riprendi",
     "recheck_checking": "Verifica posizione…",
     "recheck_show_force": "Avanzato: continua nonostante il drift"

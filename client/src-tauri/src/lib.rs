@@ -15145,6 +15145,13 @@ fn spawn_position_streamer(app: AppHandle, flight: Arc<ActiveFlight>, client: Cl
                 ) {
                     let alt_drop_ft = (prev.altitude_msl_ft - curr.altitude_msl_ft).abs();
                     flight.was_just_resumed.store(true, Ordering::SeqCst);
+                    // v0.13.11 (QS-Round-2 Fix): last_good_snap auf den Pre-
+                    // Recovery-Snapshot zuruecksetzen damit der Pause-
+                    // Heartbeat (Guard oben im naechsten Tick) phpVMS mit den
+                    // echten airborne-Cruise-Werten beliefert statt dem
+                    // falschen Ground/Reload-Snapshot, den der Adapter
+                    // gerade geliefert hat.
+                    last_good_snap = previous_snap_for_recovery.clone();
                     save_active_flight(&app, &flight);
                     log_activity_handle(
                         &app,
