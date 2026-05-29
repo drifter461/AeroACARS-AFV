@@ -265,6 +265,10 @@ export function BidsList({
   } | null>(null);
   /** v0.5.27: Manual/VFR-Mode-Modal — Bid für den's gerade geöffnet ist. */
   const [manualModalBid, setManualModalBid] = useState<Bid | null>(null);
+  /** v0.12.12-dev: Wetter-Briefing-Lade-Hinweis. Erscheint per Toast für 5 s
+   *  beim Klick auf den 🌦-Button und informiert den Pilot, dass die GSG-
+   *  Seite ihre Daten live holt → Browser-Tab kann bis 30 s laden. */
+  const [weatherLoadHint, setWeatherLoadHint] = useState(false);
   /** Cached airport coords keyed by uppercase ICAO. */
   const [airports, setAirports] = useState<Record<string, AirportInfo>>({});
   /** Tracks ICAOs we've already requested so we don't fetch the same one twice. */
@@ -305,7 +309,10 @@ export function BidsList({
           next.set(bids[i]!.id, r.value);
           successCount++;
         } else {
-          console.log("[bid_simbrief_preview]", bids[i]!.id, "failed:", r.reason);
+          // v0.13.7: console.log entfernt — Preview-Failure ist eine
+          // erwartete Bedingung (kein OFP fuer den Bid generiert) und
+          // sollte die DevTools nicht zumuellen. Bei Bedarf kann das
+          // Backend ein log_activity-Entry liefern.
           errorCount++;
         }
       });
@@ -426,8 +433,8 @@ export function BidsList({
     // egal was passiert. Vorher gab es Pfade die `null` zurueckgaben
     // (success+changed=true, unknown-error-code) → Pilot sah gar nichts
     // und wusste nicht ob der Refresh ueberhaupt durchlief.
-    // Plus: Diagnose-Log fuer Backend-Debugging.
-    console.log("[refresh] outcome:", refreshOutcome);
+    // v0.13.7: Diagnose-console.log entfernt — Pilot bekommt die Outcome
+    // bereits ueber das Notice-UI; Devs koennen via Tauri-Logs nachvollziehen.
 
     if (refreshOutcome.error) {
       const formatted = formatRefreshError(refreshOutcome.error, t);
@@ -663,6 +670,25 @@ export function BidsList({
           formatRefreshError-Helper geliefert (Error-Pfad) ODER vom
           inline-Render in handleRefresh (Success-Pfad mit changed=false).
           Auto-clear nach 6s. */}
+      {/* v0.12.12-dev: 30-s-Lade-Hinweis fuer Wetter-Briefing — erscheint
+          beim Klick auf den 🌦-Button und blendet sich nach 5 s aus. */}
+      {weatherLoadHint && (
+        <div
+          role="status"
+          className="bids-refresh-notice bids-refresh-notice--info"
+          style={{
+            padding: "8px 12px",
+            marginBottom: 10,
+            borderRadius: 6,
+            background: "rgba(56, 189, 248, 0.12)",
+            border: "1px solid rgba(56, 189, 248, 0.35)",
+            color: "#7dd3fc",
+            fontSize: "0.88rem",
+          }}
+        >
+          🌦 {t("bids.weather_briefing_load_hint")}
+        </div>
+      )}
       {refreshNotice && (
         <div
           role="status"
@@ -957,6 +983,24 @@ export function BidsList({
                       onClick={() => void openFlightPage(f)}
                     >
                       {t("bids.open_flight_page")} ↗
+                    </button>
+                    {/* v0.12.12-dev: GSG-Wetter-Briefing extern oeffnen.
+                        Login-basiert — die Seite zieht den aktiven Bid
+                        automatisch sobald der Pilot in phpVMS eingeloggt
+                        ist (gleiche Logik wie OFP/Flugseite). Der Lade-
+                        Hinweis erscheint per Toast beim Klick statt als
+                        permanenter Schild. */}
+                    <button
+                      type="button"
+                      className="button"
+                      onClick={() => {
+                        setWeatherLoadHint(true);
+                        window.setTimeout(() => setWeatherLoadHint(false), 5000);
+                        void openUrl("https://german-sky-group.eu/weatherbriefing").catch(() => {});
+                      }}
+                      title={t("bids.open_weather_briefing_hint")}
+                    >
+                      🌦 {t("bids.open_weather_briefing")} ↗
                     </button>
                     {/* v0.5.27 VFR/Manual-Mode-Button: immer verfuegbar
                         wenn kein aktiver Flug laeuft. Pilot entscheidet

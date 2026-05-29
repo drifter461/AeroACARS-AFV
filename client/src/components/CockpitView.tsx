@@ -1,10 +1,22 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
-import type { ActiveFlightInfo, LoginResult, SimSnapshot } from "../types";
+import { listen } from "@tauri-apps/api/event";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import type {
+  ActiveFlightInfo,
+  FlightEndOutcome,
+  LoginResult,
+  SimSnapshot,
+} from "../types";
 import { ResumeFlightBanner } from "./ResumeFlightBanner";
 import { ActiveFlightPanel } from "./ActiveFlightPanel";
 import { StableApproachBanner } from "./StableApproachBanner";
+
+// v0.12.12-dev: GSG-Wetter-Briefing-Seite. Login-basiert — wenn der Pilot
+// in seinem Standard-Browser bei phpVMS eingeloggt ist, zieht die Seite
+// den aktiven Bid automatisch.
+const WEATHER_BRIEFING_URL = "https://german-sky-group.eu/weatherbriefing";
 // v0.3.0: LoadsheetMonitor wird jetzt direkt im ActiveFlightPanel
 // gerendert (zwischen InfoStrip und WeatherBriefing), damit das
 // Loadsheet visuell zum aktiven Flug gehört statt als getrennte
@@ -19,10 +31,6 @@ interface Props {
   /** Called when there's no active flight and the user wants to pick
    *  one — UI nudges them to the briefing tab. */
   onSwitchToBriefing: () => void;
-  /** Auto-file the PIREP once the FSM reaches `Arrived`. Toggle in
-   *  Settings → Filing. When false the pilot has to click
-   *  "Flug beenden" themselves. */
-  autoFile: boolean;
   /** v0.5.38: Stable-Approach-Banner anzeigen. Default ON. */
   approachAdvisoriesEnabled: boolean;
 }
@@ -42,113 +50,186 @@ export function CockpitView({
   setActiveFlight,
   simSnapshot,
   onSwitchToBriefing,
-  autoFile,
   approachAdvisoriesEnabled,
 }: Props) {
   const { t } = useTranslation();
-  // v0.4.2: Snapshot der gerade gefilten Flugdaten — wird beim
-  // onEnded-Callback gefüllt und nach 8 s automatisch wieder cleared.
-  // Banner zeigt Pilot eine prominente „PIREP eingereicht"-Bestätigung
-  // statt nur stillem Verschwinden des ActiveFlightPanel.
-  const [filedFlightInfo, setFiledFlightInfo] = useState<{
-    callsign: string;
-    dpt: string;
-    arr: string;
-    at: number;
-  } | null>(null);
+  // v0.12.5 (LE7): how the last flight concluded — drives the post-flight
+  // banner. A *green* success banner ONLY for a genuine filing; a neutral
+  // notice for a discard. Replaces the old `filedFlightInfo` which blindly
+  // showed "PIREP filed" for cancel/forget/resume too (Bug F).
+  const [endNotice, setEndNotice] = useState<FlightEndOutcome | null>(null);
+  /** v0.12.12-dev: Wetter-Briefing-Lade-Hinweis. Erscheint beim Klick auf
+   *  den 🌦-Button (5 s sichtbar) statt als permanenter Schild. */
+  const [weatherLoadHint, setWeatherLoadHint] = useState(false);
   useEffect(() => {
-    if (!filedFlightInfo) return;
-    const id = window.setTimeout(() => setFiledFlightInfo(null), 8000);
+    if (!endNotice) return;
+    const id = window.setTimeout(() => setEndNotice(null), 8000);
     return () => window.clearTimeout(id);
-  }, [filedFlightInfo]);
+  }, [endNotice]);
 
-  // Auto-file the PIREP once the FSM marks the flight as Arrived
-  // (BlocksOn + 30 s + engines off + parking brake set). Most pilots
-  // wouldn't manually click "Flug beenden" if the app could just
-  // submit on its own — and with all the pre-flight validation in
-  // flight_end the worst case is a soft fail (the manual file dialog
-  // surfaces, same as today). We attempt it exactly once per flight
-  // via the ref, so a transient phase flutter back to TaxiIn doesn't
-  // re-trigger.
-  const autoFiledRef = useRef<string | null>(null);
+  /** v0.12.5 (LE7): reload the active flight without claiming a PIREP was
+   *  filed. `flight_forget` → backend returns null → cockpit collapses;
+   *  disconnect-resume → backend keeps the flight → it stays. */
+  const refreshActiveFlight = () => {
+    void invoke<ActiveFlightInfo | null>("flight_status")
+      .then(setActiveFlight)
+      .catch(() => {});
+  };
+
+  /** v0.12.5 (LE7): a real PIREP concluded — show the outcome banner and
+   *  clear the flight. Shared by `ActiveFlightPanel` and `DivertBanner`. */
+  const handleFiledSuccess = (outcome: FlightEndOutcome) => {
+    setEndNotice(outcome);
+    setActiveFlight(null);
+  };
+
+  // v0.12.6: Auto-File läuft jetzt im **Backend** (Position-Streamer),
+  // window-unabhängig. Vorher war es ein Frontend-`useEffect` — der lief
+  // nur, wenn das AeroACARS-Fenster im Vordergrund UND der Cockpit-Tab
+  // aktiv war (sonst drosselt die WebView die JS-Timer). Pilot-Befund:
+  // der PIREP ging erst raus, nachdem der Pilot AeroACARS in den
+  // Vordergrund holte. Das Backend filet beim FSM-Latch auf `Arrived`
+  // selbst und emittiert `pirep_auto_filed` — wir zeigen darauf nur noch
+  // das LE7-Erfolgs-Banner.
   useEffect(() => {
-    if (!activeFlight) {
-      autoFiledRef.current = null;
-      return;
-    }
-    if (!autoFile) return;
-    if (activeFlight.phase !== "arrived") return;
-    // Suppress auto-file when we've detected a divert. The pilot must
-    // explicitly choose "submit as divert to X" / "submit as planned"
-    // / "override" via the DivertBanner — silently filing with the
-    // wrong arr_airport_id would defeat the whole point.
-    if (activeFlight.divert_hint) return;
-    if (autoFiledRef.current === activeFlight.pirep_id) return;
-    autoFiledRef.current = activeFlight.pirep_id;
-    void (async () => {
-      try {
-        await invoke("flight_end");
-        // Clear the active flight in the React tree *immediately*
-        // instead of waiting for the next 2 s status poll to notice.
-        // Without this, pilots reported the cockpit panel sticking
-        // around after the auto-file completed; the polling-only
-        // path had a race window where a stale poll could overwrite
-        // a "no flight" reading and bring it back briefly.
+    const unlisten = listen<{ callsign: string; dpt: string; arr: string }>(
+      "pirep_auto_filed",
+      (e) => {
+        setEndNotice({ kind: "filed", ...e.payload });
         setActiveFlight(null);
-      } catch (err: unknown) {
-        // v0.7.17 (B-006): Auto-File-Failure war vorher KOMPLETT
-        // stumm — catch{} schluckte alles, Pilot dachte „auto-filed"
-        // aber tatsaechlich war der PIREP noch lokal nicht gefilt
-        // (z.B. „not_at_arrival" weil Pilot inzwischen vom Gate weg,
-        // oder „fuel" weil Block-Fuel fehlt). Pilot lief in den
-        // Stale-Stream-Zustand (B-004).
-        //
-        // Jetzt: Activity-Log-Warning + UI-Toast damit der Pilot weiss
-        // dass Auto-File scheiterte und er manuell „Flug beenden"
-        // klicken muss. activeFlight bleibt erhalten damit der
-        // manuelle Button weiter funktioniert. autoFiledRef bleibt
-        // gesetzt → kein Retry-Loop.
-        const errObj = err as { code?: string; message?: string } | undefined;
-        const errCode = errObj?.code ?? "unknown";
-        const errMsg = errObj?.message ?? String(err);
-        void invoke("activity_log_add", {
-          level: "warn",
-          message: 'Auto-File fehlgeschlagen — bitte manuell „Flug beenden" klicken',
-          detail: `${errCode}: ${errMsg}`,
-        }).catch(() => null);
+      },
+    );
+    return () => {
+      void unlisten.then((f) => f());
+    };
+  }, [setActiveFlight]);
+
+  // v0.13.7: Backend emittiert `pirep_cancelled_remotely` wenn phpVMS einen
+  // 404 auf einen laufenden PIREP liefert (= Inaktivitäts-Timeout oder
+  // VA-Admin hat den PIREP entfernt). Activity-Log enthält den Eintrag
+  // bereits durchgehend; hier räumen wir zusätzlich den lokalen
+  // Flugzustand auf, damit der Pilot nicht weiterklickt auf einem PIREP
+  // der serverseitig nicht mehr existiert.
+  useEffect(() => {
+    const unlisten = listen<{ pirep_id: string; source: string }>(
+      "pirep_cancelled_remotely",
+      () => {
+        setEndNotice({ kind: "cancelled_remotely" });
+        setActiveFlight(null);
+      },
+    );
+    return () => {
+      void unlisten.then((f) => f());
+    };
+  }, [setActiveFlight]);
+
+  // v0.12.5 (LE7): post-flight notice banner — green ✅ for a real filing,
+  // neutral for a discard. Rendered above both the empty state and the
+  // active-flight panel so it's visible whichever way the tree resolves.
+  const noticeBanner = endNotice && (
+    <div
+      className={
+        endNotice.kind === "filed" || endNotice.kind === "filed_instead"
+          ? "cockpit-pirep-success"
+          : "cockpit-pirep-success cockpit-pirep-success--neutral"
       }
-    })();
-  }, [activeFlight, autoFile]);
+      role="status"
+    >
+      <div className="cockpit-pirep-success__icon">
+        {endNotice.kind === "filed" || endNotice.kind === "filed_instead"
+          ? "✅"
+          : endNotice.kind === "queued"
+          ? "⏳"
+          : "ℹ"}
+      </div>
+      <div className="cockpit-pirep-success__text">
+        {endNotice.kind === "filed" && (
+          <>
+            <strong>{t("cockpit.pirep_filed_title")}</strong>
+            <span>
+              {t("cockpit.pirep_filed_detail", {
+                callsign: endNotice.callsign,
+                dpt: endNotice.dpt,
+                arr: endNotice.arr,
+              })}
+            </span>
+          </>
+        )}
+        {endNotice.kind === "filed_instead" && (
+          <>
+            <strong>{t("cockpit.filed_instead_title")}</strong>
+            <span>
+              {t("cockpit.filed_instead_detail", {
+                pirep_id: endNotice.pirep_id,
+              })}
+            </span>
+          </>
+        )}
+        {endNotice.kind === "queued" && (
+          <>
+            <strong>{t("cockpit.queued_title")}</strong>
+            <span>
+              {t("cockpit.queued_detail", { pirep_id: endNotice.pirep_id })}
+            </span>
+          </>
+        )}
+        {endNotice.kind === "cancelled" && (
+          <>
+            <strong>{t("cockpit.cancelled_title")}</strong>
+            <span>{t("cockpit.cancelled_detail")}</span>
+          </>
+        )}
+        {endNotice.kind === "cancelled_remotely" && (
+          <>
+            <strong>{t("cockpit.cancelled_remotely_title")}</strong>
+            <span>{t("cockpit.cancelled_remotely_detail")}</span>
+          </>
+        )}
+      </div>
+      <button
+        type="button"
+        className="cockpit-pirep-success__close"
+        onClick={() => setEndNotice(null)}
+        aria-label={t("cockpit.pirep_filed_dismiss")}
+      >
+        ✕
+      </button>
+    </div>
+  );
+
+  // v0.12.12-dev: Wetter-Briefing-Knopf öffnet die GSG-Briefing-Seite im
+  // System-Browser. Login-basiert, die Seite zieht den aktiven Bid auto-
+  // matisch. Der Lade-Hinweis erscheint per Toast beim Klick (5 s sichtbar)
+  // statt als permanenter Schild — der Pilot soll bemerken dass die Seite
+  // ihre Daten live holt (METAR/TAF/NOTAMs/Runway), Ladezeit bis zu 30 s.
+  const quickActionRow = (
+    <div className="cockpit-actions">
+      <button
+        type="button"
+        className="button button--ghost cockpit-actions__weather"
+        onClick={() => {
+          setWeatherLoadHint(true);
+          window.setTimeout(() => setWeatherLoadHint(false), 5000);
+          void openUrl(WEATHER_BRIEFING_URL).catch(() => {});
+        }}
+        title={t("cockpit.weather_briefing_hint")}
+      >
+        🌦 {t("cockpit.weather_briefing")}
+      </button>
+    </div>
+  );
+
+  const weatherLoadToast = weatherLoadHint && (
+    <div className="cockpit-weather-toast" role="status">
+      🌦 {t("cockpit.weather_briefing_load_hint")}
+    </div>
+  );
 
   if (!activeFlight) {
     return (
       <>
-        {/* v0.4.2: PIREP-Erfolgs-Banner. Bleibt 8 s sichtbar nach
-            erfolgreichem Filing, dann auto-dismiss. Pilot kann
-            sofort weiter arbeiten — Banner ist nicht-blockierend. */}
-        {filedFlightInfo && (
-          <div className="cockpit-pirep-success" role="status">
-            <div className="cockpit-pirep-success__icon">✅</div>
-            <div className="cockpit-pirep-success__text">
-              <strong>{t("cockpit.pirep_filed_title")}</strong>
-              <span>
-                {t("cockpit.pirep_filed_detail", {
-                  callsign: filedFlightInfo.callsign,
-                  dpt: filedFlightInfo.dpt,
-                  arr: filedFlightInfo.arr,
-                })}
-              </span>
-            </div>
-            <button
-              type="button"
-              className="cockpit-pirep-success__close"
-              onClick={() => setFiledFlightInfo(null)}
-              aria-label={t("cockpit.pirep_filed_dismiss")}
-            >
-              ✕
-            </button>
-          </div>
-        )}
+        {/* v0.12.5 (LE7): post-flight notice — 8 s auto-dismiss. */}
+        {noticeBanner}
         <section className="cockpit-empty">
           <div className="cockpit-empty__icon" aria-hidden="true">
             ✈
@@ -163,12 +244,16 @@ export function CockpitView({
             {t("cockpit.go_briefing")}
           </button>
         </section>
+        {quickActionRow}
+        {weatherLoadToast}
       </>
     );
   }
 
   return (
     <>
+      {noticeBanner}
+      {quickActionRow}
       <ResumeFlightBanner
         activeFlight={activeFlight}
         onAdopted={setActiveFlight}
@@ -178,7 +263,7 @@ export function CockpitView({
       {!activeFlight.was_just_resumed && (
         <DivertBanner
           activeFlight={activeFlight}
-          onResolved={() => setActiveFlight(null)}
+          onFiledSuccess={handleFiledSuccess}
         />
       )}
 
@@ -196,21 +281,8 @@ export function CockpitView({
         <ActiveFlightPanel
           info={activeFlight}
           simSnapshot={simSnapshot}
-          onEnded={() => {
-            // v0.4.2: Snapshot der gerade abgeschlossenen Flugdaten
-            // an den Banner unten hochreichen — der Pilot soll eine
-            // prominente Bestätigung sehen, nicht nur ein stilles
-            // Verschwinden des ActiveFlightPanels.
-            setFiledFlightInfo({
-              callsign: activeFlight.airline_icao
-                ? `${activeFlight.airline_icao} ${activeFlight.flight_number}`
-                : activeFlight.flight_number,
-              dpt: activeFlight.dpt_airport,
-              arr: activeFlight.arr_airport,
-              at: Date.now(),
-            });
-            setActiveFlight(null);
-          }}
+          onFiledSuccess={handleFiledSuccess}
+          onRefreshActiveFlight={refreshActiveFlight}
         />
       )}
 

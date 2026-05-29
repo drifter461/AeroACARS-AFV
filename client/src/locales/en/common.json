@@ -7,9 +7,22 @@
     "cockpit": "Cockpit",
     "briefing": "My Flights",
     "landing": "Landing",
+    "news": "News",
     "log": "ACARS log",
     "settings": "Settings",
     "about": "About"
+  },
+  "nav": {
+    "news": "News"
+  },
+  "news": {
+    "tab": "News",
+    "empty": "No news",
+    "refresh": "Refresh",
+    "new_badge": "New",
+    "load_error": "Could not load news",
+    "relative_just_now": "just now",
+    "mark_all_read": "Mark all as read"
   },
   "landing": {
     "off_airport": {
@@ -58,6 +71,9 @@
     "col_score": "Score",
     "touchdown": "Touchdown",
     "vs_curve": "V/S curve",
+    "vs_curve_section": "Touchdown close-up (50 Hz) — incl. 10 s after TD",
+    "on_ground": "on the ground",
+    "airborne": "airborne",
     "landing_rate": "Landing rate",
     "g_force": "G force",
     "peak_g": "Raw peak G",
@@ -145,6 +161,13 @@
     "personal_best": "Personal best",
     "approach_chart": "Approach V/S",
     "approach_start": "Approach start",
+    "vs_chart": {
+      "axis": "Vertical speed (fpm)",
+      "band": "Target sink −600…−900",
+      "limit": "Stability limit −1000 fpm",
+      "before_td": "{{s}} s before TD",
+      "after_td": "+{{s}} s after TD"
+    },
     "wind_from_front": "Wind from front",
     "wind_from_front_right": "Wind from front-right",
     "wind_from_right": "Wind from right",
@@ -314,6 +337,7 @@
     "flare_section": "Flare quality",
     "flare_score": "Flare score",
     "flare_score_hint": "Endpoint V/S dominates + bonus for V/S reduction. 100 = gentle touchdown.",
+    "flare_breakdown": "End sink {{vs}} fpm → {{ep}} pts · reduction {{red}} fpm → +{{bonus}} pts",
     "flare_reduction": "Sink-rate reduction",
     "flare_reduction_hint": "How much the pilot reduced the sink rate before TD (positive = flare helped)",
     "flare_dvs_dt": "dSink/dt",
@@ -323,7 +347,7 @@
     "flare_end_vs": "Sink rate just before TD",
     "flare_end_vs_hint": "Sink rate immediately before ground contact",
     "flare_detected": "Flare detected",
-    "flare_not_detected": "No flare detected",
+    "flare_not_detected": "No flare · reduction < 50 fpm",
     "sinkrate_forensik": {
       "title": "🎯 Sink-Rate Forensics",
       "intro_header": "Which sink-rate is the right one?",
@@ -681,6 +705,50 @@
           "thresholds": "< 200 fpm very close to profile · 200–400 fpm okay · > 400 fpm single spike below 500 ft"
         }
       }
+    },
+    "wind_headwind": "Headwind",
+    "wind_tailwind": "Tailwind",
+    "wind_crosswind": "Crosswind",
+    "wind_total": "Total wind",
+    "wind_side_left": "from left",
+    "wind_side_right": "from right",
+    "wind_calm": "Calm",
+    "report": {
+      "button": "Export PDF",
+      "title": "AeroACARS",
+      "subtitle": "Landing Analysis",
+      "generated": "Generated on {{date}} · AeroACARS v{{version}}",
+      "page": "Page {{n}} / {{total}}",
+      "identity": "Flight & Score",
+      "route": "Route",
+      "aircraft": "Aircraft",
+      "simulator": "Simulator",
+      "touchdown_time": "Touchdown time",
+      "hero_of": "of 100",
+      "accident_label": "ACCIDENT DETECTED",
+      "breakdown": "Score Breakdown",
+      "coach": "Coach Tip",
+      "touchdown_section": "Touchdown Metrics",
+      "stability_section": "Approach Stability",
+      "wind_section": "Wind Situation",
+      "runway_section": "Runway Analysis",
+      "fuel_section": "Fuel & Weight",
+      "fuel_diff": "Trip Burn Deviation",
+      "fuel_efficiency": "Fuel Efficiency",
+      "charts_section": "Profiles & Traces",
+      "approach_chart": "Approach V/S Profile",
+      "vs_curve": "Touchdown Close-up (50 Hz)",
+      "runway_diagram": "Runway Diagram",
+      "no_data": "No data available",
+      "td_distance": "Touchdown point from threshold",
+      "in_tdz": "Inside touchdown zone",
+      "aim_delta": "Aim point deviation",
+      "centerline": "Centerline offset",
+      "rollout_dist": "Rollout distance",
+      "rwy_surface": "Surface",
+      "rwy_length": "Runway length",
+      "yes": "yes",
+      "no": "no"
     }
   },
   "about": {
@@ -699,6 +767,14 @@
     "pirep_filed_title": "PIREP filed successfully",
     "pirep_filed_detail": "{{callsign}} · {{dpt}} → {{arr}} — flight submitted to phpVMS. It's now in the Landing tab and on the phpVMS website.",
     "pirep_filed_dismiss": "Dismiss",
+    "cancelled_title": "Flight discarded",
+    "cancelled_detail": "The flight was discarded — no PIREP was filed.",
+    "cancelled_remotely_title": "PIREP removed server-side",
+    "cancelled_remotely_detail": "phpVMS removed the running PIREP (likely inactivity timeout or admin action). The flight state was cleared locally. File the flight as a Manual PIREP if needed.",
+    "filed_instead_title": "Flight filed instead of discarded",
+    "filed_instead_detail": "You chose to cancel, but the flight was already complete — it was submitted as PIREP {{pirep_id}} instead.",
+    "queued_title": "PIREP queued",
+    "queued_detail": "Connection unavailable — PIREP {{pirep_id}} will be submitted automatically once the connection is back.",
     "loadsheet": {
       "title": "Live loadsheet",
       "label": "Loadsheet",
@@ -720,7 +796,12 @@
       "refresh_btn_busy": "Loading…",
       "refresh_btn_done": "✓ OFP updated",
       "refresh_btn_hint": "Pulls the freshest OFP from SimBrief and overwrites the plan values"
-    }
+    },
+    "weather_briefing": "Weather briefing",
+    "weather_briefing_hint": "Open the GSG weather briefing page (shows the active bid)",
+    "notifications": "Messages",
+    "notifications_hint": "Open the phpVMS inbox",
+    "weather_briefing_load_hint": "Opening in your browser — the briefing page may take up to 30 s to load (METAR/TAF/NOTAMs/runway data are fetched live)."
   },
   "update": {
     "button_label": "Update available",
@@ -912,7 +993,14 @@
     "manual_modal_submit": "File with this destination",
     "manual_modal_cancel": "Cancel",
     "submitting": "Submitting…",
-    "filed_ok": "PIREP filed — {{from}} → {{to}}"
+    "filed_ok": "PIREP filed — {{from}} → {{to}}",
+    "confirm_title": "Confirm divert",
+    "confirm_body": "You're filing this flight as a divert to <strong>{{actual}}</strong> instead of the planned <strong>{{planned}}</strong>.",
+    "confirm_reason_label": "Reason for the divert (required)",
+    "confirm_reason_placeholder": "e.g. destination weather below minimums, technical issue, ATC reroute…",
+    "confirm_reason_required": "Please enter a reason before filing the divert.",
+    "confirm_submit": "File divert",
+    "confirm_cancel": "Cancel"
   },
   "phpvms_status": {
     "title": "phpVMS API",
@@ -1168,10 +1256,25 @@
     "col_value": "Value",
     "col_actions": "Actions"
   },
+  "integrity": {
+    "title_critical": "Data integrity problem detected",
+    "title_anomaly": "Data anomaly",
+    "flag_description": "{{type}} in phase {{phase}}",
+    "critical_warning": "The PIREP will likely be marked as 'untrusted' and flagged for VA admin review.",
+    "flag_count": "{{count}} flags this session",
+    "dismiss": "Dismiss"
+  },
   "resume": {
     "title": "Active flight detected",
     "countdown": "Resuming in {{seconds}}s — no position stream is running yet",
     "position_suspect": "⚠ The current sim position differs sharply from the saved flight — the sim may have reloaded after a crash. No automatic resume: please check the sim has loaded cleanly, then press “Resume now”.",
+    "hard_stop_title": "Sim crash or reload detected",
+    "hard_stop_body": "The current sim position doesn't match the saved flight. Please first reposition in the sim back to the last known position (slew mode or reload), then press \"Check position now + resume\". If the position is within 5 nm of the saved point, the flight resumes normally without an untrusted stamp.",
+    "hard_stop_discard": "Discard flight + start over",
+    "hard_stop_force_resume": "Continue anyway (jump logged in activity log)",
+    "recheck_check_now": "Check position now + resume",
+    "recheck_checking": "Checking position…",
+    "recheck_show_force": "Advanced: continue despite drift",
     "adopt_now": "Resume now",
     "adopting": "Resuming…",
     "cancel_flight": "Cancel flight",
@@ -1304,6 +1407,8 @@
       "block_fuel_hint": "Ramp fuel before pushback",
       "fuel_used_label": "Fuel used (kg)",
       "fuel_used_hint": "Block − remaining. Blank = computed",
+      "remaining_fuel_label": "Fuel still in tank (kg)",
+      "remaining_fuel_hint": "Fuel left after landing. AeroACARS computes used = block − remaining",
       "notes_placeholder": "e.g. weather, anomalies, technical issues …"
     }
   },
@@ -1370,8 +1475,13 @@
     "refresh_unknown_error": "Refresh failed ({{code}}) — please check the ACARS log",
     "refresh_no_result": "Refresh returned no result — please retry",
     "no_active_flight_hint": "Pre-flight — the SimBrief OFP is loaded with the current plan when you click **IFR Start (SimBrief)**. The Refresh button in the bid tab cannot do a pre-flight OFP refresh (coming in v0.7.11).",
-    "preview_loaded": "✓ Fresh SimBrief values loaded ({{count}} bid · direct from simbrief.com)",
-    "preview_failed_all": "Could not load SimBrief values — showing phpVMS snapshot. Check Settings → SimBrief."
+    "preview_loaded": "Fresh SimBrief values loaded ({{count}} bid · direct from simbrief.com)",
+    "preview_failed_all": "Could not load SimBrief values — showing phpVMS snapshot. Check Settings → SimBrief.",
+    "open_weather_briefing": "Open weather briefing",
+    "open_weather_briefing_hint": "Open the GSG weather briefing page (shows the active bid)",
+    "open_notifications": "Messages",
+    "open_notifications_hint": "Open the phpVMS inbox",
+    "weather_briefing_load_hint": "Opening in your browser — the briefing page may take up to 30 s to load (METAR/TAF/NOTAMs/runway data are fetched live)."
   },
   "flight": {
     "error": {

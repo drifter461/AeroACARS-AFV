@@ -7,9 +7,22 @@
     "cockpit": "Cockpit",
     "briefing": "I miei voli",
     "landing": "Atterraggio",
+    "news": "Notizie",
     "log": "Log ACARS",
     "settings": "Impostazioni",
     "about": "Info"
+  },
+  "nav": {
+    "news": "Notizie"
+  },
+  "news": {
+    "tab": "Notizie",
+    "empty": "Nessuna notizia",
+    "refresh": "Aggiorna",
+    "new_badge": "Nuovo",
+    "load_error": "Impossibile caricare le notizie",
+    "relative_just_now": "proprio ora",
+    "mark_all_read": "Segna tutto come letto"
   },
   "landing": {
     "off_airport": {
@@ -58,6 +71,9 @@
     "col_score": "Punteggio",
     "touchdown": "Touchdown",
     "vs_curve": "Curva del rateo di discesa",
+    "vs_curve_section": "Primo piano touchdown (50 Hz) — incl. 10 s dopo TD",
+    "on_ground": "a terra",
+    "airborne": "in volo",
     "landing_rate": "Rateo discesa",
     "g_force": "Forza G",
     "peak_g": "Picco G grezzo",
@@ -145,6 +161,13 @@
     "personal_best": "Record personale",
     "approach_chart": "Rateo discesa avvicinamento",
     "approach_start": "Inizio avvicinamento",
+    "vs_chart": {
+      "axis": "Rateo di discesa (fpm)",
+      "band": "Rateo target −600…−900",
+      "limit": "Limite di stabilità −1000 fpm",
+      "before_td": "{{s}} s prima del TD",
+      "after_td": "+{{s}} s dopo il TD"
+    },
     "wind_from_front": "Vento di faccia",
     "wind_from_front_right": "Vento da prua destra",
     "wind_from_right": "Vento da destra",
@@ -314,6 +337,7 @@
     "flare_section": "Qualità del flare",
     "flare_score": "Punteggio flare",
     "flare_score_hint": "Endpoint del rateo di discesa domina + bonus per riduzione. 100 = touchdown morbido.",
+    "flare_breakdown": "Sink finale {{vs}} fpm → {{ep}} pti · riduzione {{red}} fpm → +{{bonus}} pti",
     "flare_reduction": "Riduzione rateo di discesa",
     "flare_reduction_hint": "Di quanto il pilota ha ridotto il rateo di discesa prima del TD",
     "flare_dvs_dt": "dRateo/dt",
@@ -323,7 +347,7 @@
     "flare_end_vs": "Rateo discesa subito prima del TD",
     "flare_end_vs_hint": "Rateo di discesa immediatamente prima del contatto al suolo",
     "flare_detected": "Flare rilevato",
-    "flare_not_detected": "Nessun flare rilevato",
+    "flare_not_detected": "Nessun flare · riduzione < 50 fpm",
     "sinkrate_forensik": {
       "title": "🎯 Forense del rateo di discesa",
       "intro_header": "Qual è il valore „giusto“?",
@@ -681,6 +705,50 @@
           "thresholds": "< 200 fpm molto vicino al profilo · 200–400 fpm ok · > 400 fpm spike singolo sotto 500 ft"
         }
       }
+    },
+    "wind_headwind": "Vento frontale",
+    "wind_tailwind": "Vento in coda",
+    "wind_crosswind": "Vento al traverso",
+    "wind_total": "Vento totale",
+    "wind_side_left": "da sinistra",
+    "wind_side_right": "da destra",
+    "wind_calm": "Calma",
+    "report": {
+      "button": "Esporta PDF",
+      "title": "AeroACARS",
+      "subtitle": "Analisi dell'atterraggio",
+      "generated": "Generato il {{date}} · AeroACARS v{{version}}",
+      "page": "Pagina {{n}} / {{total}}",
+      "identity": "Volo e punteggio",
+      "route": "Rotta",
+      "aircraft": "Aeromobile",
+      "simulator": "Simulatore",
+      "touchdown_time": "Orario di contatto",
+      "hero_of": "su 100",
+      "accident_label": "INCIDENTE RILEVATO",
+      "breakdown": "Dettaglio del punteggio",
+      "coach": "Suggerimento del coach",
+      "touchdown_section": "Parametri del contatto",
+      "stability_section": "Stabilità in avvicinamento",
+      "wind_section": "Situazione del vento",
+      "runway_section": "Analisi della pista",
+      "fuel_section": "Carburante e peso",
+      "fuel_diff": "Scostamento consumo tratta",
+      "fuel_efficiency": "Efficienza carburante",
+      "charts_section": "Profili e tracciati",
+      "approach_chart": "Profilo V/S di avvicinamento",
+      "vs_curve": "Dettaglio del contatto (50 Hz)",
+      "runway_diagram": "Diagramma della pista",
+      "no_data": "Nessun dato disponibile",
+      "td_distance": "Punto di contatto dalla soglia",
+      "in_tdz": "Nella zona di contatto",
+      "aim_delta": "Scostamento dall'aim point",
+      "centerline": "Scostamento dall'asse pista",
+      "rollout_dist": "Distanza di rullaggio",
+      "rwy_surface": "Superficie",
+      "rwy_length": "Lunghezza pista",
+      "yes": "sì",
+      "no": "no"
     }
   },
   "about": {
@@ -699,6 +767,14 @@
     "pirep_filed_title": "PIREP inviato con successo",
     "pirep_filed_detail": "{{callsign}} · {{dpt}} → {{arr}} — Volo trasmesso a phpVMS. Lo trovi ora nella tab Atterraggio e sul sito phpVMS.",
     "pirep_filed_dismiss": "Chiudi",
+    "cancelled_title": "Volo scartato",
+    "cancelled_detail": "Il volo è stato scartato — nessun PIREP è stato inviato.",
+    "cancelled_remotely_title": "PIREP rimosso lato server",
+    "cancelled_remotely_detail": "phpVMS ha rimosso il PIREP in corso (probabile timeout di inattività o azione admin). Lo stato del volo è stato ripulito localmente. Invia il volo come Manual PIREP se necessario.",
+    "filed_instead_title": "Volo inviato invece di scartato",
+    "filed_instead_detail": "Volevi annullare, ma il volo era già completo — è stato inviato come PIREP {{pirep_id}}.",
+    "queued_title": "PIREP in coda",
+    "queued_detail": "Connessione non disponibile — il PIREP {{pirep_id}} sarà inviato automaticamente al ripristino della connessione.",
     "loadsheet": {
       "title": "Loadsheet Live",
       "label": "Loadsheet",
@@ -720,7 +796,12 @@
       "refresh_btn_busy": "Caricamento…",
       "refresh_btn_done": "✓ OFP aggiornato",
       "refresh_btn_hint": "Recupera l'OFP più recente da SimBrief e sovrascrive i valori del piano"
-    }
+    },
+    "weather_briefing": "Briefing meteo",
+    "weather_briefing_hint": "Apri la pagina meteo GSG (mostra il bid attivo)",
+    "notifications": "Messaggi",
+    "notifications_hint": "Apri la posta in arrivo phpVMS",
+    "weather_briefing_load_hint": "Apertura nel browser — il caricamento della pagina briefing può richiedere fino a 30 s (METAR/TAF/NOTAM/dati pista in tempo reale)."
   },
   "update": {
     "button_label": "Aggiornamento disponibile",
@@ -912,7 +993,14 @@
     "manual_modal_submit": "Invia con questa destinazione",
     "manual_modal_cancel": "Annulla",
     "submitting": "Invio…",
-    "filed_ok": "PIREP inviato — {{from}} → {{to}}"
+    "filed_ok": "PIREP inviato — {{from}} → {{to}}",
+    "confirm_title": "Conferma dirottamento",
+    "confirm_body": "Stai inviando questo volo come dirottamento su <strong>{{actual}}</strong> invece della destinazione prevista <strong>{{planned}}</strong>.",
+    "confirm_reason_label": "Motivo del dirottamento (obbligatorio)",
+    "confirm_reason_placeholder": "es. meteo a destinazione sotto i minimi, problema tecnico, rerouting ATC…",
+    "confirm_reason_required": "Inserisci un motivo prima di inviare il dirottamento.",
+    "confirm_submit": "Invia dirottamento",
+    "confirm_cancel": "Annulla"
   },
   "phpvms_status": {
     "title": "API phpVMS",
@@ -1168,6 +1256,14 @@
     "col_value": "Valore",
     "col_actions": "Azioni"
   },
+  "integrity": {
+    "title_critical": "Problema di integrità dei dati rilevato",
+    "title_anomaly": "Anomalia dei dati",
+    "flag_description": "{{type}} in fase {{phase}}",
+    "critical_warning": "Il PIREP sarà probabilmente contrassegnato come 'untrusted' e segnalato per la revisione dell'admin VA.",
+    "flag_count": "{{count}} flag in questa sessione",
+    "dismiss": "Chiudi"
+  },
   "resume": {
     "title": "Volo attivo rilevato",
     "countdown": "Tra {{seconds}}s il volo viene ripreso — fino allora nessun stream di posizioni",
@@ -1178,7 +1274,14 @@
     "confirm_cancel": "Annullare il volo attivo? Il PIREP verrà marcato come „cancellato\" su phpVMS — rimane visibile nella lista PIREP. Eliminazione completa solo dal sito phpVMS.",
     "adopt_failed": "Ripristino fallito",
     "confirm_failed": "Conferma fallita",
-    "cancel_failed": "Impossibile annullare il volo"
+    "cancel_failed": "Impossibile annullare il volo",
+    "hard_stop_title": "Sim crash o reload rilevato",
+    "hard_stop_body": "La posizione attuale del sim non corrisponde al volo salvato. Riposiziona prima nel sim alla posizione precedente (slew mode o ricarica), poi premi \"Verifica posizione ora + riprendi\". Se la posizione è entro 5 nm dal punto salvato, il volo riprende normalmente senza marchio untrusted.",
+    "hard_stop_discard": "Scarta volo + ricomincia",
+    "hard_stop_force_resume": "Continua comunque (salto registrato nel log attività)",
+    "recheck_check_now": "Verifica posizione ora + riprendi",
+    "recheck_checking": "Verifica posizione…",
+    "recheck_show_force": "Avanzato: continua nonostante il drift"
   },
   "active_flight": {
     "title": "Volo attivo",
@@ -1304,6 +1407,8 @@
       "block_fuel_hint": "Carburante ramp prima del pushback",
       "fuel_used_label": "Carburante consumato (kg)",
       "fuel_used_hint": "Block − residuo. Vuoto = calcolato automaticamente",
+      "remaining_fuel_label": "Ancora nel serbatoio (kg)",
+      "remaining_fuel_hint": "Carburante dopo l'atterraggio. AeroACARS calcola consumo = block − residuo",
       "notes_placeholder": "es. meteo, particolarità, problemi tecnici…"
     }
   },
@@ -1370,8 +1475,13 @@
     "refresh_unknown_error": "Aggiornamento fallito ({{code}}) — controlla il log ACARS",
     "refresh_no_result": "Aggiornamento senza risposta dal backend — riprova",
     "no_active_flight_hint": "Pre-volo — l'OFP SimBrief viene caricato con il piano attuale quando clicchi **IFR Start (SimBrief)**. Il pulsante \"Aggiorna\" nel tab dei bid non può fare un refresh OFP pre-volo (in arrivo in v0.7.11).",
-    "preview_loaded": "✓ Valori SimBrief aggiornati ({{count}} bid · direttamente da simbrief.com)",
-    "preview_failed_all": "Impossibile caricare i valori SimBrief — mostro snapshot phpVMS. Controlla Impostazioni → SimBrief."
+    "preview_loaded": "Valori SimBrief aggiornati ({{count}} bid · direttamente da simbrief.com)",
+    "preview_failed_all": "Impossibile caricare i valori SimBrief — mostro snapshot phpVMS. Controlla Impostazioni → SimBrief.",
+    "open_weather_briefing": "Apri briefing meteo",
+    "open_weather_briefing_hint": "Apri la pagina meteo GSG (mostra il bid attivo)",
+    "open_notifications": "Messaggi",
+    "open_notifications_hint": "Apri la posta in arrivo phpVMS",
+    "weather_briefing_load_hint": "Apertura nel browser — il caricamento della pagina briefing può richiedere fino a 30 s (METAR/TAF/NOTAM/dati pista in tempo reale)."
   },
   "flight": {
     "error": {

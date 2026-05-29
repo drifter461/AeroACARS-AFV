@@ -598,6 +598,18 @@ pub enum AircraftProfile {
     IniA350,
     /// INIBuilds A340-600 Pro.
     IniA346Pro,
+    /// v0.13.13: FSReborn Phenom 300E (MSFS 2024 release). Verwendet die
+    /// FSR-eigenen Engine-Knob-LVars statt `GENERAL ENG COMBUSTION:N`.
+    /// Hintergrund (Pilot-Befund Michael 2026-05-26): Standard-SimVar
+    /// liefert in Cold&Dark vor Engine-Start `engines_running > 0` obwohl
+    /// Engines aus → Auto-Start scheitert mit "Triebwerke sind an". FSR
+    /// nutzt eigene LVars fuer Switch-State (siehe HubHop-Reference
+    /// docs/dev/lvar-discovery-hubhop.md):
+    ///   L:FSR_300E_ENGINE1_KNOB_POS  Number  0=STOP 1=RUN 2=START
+    ///   L:FSR_300E_ENGINE2_KNOB_POS  Number  0=STOP 1=RUN 2=START
+    /// Rest der Telemetrie (N1/N2/Fuel/Gear/Flaps) kommt sauber via
+    /// Standard-SimVars — kein voller Profile-Override noetig.
+    FsrPhenom300e,
 }
 
 impl AircraftProfile {
@@ -651,6 +663,13 @@ impl AircraftProfile {
         if t.contains("inibuilds") && t.contains("a340") {
             return Self::IniA340;
         }
+        // v0.13.13: FSReborn Phenom 300E. Title aus dem Sim heisst typisch
+        // "FSReborn Phenom 300E Tristan Interior" (oder mit anderen
+        // Interior-Varianten). Wir matchen tolerant auf fsreborn + phenom +
+        // 300 — fängt auch Edge-Cases ab wie "FSR Phenom300" ohne Space.
+        if t.contains("fsreborn") && t.contains("phenom") && t.contains("300") {
+            return Self::FsrPhenom300e;
+        }
         Self::Default
     }
 
@@ -674,6 +693,9 @@ impl AircraftProfile {
             Self::FenixA319 => Some("A319"),
             Self::FenixA320 => Some("A320"),
             Self::FenixA321 => Some("A321"),
+            // v0.13.13: FSR Phenom 300E hat ICAO E55P (Embraer Phenom 300
+            // Standard-Designator).
+            Self::FsrPhenom300e => Some("E55P"),
             _ => None,
         }
     }
@@ -691,6 +713,7 @@ impl AircraftProfile {
             Self::IniA340 => "INIBuilds A340",
             Self::IniA350 => "INIBuilds A350",
             Self::IniA346Pro => "INIBuilds A340-600 Pro",
+            Self::FsrPhenom300e => "FSReborn Phenom 300E",
         }
     }
 }
@@ -813,6 +836,60 @@ pub enum SimError {
 //   * Add a Phase FSM driven by SimSnapshot streams.
 //   * Add a snapshot ring buffer for downstream consumers.
 
+/// MSFS often returns SimVar values as localization keys, not plain text.
+/// The ATC MODEL var is one of them — e.g. `TT:ATCCOM.AC_MODEL_A320.0.text`
+/// or `ATCCOM.AC_MODEL C208.0.text`. Pull out the readable code, or return
+/// `None` if the input is an unresolved key we can't decode.
+///
+/// v0.12.10: Hierher (sim-core) gezogen, damit der MSFS-Telemetrie-
+/// Adapter den `ATC MODEL` schon bei der Erfassung bereinigt — vorher
+/// landete der rohe Token (z.B. `ATCCOM.AC_MODEL C208.0.text` der
+/// BlackSquare Caravan) ungereinigt in `aircraft_icao`, was „Type ?"
+/// und einen kaputten PIREP zur Folge hatte.
+pub fn clean_atc_model(raw: &str) -> Option<String> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return None;
+    }
+    if let Some(start) = s.find("AC_MODEL") {
+        let after = &s[start + "AC_MODEL".len()..];
+        let after = after.trim_start_matches(|c: char| c == '_' || c == ' ');
+        if let Some(end) = after.find('.') {
+            let model = &after[..end];
+            if !model.is_empty() {
+                return Some(model.to_uppercase());
+            }
+        }
+    }
+    let upper = s.to_uppercase();
+    if upper.starts_with("TT:") || upper.contains("ATCCOM.") || upper.ends_with(".TEXT") {
+        return None;
+    }
+    // v0.8.1: Vendor-Tag-Prefix-Strip. Einige MSFS-Addons (Flysimware
+    // Citation X, manche Carenado-Pakete) schicken den ICAO mit einem
+    // "$$:"-Prefix als ATC-MODEL — Sim liefert z.B. "$$:C750" statt
+    // "C750". Aircraft-Mismatch-Check verglich dann "C750" (Bid) gegen
+    // "$$:C750" (Sim) und schlug fehl. Live-Bug GSG/Sven M 2026-05-13.
+    // Wir strippen den Prefix wenn er aus 1-4 Zeichen + ":" besteht
+    // und kein Buchstabe enthält (= Sonderzeichen wie "$$:" / "##:"),
+    // damit echte ICAO-Codes wie "TT:..." (= text-token, oben schon
+    // gefiltert) nicht falsch behandelt werden.
+    if let Some(colon_pos) = upper.find(':') {
+        if colon_pos <= 4 {
+            let prefix = &upper[..colon_pos];
+            let is_vendor_tag = !prefix.is_empty()
+                && !prefix.chars().any(|c| c.is_ascii_alphanumeric());
+            if is_vendor_tag {
+                let stripped = upper[colon_pos + 1..].trim().to_string();
+                if !stripped.is_empty() {
+                    return Some(stripped);
+                }
+            }
+        }
+    }
+    Some(upper)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -881,5 +958,90 @@ mod tests {
         assert_eq!(AircraftProfile::Default.icao_fallback(), None);
         assert_eq!(AircraftProfile::FbwA32nx.icao_fallback(), None);
         assert_eq!(AircraftProfile::Pmdg737.icao_fallback(), None);
+    }
+
+    // ---- v0.13.13 FsrPhenom300e Profile ----
+
+    #[test]
+    fn detect_fsr_phenom_300e_from_full_title() {
+        // Realer Title aus Michael's Telemetrie (NJE 245 LEMH->LEBL 26.05.2026):
+        let p = AircraftProfile::detect("FSReborn Phenom 300E Tristan Interior", "E55P");
+        assert_eq!(p, AircraftProfile::FsrPhenom300e);
+    }
+
+    #[test]
+    fn detect_fsr_phenom_300e_case_insensitive() {
+        let p = AircraftProfile::detect("fsreborn phenom 300e", "E55P");
+        assert_eq!(p, AircraftProfile::FsrPhenom300e);
+    }
+
+    #[test]
+    fn detect_fsr_phenom_300e_with_variant_suffix() {
+        // FSR liefert verschiedene Interior-Optionen, z.B. "Tristan", "Default".
+        let p = AircraftProfile::detect("FSReborn Phenom 300E Default Interior", "E55P");
+        assert_eq!(p, AircraftProfile::FsrPhenom300e);
+    }
+
+    #[test]
+    fn detect_phenom_without_fsreborn_marker_stays_default() {
+        // Asobo Default-Phenom oder andere Studios sollen NICHT auf das
+        // FSR-Profile fallen — die haben das Knob-LVar nicht.
+        let p = AircraftProfile::detect("Asobo Phenom 300", "E55P");
+        assert_eq!(p, AircraftProfile::Default);
+    }
+
+    #[test]
+    fn detect_fsreborn_lear_75_does_not_match_phenom() {
+        // FSReborn hat auch andere Aircraft (FSR500, Sting S4, evtl. spaeter
+        // Lear). Diese sollen nicht versehentlich als Phenom 300E erkannt
+        // werden — Detection prueft auf alle drei Marker.
+        let p = AircraftProfile::detect("FSReborn Lear 75", "LJ75");
+        assert_eq!(p, AircraftProfile::Default);
+    }
+
+    #[test]
+    fn icao_fallback_fsr_phenom_300e_is_e55p() {
+        assert_eq!(AircraftProfile::FsrPhenom300e.icao_fallback(), Some("E55P"));
+    }
+
+    #[test]
+    fn label_fsr_phenom_300e_is_human_readable() {
+        assert_eq!(AircraftProfile::FsrPhenom300e.label(), "FSReborn Phenom 300E");
+    }
+
+    #[test]
+    fn fsr_phenom_300e_is_not_fenix() {
+        // Sanity: das Profile darf NICHT als Fenix klassifiziert werden
+        // (sonst wuerde der Fenix-LVar-Mapping-Block falsch greifen).
+        assert!(!AircraftProfile::FsrPhenom300e.is_fenix());
+    }
+
+    #[test]
+    fn clean_atc_model_basic_and_token_forms() {
+        // Plain ICAO codes pass through (uppercased).
+        assert_eq!(clean_atc_model("C208"), Some("C208".to_string()));
+        assert_eq!(clean_atc_model("a320"), Some("A320".to_string()));
+        // Empty / unresolved text tokens → None (caller uses fallback).
+        assert_eq!(clean_atc_model(""), None);
+        assert_eq!(clean_atc_model("TT:CESSNA"), None);
+        // Vendor-tag prefix gets stripped.
+        assert_eq!(clean_atc_model("$$:C750"), Some("C750".to_string()));
+    }
+
+    #[test]
+    fn clean_atc_model_blacksquare_caravan_regression() {
+        // v0.12.10 live-bug: the BlackSquare Caravan reports its ATC MODEL
+        // as the raw token `ATCCOM.AC_MODEL C208.0.text` (note the SPACE
+        // and lowercase `.text`). Must resolve to "C208" — otherwise
+        // `aircraft_icao` carries garbage → "Type ?" → broken PIREP filing.
+        assert_eq!(
+            clean_atc_model("ATCCOM.AC_MODEL C208.0.text"),
+            Some("C208".to_string()),
+        );
+        // Underscore variant must also resolve.
+        assert_eq!(
+            clean_atc_model("ATCCOM.AC_MODEL_C750.0.TEXT"),
+            Some("C750".to_string()),
+        );
     }
 }

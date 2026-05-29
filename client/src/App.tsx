@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { applyTheme, getInitialTheme, type Theme } from "./theme";
@@ -6,14 +6,26 @@ import { LoginPage } from "./components/LoginPage";
 import { CockpitView } from "./components/CockpitView";
 import { BriefingView } from "./components/BriefingView";
 import { SettingsPanel } from "./components/SettingsPanel";
-import { ReleaseNotesModal } from "./components/ReleaseNotesModal";
 import { ActivityLogPanel } from "./components/ActivityLogPanel";
 import { AboutPanel } from "./components/AboutPanel";
-import { LandingPanel } from "./components/LandingPanel";
+import { NewsPanel, useUnreadNewsCount } from "./components/NewsPanel";
 import RunwayDiagramPreview from "./dev/RunwayDiagramPreview";
+
+// v0.13.7: LandingPanel + ReleaseNotesModal lazy-loaded. Beide bringen
+// schwere Deps mit (react-markdown + remark-gfm fuer ReleaseNotes; grosse
+// SVG-Builder + scoring-Logik fuer LandingPanel) und werden erst nach dem
+// initialen Login angezeigt. Senkt die Main-Chunk-Size unter 700 KB und
+// beschleunigt den Cold-Start.
+const LandingPanel = lazy(() =>
+  import("./components/LandingPanel").then((m) => ({ default: m.LandingPanel })),
+);
+const ReleaseNotesModal = lazy(() =>
+  import("./components/ReleaseNotesModal").then((m) => ({ default: m.ReleaseNotesModal })),
+);
 import { UpdateButton } from "./components/UpdateButton";
 import { UpdateBanner } from "./components/UpdateBanner";
 import { ErrorReportingFirstRunBanner } from "./components/ErrorReportingFirstRunBanner";
+import { IntegrityBanner } from "./components/IntegrityBanner";
 import { useDiscordRpcPush } from "./hooks/useDiscordRpcPush";
 import { LiveRecordingIndicator } from "./components/LiveRecordingIndicator";
 import { useSimSession } from "./hooks/useSimSession";
@@ -27,7 +39,7 @@ type SessionStatus =
   | { kind: "loggedOut"; restoreError?: UiError }
   | { kind: "loggedIn"; session: LoginResult };
 
-type Tab = "cockpit" | "briefing" | "landing" | "log" | "settings" | "about" | "devpreview";
+type Tab = "cockpit" | "briefing" | "landing" | "news" | "log" | "settings" | "about" | "devpreview";
 
 const DEBUG_STORAGE_KEY = "aeroacars.debug";
 const AUTO_FILE_STORAGE_KEY = "aeroacars.autoFile";
@@ -169,6 +181,15 @@ function App() {
   useEffect(() => {
     void invoke("set_minimize_to_tray", { enabled: minimizeToTray }).catch(() => {});
   }, [minimizeToTray]);
+
+  // v0.12.6: Auto-File-Flag in den Rust-Backend-State spiegeln — bei
+  // Mount UND bei jedem Toggle. Der Position-Streamer im Backend filet
+  // den PIREP beim Latch auf `Arrived` selbst, sobald dieses Flag an
+  // ist (fenster-unabhängig). localStorage ist die Source of Truth;
+  // das Backend defaultet auf `true` bis dieser Sync läuft.
+  useEffect(() => {
+    void invoke("set_auto_file_enabled", { enabled: autoFile }).catch(() => {});
+  }, [autoFile]);
   /** Version we should pop the release-notes modal for. Set on first
    *  mount when the running version differs from the lastSeen
    *  localStorage entry, AND when the user manually triggers it via
@@ -420,6 +441,11 @@ function App() {
     saveAutoDeleteFlightLogs(next);
   }
 
+  // v0.12.12-dev: VA-News-Badge — pollt /api/news + localStorage.
+  // Hook lebt im NewsPanel-Modul; wir lifen den Count nur fuer den
+  // Tab-Badge nach oben.
+  const unreadNews = useUnreadNewsCount(status.kind === "loggedIn");
+
   const phpvmsConnected = status.kind === "loggedIn";
   const simConnected = simState === "connected";
   const simConnecting = simState === "connecting";
@@ -439,6 +465,12 @@ function App() {
           Selbst-versteckend nach der ersten Entscheidung. Zeigt sich
           NUR beim allerersten Start (= leerer localStorage-Key). */}
       <ErrorReportingFirstRunBanner />
+      {/* v0.13.0 Slice 6 — Mid-Session-Integrity-Banner. Self-hiding via
+          useIntegrityFlags-Hook: zeigt sich erst sobald der Recorder ein
+          anomaly/critical Flag via MQTT integrity_flag-Topic gepushed hat.
+          Critical-Banner kann nicht weggeklickt werden (Pilot soll
+          sim-state-reset nicht verstecken). */}
+      <IntegrityBanner />
       <header className="app__header">
         <div className="app__brand">
           <h1>{t("app.name")}</h1>
@@ -526,6 +558,20 @@ function App() {
           <button
             type="button"
             role="tab"
+            aria-selected={tab === "news"}
+            className={`tab ${tab === "news" ? "tab--active" : ""}`}
+            onClick={() => setTab("news")}
+          >
+            {t("nav.news")}
+            {unreadNews > 0 && (
+              <span className="tab__news-badge" aria-label={t("news.new_badge")}>
+                {unreadNews > 9 ? "9+" : unreadNews}
+              </span>
+            )}
+          </button>
+          <button
+            type="button"
+            role="tab"
             aria-selected={tab === "log"}
             className={`tab ${tab === "log" ? "tab--active" : ""}`}
             onClick={() => setTab("log")}
@@ -578,6 +624,12 @@ function App() {
         />
       )}
 
+      {/* v0.13.5 React-AutoFilePirepWatcher entfernt — main's Backend-
+          Auto-File (v0.12.6) macht dasselbe tab-unabhängig im Rust-
+          Streamer + listen('pirep_auto_filed')-Event-Subscription in
+          CockpitView. Torbens Bug war dort schon gelöst, nur in unserer
+          v0.13.0-Branch nicht (wurde von v0.12.4-Basis abgezweigt). */}
+
       {status.kind === "loggedIn" && tab === "cockpit" && (
         <CockpitView
           session={status.session}
@@ -585,7 +637,6 @@ function App() {
           setActiveFlight={setActiveFlight}
           simSnapshot={simSnapshot}
           onSwitchToBriefing={() => setTab("briefing")}
-          autoFile={autoFile}
           approachAdvisoriesEnabled={approachAdvisoriesEnabled}
         />
       )}
@@ -626,7 +677,13 @@ function App() {
         />
       )}
 
-      {status.kind === "loggedIn" && tab === "landing" && <LandingPanel />}
+      {status.kind === "loggedIn" && tab === "landing" && (
+        <Suspense fallback={<div className="lazy-fallback">…</div>}>
+          <LandingPanel />
+        </Suspense>
+      )}
+
+      {status.kind === "loggedIn" && tab === "news" && <NewsPanel />}
 
       {status.kind === "loggedIn" && tab === "log" && <ActivityLogPanel />}
 
@@ -666,13 +723,15 @@ function App() {
         tab === "devpreview" && <RunwayDiagramPreview />}
 
       {releaseNotesVersion && (
-        <ReleaseNotesModal
-          version={releaseNotesVersion}
-          onClose={() => {
-            saveLastSeenReleaseNotesVersion(releaseNotesVersion);
-            setReleaseNotesVersion(null);
-          }}
-        />
+        <Suspense fallback={null}>
+          <ReleaseNotesModal
+            version={releaseNotesVersion}
+            onClose={() => {
+              saveLastSeenReleaseNotesVersion(releaseNotesVersion);
+              setReleaseNotesVersion(null);
+            }}
+          />
+        </Suspense>
       )}
     </main>
   );

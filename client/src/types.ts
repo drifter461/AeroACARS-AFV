@@ -349,6 +349,20 @@ export interface ActiveFlightInfo {
    *  on-ground, or implausibly large drift). The resume banner then
    *  disables its 10-second auto-confirm and waits for an explicit click. */
   resume_position_suspect: boolean;
+  /** v0.13.0 Stream F: nur gesetzt wenn was_just_resumed=true. Die
+   *  letzte gespeicherte Position für die Banner-Anzeige damit der Pilot
+   *  weiß WOHIN er sich im Sim repositionieren muss. */
+  last_known_lat?: number;
+  last_known_lon?: number;
+  last_known_alt_ft?: number;
+  /** v0.13.0 Stream F: zusätzlich Fuel/Weight/Aircraft aus dem letzten
+   *  Sim-Snapshot vor dem Crash/Disconnect. MSFS setzt Fuel beim Reload
+   *  oft auf Default — der Pilot sieht den Soll-Wert + stellt ihn manuell
+   *  nach, BEVOR er auf "Position prüfen + fortsetzen" klickt. */
+  last_known_fuel_kg?: number;
+  last_known_zfw_kg?: number;
+  last_known_total_weight_kg?: number;
+  last_known_aircraft_icao?: string;
   /** Stand the aircraft pushed back from (MSFS ATC PARKING NAME). */
   dep_gate: string | null;
   /** Stand the pilot parked at after arrival. */
@@ -447,6 +461,49 @@ export interface ActiveFlightInfo {
   accident_reasons?: string[];
   /** ISO-8601 UTC */
   accident_at?: string | null;
+  /** v0.12.5 (LE3): Vorbefüll-Werte für das manuelle Filing-Formular. */
+  manual_filing_defaults: ManualFilingDefaults;
+}
+
+/** v0.12.5 (LE7): how an active flight concluded. `ActiveFlightPanel`
+ *  reports this up so `CockpitView` can show the *right* banner — a green
+ *  success only for a genuine filing, a neutral notice for a discard. */
+export type FlightEndOutcome =
+  /** A real PIREP was filed — normal flight-end / manual file. */
+  | { kind: "filed"; callsign: string; dpt: string; arr: string }
+  /** Cancel was requested but the flight was complete → filed instead. */
+  | { kind: "filed_instead"; pirep_id: string }
+  /** Filing hit a transient error → PIREP sits in the retry queue. */
+  | { kind: "queued"; pirep_id: string }
+  /** The flight was genuinely discarded — no PIREP. */
+  | { kind: "cancelled" }
+  /** v0.13.7: phpVMS returned 404 for the running PIREP — server-side
+   *  cancellation (inactivity timeout or admin removal). Banner explains
+   *  the situation and prompts a manual file. */
+  | { kind: "cancelled_remotely" };
+
+/** v0.12.5 (LE3): Mirrors the Rust-side `ManualFilingDefaults`. Seeds the
+ *  ManualFileDialog so the pilot only corrects deviations. All values
+ *  optional (null = FSM hasn't captured it yet). */
+export interface ManualFilingDefaults {
+  distance_nm: number | null;
+  cruise_level_ft: number | null;
+  flight_time_minutes: number | null;
+  landing_rate_fpm: number | null;
+  /** ISO-8601 UTC */
+  block_off_at: string | null;
+  /** ISO-8601 UTC */
+  block_on_at: string | null;
+  block_fuel_kg: number | null;
+  /** Fuel remaining in the tank (kg) — the dialog asks "still in tank",
+   *  not "used". Backend computes used = block − remaining. */
+  remaining_fuel_kg: number | null;
+  /** Detected divert ICAO from the DivertHint, null = no divert. */
+  divert_to: string | null;
+  /** The originally planned arrival ICAO. */
+  planned_arr_icao: string;
+  /** true when a divert was detected → reason is mandatory. */
+  requires_reason: boolean;
 }
 
 /** Mirrors the Rust-side `ReleaseNotes` struct. Returned by the

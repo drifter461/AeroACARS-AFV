@@ -377,21 +377,16 @@ pub struct TouchdownPayload {
     /// sub-score (rollout / length × 100) so the live monitor can show
     /// the same breakdown the AeroACARS app shows pilots in-flight.
     pub runway_length_m: Option<f32>,
-    /// v0.5.22: (actual_burn − planned_burn) / planned_burn × 100. Same
-    /// computation as `LandingRecord.fuel_efficiency_pct` in the client
-    /// — drives the "Spritverbrauch" sub-score. None when the bid had
-    /// no SimBrief OFP attached (planned-burn unavailable).
+    /// Prozentuale Abweichung des **tatsächlichen Trip-Burn**
+    /// (`takeoff_fuel − landing_fuel`) vom geplanten OFP-Trip-Burn
+    /// (`planned_burn_kg`). Positiv = Mehrverbrauch, negativ =
+    /// Minderverbrauch. **Nicht** block-fuel-basiert (kein Taxi-out-Sprit).
+    /// None, wenn der Bid kein SimBrief-OFP hatte (planned-burn fehlt).
     ///
-    /// **@deprecated since v0.7.6** — Berechnungsbasis (`block_fuel -
-    /// landing_fuel`, inkl. Taxi-Out) weicht vom v0.7.1 Sub-Score ab,
-    /// der `actual_trip_burn = takeoff - landing` nutzt. Resultat:
-    /// zwei Prozent-Werte fuers gleiche Konzept im selben Payload
-    /// (SAS9987 v0.7.5: -2.28% hier, -5.0% in `sub_scores[fuel].value`).
-    /// Single Source of Truth ist `sub_scores[fuel]`. Web rendert das
-    /// Feld ab v0.7.6 nicht mehr; Feld bleibt fuer Backward-Compat
-    /// (externe Discord-Embeds, Custom-Dashboards) und wird in einer
-    /// spaeteren Major-Version entfernt. Spec docs/spec/v0.7.6-landing-
-    /// payload-consistency.md §4 P2-3.
+    /// v0.12.4 (Spec docs/spec/v0.12.4-score-consistency.md, LE5): die
+    /// Berechnungsbasis wurde von `block_fuel − landing_fuel` (inkl. Taxi-
+    /// out, bis v0.12.3) auf den Trip-Burn korrigiert — jetzt identisch zu
+    /// `LandingRecord.fuel_efficiency_pct` und `sub_scores[fuel]`.
     pub fuel_efficiency_pct: Option<f32>,
     // v0.7.17 (B-015d): OFP-Plan-Werte mitschicken damit die Webapp
     // den Loadsheet-Sub-Score genauso berechnen kann wie der Pilot-
@@ -954,6 +949,35 @@ pub struct TouchdownAccidentOverridePayload {
     pub previous_confidence: Option<String>,
 }
 
+/// v0.12.4 (Spec docs/spec/v0.12.4-score-consistency.md, LE4): nachgelagertes
+/// Finalisierungs-Event. `touchdown_complete` geht ~9 s nach dem Aufsetzen
+/// raus, `rollout_distance_m` ist dort ein Mitten-im-Ausrollen-Snapshot.
+/// Sobald der Rollout finalisiert ist (~40 kt / Heading-Turn-off), schickt
+/// der Client dieses Event mit dem FINALEN Wert nach; der Recorder patcht
+/// damit nur das Rohfeld der Touchdown-Zeile — KEIN Score-Recompute, KEINE
+/// Verzögerung von `touchdown_complete`/Live-Pushes.
+#[derive(Clone, Debug, Serialize)]
+pub struct TouchdownRolloutFinalizedPayload {
+    /// Event-Zeitstempel (Finalisierungs-Moment), ms seit Epoch.
+    pub ts: i64,
+    /// PIREP-ID — grenzt die Touchdown-Zeile(n) auf den Flug ein.
+    pub pirep_id: String,
+    /// Touchdown-Zeitstempel (`landing_at`, ms seit Epoch) — identisch
+    /// zum `ts`-Feld des `TouchdownPayload` dieses Touchdowns. Der Recorder
+    /// patcht damit GENAU die zugehörige Touchdown-Zeile, nicht alle Zeilen
+    /// des PIREPs (wichtig bei Touch-and-Go / Stop-and-Go — jeder Touchdown
+    /// hat seinen eigenen Rollout).
+    pub touchdown_at: i64,
+    /// Finale Ausrollstrecke Touchdown→Rollout-Ende in Metern.
+    pub rollout_distance_m: f64,
+    /// Welcher Trigger die Finalisierung ausgelöst hat — Diagnose.
+    /// `"exit_speed"` | `"full_stop"` | `"turned_off_runway"`. Optional:
+    /// nach einem Client-Neustart mitten im Finalisierungs-Fenster ist der
+    /// Grund nicht mehr bekannt (transient) — das Event geht trotzdem raus.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finalize_reason: Option<String>,
+}
+
 enum Cmd {
     Position(Box<PositionPayload>),
     Phase(PhasePayload),
@@ -961,16 +985,46 @@ enum Cmd {
     Takeoff(Box<TakeoffPayload>),
     Touchdown(Box<TouchdownPayload>),
     Pirep(Box<PirepPayload>),
+    /// v0.12.5 (Spec v0.12.5-divert-and-manual-pirep.md, LE1): vorab-
+    /// serialisiertes PIREP-Payload. Der Filing-Refactor baut das
+    /// Payload einmal als JSON (`build_pirep_payload` → `serde_json::Value`)
+    /// und nutzt diesen Pfad für ALLE 4 Filing-Wege — inkl. dem Queue-
+    /// Worker, der nur die persistierte JSON-Form besitzt.
+    PirepJson(Box<serde_json::Value>),
     TouchdownAccidentOverride(Box<TouchdownAccidentOverridePayload>),
+    TouchdownRolloutFinalized(Box<TouchdownRolloutFinalizedPayload>),
     Shutdown,
+}
+
+/// v0.13.0 Stream F (Slice 6) — Integrity-Flag-Event vom Recorder.
+/// Wird live published auf `aeroacars/<va>/<pilot>/integrity_flag` und
+/// vom Client konsumiert für DATA-INTEGRITY-Banner + Resume-Policy.
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct IntegrityFlagEvent {
+    pub session_id: i64,
+    pub session_effective_severity: String,
+    pub flag: serde_json::Value,
 }
 
 #[derive(Clone)]
 pub struct Handle {
     tx: mpsc::Sender<Cmd>,
+    /// v0.13.0: optional Broadcast-Receiver für Integrity-Flag-Events.
+    /// Wird per `take_integrity_rx()` einmalig konsumiert.
+    integrity_rx: Arc<tokio::sync::Mutex<Option<mpsc::UnboundedReceiver<IntegrityFlagEvent>>>>,
 }
 
 impl Handle {
+    /// v0.13.0 Slice 6: Konsumiert den einmaligen Receiver für
+    /// Integrity-Flag-Events vom Recorder. Caller (Tauri-Main) ruft
+    /// das genau einmal nach `connect()` und forwarded die Events
+    /// als Tauri-Events an die React-UI.
+    ///
+    /// Returns None wenn der Receiver bereits genommen wurde.
+    pub async fn take_integrity_rx(&self) -> Option<mpsc::UnboundedReceiver<IntegrityFlagEvent>> {
+        self.integrity_rx.lock().await.take()
+    }
+
     pub fn position(&self, snap: &SimSnapshot, meta: &FlightMeta, phase: FlightPhase) {
         let payload = PositionPayload {
             ts: snap.timestamp.timestamp_millis(),
@@ -1121,6 +1175,24 @@ impl Handle {
         });
     }
 
+    /// v0.12.5 (LE1): publisht ein bereits als JSON serialisiertes
+    /// PIREP-Payload aufs `pirep`-Topic. Gleiches Wire-Format wie
+    /// `pirep()` — der Recorder sieht keinen Unterschied. Genutzt vom
+    /// Filing-Refactor (`finalize_filed_pirep`) für alle Filing-Pfade.
+    pub fn pirep_json(&self, payload: serde_json::Value) {
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = tokio::time::timeout(
+                Duration::from_millis(500),
+                tx.send(Cmd::PirepJson(Box::new(payload))),
+            )
+            .await
+            {
+                warn!("dropping pirep_json publish: {e}");
+            }
+        });
+    }
+
     /// v0.7.19 GAF-707 (QS-R2 Finding 1): Korrektur-Publish nach Pilot-
     /// Override im Flight-End-Dialog. Recorder/VPS aktualisiert den
     /// bereits persistierten Touchdown-Row entsprechend.
@@ -1137,6 +1209,26 @@ impl Handle {
             .await
             {
                 warn!("dropping touchdown_accident_override publish: {e}");
+            }
+        });
+    }
+
+    /// v0.12.4 (Spec LE4): Publish des FINALEN `rollout_distance_m` nach
+    /// Rollout-Finalisierung (~40 kt / Heading-Turn-off). Der Recorder patcht
+    /// damit nur das Anzeige-/Forensik-Rohfeld der Touchdown-Zeile.
+    pub fn touchdown_rollout_finalized(
+        &self,
+        payload: TouchdownRolloutFinalizedPayload,
+    ) {
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = tokio::time::timeout(
+                Duration::from_millis(500),
+                tx.send(Cmd::TouchdownRolloutFinalized(Box::new(payload))),
+            )
+            .await
+            {
+                warn!("dropping touchdown_rollout_finalized publish: {e}");
             }
         });
     }
@@ -1207,15 +1299,50 @@ pub fn start(cfg: MqttConfig) -> Result<Handle> {
 
     let (client, mut eventloop) = AsyncClient::new(opts, CMD_BUFFER);
 
+    // v0.13.0 Stream F (Slice 6): Unbounded mpsc für Integrity-Flag-Events
+    // vom Broker. Hat Eigenrate-Begrenzung (Recorder published nur bei
+    // tatsächlichen Flags — < 1/min im normalen Cruise).
+    let (integrity_tx, integrity_rx) = mpsc::unbounded_channel::<IntegrityFlagEvent>();
+    let integrity_topic = format!("aeroacars/{}/{}/integrity_flag", cfg.va_prefix, cfg.pilot_id);
+    let subscribe_client = client.clone();
+    let subscribe_topic = integrity_topic.clone();
+
     let _drive = tokio::spawn(async move {
+        let mut subscribed = false;
         loop {
             match eventloop.poll().await {
                 Ok(Event::Incoming(Packet::ConnAck(_))) => {
                     info!("MQTT CONNACK received");
+                    if !subscribed {
+                        match subscribe_client.subscribe(&subscribe_topic, QoS::AtLeastOnce).await {
+                            Ok(()) => {
+                                info!(topic = %subscribe_topic, "subscribed to integrity_flag topic");
+                                subscribed = true;
+                            }
+                            Err(e) => {
+                                warn!("integrity_flag subscribe failed: {e}");
+                            }
+                        }
+                    }
+                }
+                Ok(Event::Incoming(Packet::Publish(publish))) => {
+                    if publish.topic == subscribe_topic {
+                        match serde_json::from_slice::<IntegrityFlagEvent>(&publish.payload) {
+                            Ok(evt) => {
+                                if integrity_tx.send(evt).is_err() {
+                                    debug!("integrity_flag receiver dropped — discarding");
+                                }
+                            }
+                            Err(e) => {
+                                warn!("integrity_flag JSON decode failed: {e}");
+                            }
+                        }
+                    }
                 }
                 Ok(_) => {}
                 Err(e) => {
                     warn!("MQTT poll error: {e} — backing off 5 s");
+                    subscribed = false;  // re-subscribe on reconnect
                     tokio::time::sleep(Duration::from_secs(5)).await;
                 }
             }
@@ -1266,9 +1393,17 @@ pub fn start(cfg: MqttConfig) -> Result<Handle> {
                 Cmd::Takeoff(p) => publish_json(&pub_client, &cfg_for_pub.topic("takeoff"), &p, QoS::AtLeastOnce, true).await,
                 Cmd::Touchdown(p) => publish_json(&pub_client, &cfg_for_pub.topic("touchdown"), &p, QoS::AtLeastOnce, false).await,
                 Cmd::Pirep(p) => publish_json(&pub_client, &cfg_for_pub.topic("pirep"), &p, QoS::AtLeastOnce, false).await,
+                Cmd::PirepJson(p) => publish_json(&pub_client, &cfg_for_pub.topic("pirep"), &p, QoS::AtLeastOnce, false).await,
                 Cmd::TouchdownAccidentOverride(p) => publish_json(
                     &pub_client,
                     &cfg_for_pub.topic("touchdown_accident_override"),
+                    &p,
+                    QoS::AtLeastOnce,
+                    false,
+                ).await,
+                Cmd::TouchdownRolloutFinalized(p) => publish_json(
+                    &pub_client,
+                    &cfg_for_pub.topic("touchdown_rollout_finalized"),
                     &p,
                     QoS::AtLeastOnce,
                     false,
@@ -1285,7 +1420,10 @@ pub fn start(cfg: MqttConfig) -> Result<Handle> {
         debug!("MQTT cmd loop exiting");
     });
 
-    Ok(Handle { tx })
+    Ok(Handle {
+        tx,
+        integrity_rx: Arc::new(tokio::sync::Mutex::new(Some(integrity_rx))),
+    })
 }
 
 async fn publish_json<T: Serialize>(client: &AsyncClient, topic: &str, payload: &T, qos: QoS, retain: bool) {
